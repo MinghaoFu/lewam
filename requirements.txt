@@ -144,10 +144,9 @@ requests==2.34.2
 requests-cache==1.3.2
 rich==15.0.0
 richuru==0.1.1
-# Editable install with no version control (robomimic==0.5.0)
--e /var/lib/docker/data/minghao_home/workspace/robomimic
-# Editable install with no version control (robosuite==1.5.1)
--e /var/lib/docker/data/minghao_home/workspace/robosuite
+# robomimic==0.5.0 + robosuite==1.5.1 are editable installs — ONLY needed for robomimic tasks.
+# Install them separately from their source per ONBOARDING.md §5 (the old absolute -e paths
+# were removed so `pip install -r requirements.txt` works on any machine).
 safetensors==0.8.0
 scikit-learn==1.7.2
 scipy==1.15.3
