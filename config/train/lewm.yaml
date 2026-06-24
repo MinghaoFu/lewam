@@ -1,0 +1,89 @@
+defaults:
+  - _self_
+  - launcher: local
+  - data: pusht
+  - model: lewm
+
+output_model_name: lewm
+subdir: ${hydra:job.id}
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+embed_dim: 192
+history_size: 3
+
+trainer:
+  max_epochs: 100
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024
+
+# GIP step 1: optional Intention predictor (single-task next-action policy).
+# enabled=false -> vanilla LeWM, byte-identical to the original setting.
+action_pred:
+  enabled: false        # master switch (the one config that controls the type of setting)
+  w_act: 1.0            # weight on decoded raw-action MSE
+  w_intent: 0.0         # weight on intention/act_emb MSE (JEPA-style)
+  detach_target: true   # stop-grad on the act_emb target (anti-collapse)
+  detach_decoder: false # true -> action_decoder is a detached readout (no grad to latents/act_emb)
+  ema_target: false     # true -> intent_loss target = EMA(momentum) action encoder (BYOL/I-JEPA); default OFF = byte-identical
+  ema_tau: 0.99         # EMA momentum for action_encoder_ema (only used when ema_target=true)
+  sigreg_act: false     # optional SIGReg on action embeddings (anti-collapse)
+  head: mse             # action decoder: mse (deterministic MLP) | gmm | diffusion
+  n_modes: 5            # gmm: number of mixture components
+  diff_steps: 50        # diffusion: number of DDPM denoising steps
+  # --- goal-conditioned policy (mode 2); default off -> existing behaviour byte-identical ---
+  goal_conditioned: false  # true -> head also takes z_goal (history-conditioned forward GC policy, NOT IDM); wraps data w/ goal sampling
+  hindsight_max_k: 50      # hindsight goal offset ~ Uniform[1, this] obs-steps ahead (clamped to episode end)
+  goal_dropout: 0.0        # zero z_goal per-sample w.p. p -> the SAME head learns the goal-AGNOSTIC policy too (two-setting WAM / BESO CFG)
+  # --- OURS GC head: AdaLN-Zero horizon conditioning (reuses gcidm machinery); default OFF = byte-identical ---
+  horizon_conditioned: false  # true -> condition the intention embedding on the remaining horizon via AdaLN-Zero (the SAME hook GC-IDM uses)
+  horizon_H_max: 50           # H_max for min(h,H_max)/H_max normalization; MUST match the GC-IDM arm (50) for a fair comparison
+  # --- SMWM (2606.20104) inverse-dynamics ANTI-COLLAPSE term; default OFF (w_inv=0) = byte-identical ---
+  w_inv: 0.0                  # weight on L_inv = ||h([z_tau;z_{tau+1}]) - a_tau||^2; >0 builds inverse_model + adds the term (can REPLACE SIGReg via loss.sigreg.weight=0)
+  inv_mode: dense             # dense (default; ALL consecutive latent pairs in the window) | last (SMWM-style single transition)
+  inv_target: encoded         # encoded (default; z_{tau+1} = encoded next latent) | predicted (z_{tau+1} = FDM rollout zhat_{t+1}=predict(z_t,a_t), the A8/cycle variant)
+
+
+# Proprio-as-alignment (TC-WM InfoNCE): align a latent subspace to the raw proprio at
+# train time only (no inference-time proprio input). enabled=false -> no effect.
+proprio_align:
+  enabled: false        # master switch
+  align_dim: 64         # leading dims of the latent used for alignment
+  temperature: 0.1      # InfoNCE softmax temperature
+  reg: 1.0e-4           # L2 reg on the alignment projection
+  weight: 1.0           # weight on the alignment loss in the total
+
+init_from: null         # optional pretrained LeWM weights.pt to init encoder/predictor
+
+# Pretrain-benefit / head-probe knob: false (default) = end-to-end, the encoder is
+# LEARNABLE (OUR LeWAM setting); true = freeze the WM trunk
+# (encoder/projector/predictor/pred_proj/action_encoder) and train ONLY the intention
+# head + decoder. Consumed in train.py via cfg.get(freeze_wm). Default false ->
+# behaviour byte-identical; exposed here so it overrides as `freeze_wm=true`
+# (NOT `+freeze_wm=true`), one flag <-> one setting.
+freeze_wm: false

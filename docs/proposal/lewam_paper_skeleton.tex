@@ -1,0 +1,88 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\newcommand{\todo}[1]{{\color{red}[TODO: #1]}}
+\title{\textbf{LeWAM}: A Latent World-Action Model\\ \large When does latent world-model planning help for manipulation?}
+\author{Minghao Fu \quad \ldots \quad Randall Balestriero}
+\date{Draft skeleton --- \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study \emph{when} a latent world model can plan for contact-rich manipulation. We introduce \textbf{LeWAM}, a latent world-action model that augments a JEPA latent world model with a jointly trained, history-conditioned action pathway, yielding a single model that both predicts latent dynamics and proposes actions. In contrast to the dominant world-action models---whether video-generative (DreamZero) or latent (Being-H0.7)---which learn to \emph{avoid} test-time search and amortize planning into one forward pass, LeWAM deliberately retains short-horizon planning and asks \emph{when it helps}. Our central result is an analysis of when latent world-model planning helps: short-horizon CEM against a goal-image latent cost succeeds on goal-reaching tasks where the goal encodes a large, visible, data-supported state change (OGBench-Cube, Push-T, Reacher), but collapses to near-zero on contact-rich robomimic (Lift/Can/Square), where planning fails for two distinct reasons we separate with probes: on Lift the success variable (grasp) is visually subdominant in a single frame, while on Can/Square the latent does see grasp but the task is multi-stage and a flat goal-image cost cannot decompose it. We show that a history / past-action-conditioned behavior-cloning pathway recovers this grasp state and far outperforms online planning on contact. Through a multi-training-seed study we further find that, at convergence, the action-head objective (detached vs.\ grounded decoder, raw-action vs.\ embedding-target, anti-collapse regularization) does not move success rate beyond training-run noise---a cautionary negative result. LeWAM's contribution is therefore the per-family planning analysis and the history-conditioned action pathway, not a state-of-the-art success rate.
+\end{abstract}
+
+\section{Introduction}
+\textbf{From behavior cloning to world-action models.} \todo{1 para: VLA/BC map obs$\to$action with no explicit dynamics; the field is moving to world-action models (WAMs) that jointly model world + action, giving a forward model to plan/verify with. Two flavors: video-generative (DreamZero~\cite{dreamzero}) and latent (the LeWM~\cite{lewm} lineage). LeWAM is the latent WAM.}
+
+\textbf{The question.} Latent world models plan by sampling-based search (CEM/MPC) against a latent goal cost. This works on some tasks and fails on others; \emph{when, and why?} \todo{frame the per-family question as the paper's spine.}
+
+\textbf{Contributions.}
+\begin{itemize}
+  \item \textbf{A per-family analysis of latent WM-planning.} We show CEM planning succeeds on goal-reaching/geometry tasks and collapses to $\approx 0$ on contact-rich robomimic, and we identify the mechanism: the goal-image latent cost rewards the task only when the goal encodes a large, visible, data-supported state change (\S\ref{sec:perfamily}).
+  \item \textbf{A history-conditioned action pathway} that far outperforms online planning on all contact tasks; on Lift it provably recovers grasp state that a single frame exposes only weakly (probe AUC $0.82$ vs $0.99$ from history), while on multi-stage Can/Square it supplies the sequential execution a flat planner lacks (\S\ref{sec:history}).
+  \item \textbf{An honest multi-training-seed account}: at convergence the action-head objective does not change success rate beyond training-run noise; we make no SOTA-SR claim and instead position on mechanism and analysis (\S\ref{sec:negative}).
+  \item \textbf{The LeWAM reframe}: a JEPA world model and its policy head as a single latent world-action model, the lightweight latent counterpart to video-generative WAMs.
+\end{itemize}
+
+\input{related_work.tex}
+
+\section{Method: LeWAM}\label{sec:method}
+\textbf{Latent and dynamics.} \todo{encoder (DINOv2/ViT) $\to z$; JEPA predictor for $z_{t+1}$ with SIGReg (isotropy $\Rightarrow$ plannable); decoder-free.}\\
+\textbf{Action pathway.} \todo{autoregressive intention head on $(z_{\le t}, a_{<t})$ $\to$ action-embedding $\to$ decoder $\to$ raw action; jointly trained with the WM loss. Multitask: frozen-CLIP task token; padded+masked action dims for cross-embodiment.}\\
+\textbf{Inference modes.} history-BC / intuition-guided / CEM-planning, all on one latent. \todo{equations for the loss: $\mathcal{L}=\mathcal{L}_{\text{pred}}+\lambda\,\mathcal{L}_{\text{sigreg}}+w_{\text{intent}}\mathcal{L}_{\text{intent}}+w_{\text{act}}\mathcal{L}_{\text{act}}$.}
+
+\section{Experiments}
+\textbf{Setup.} \todo{LeWM latent; robomimic Lift/Can/Square (image, PH, 200 demos) + OGBench-Cube/Push-T/Reacher/Two-Room. Eval: histbc / guided / CEM-planning, $N{=}50$, 3 seeds; per-task budgets lift100/can240/square320.}
+
+\subsection{Planning is per-family}\label{sec:perfamily}
+\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccc|ccc@{}}
+\toprule
+& \multicolumn{4}{c|}{goal-reaching (works)} & \multicolumn{3}{c}{robomimic (contact)} \\
+CEM-planning SR & Cube & Push-T & Two-Room & Reacher & Lift & Can & Square \\
+\midrule
+LeWAM (latent CEM) & 76 & 80 & 90 & 88 & \textbf{0} & \textbf{0} & \textbf{0} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\todo{single-seed $N{=}50$ (3-seed from converging goal-reaching arms). Cube progression: $68$ (LeWM repro) $\to 78$ (planning) $\to 88$ (intuition-guided). GC-IDM~\cite{gcidm} reference on the same envs for context.}
+\textbf{Mechanism.} Both cube and robomimic are grasp tasks under an identical eval, so the contrast is not ``push vs.\ grasp.'' On cube the goal-image shows the object \emph{displaced}, so reducing latent goal-cost requires grasping and carrying; on robomimic-lift the goal is the cube a few cm higher, visually swamped by arm pose, so CEM matches pose and skips the grasp. The failure has \emph{two distinct causes} across the contact family. On \textbf{Lift}, the success variable (grasp of a small cube) is only weakly exposed in a single frame---a probe decodes grasp state at AUC $0.82$ versus $0.99$ from short history (\S\ref{sec:history})---so CEM matches arm pose and skips the grasp. On \textbf{Can/Square} the single-frame latent \emph{already} decodes grasp/lift well (probe $0.96$/$0.999$), so the cause is not perception but \textbf{multi-stage structure}: a flat horizon-$H$ goal-image cost cannot decompose approach$\to$grasp$\to$transport$\to$place, the regime hierarchical planners~\cite{worlddp} target. Demonstrations are also narrow ($200$ vs $\sim$1M transitions). \todo{figure: probe AUC per task (Lift 0.82 vs Can/Square 0.96/0.999); ablate aligned-goal robomimic CEM (still $\approx 0$).}
+
+\subsection{History-conditioned BC recovers contact state}\label{sec:history}
+\begin{center}\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+robomimic (image, PH) & Lift & Can & Square \\
+\midrule
+LeWAM history-BC ($N{=}50$, 3-seed) & 93.3 & 70.7 & 61.3 \\
+LeWAM CEM-planning & 0 & 0 & 0 \\
+LDP~\cite{ldp} (latent diffusion planner) & 69 & 70 & 46 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\todo{detach=TRUE converged ckpts; the lift/can/square 3-seed shown is EVAL-seed on one trained model (train-seed robustness per \S\ref{sec:negative}); we beat LDP on Square. Mechanism is task-dependent: on \textbf{Lift} history recovers grasp state a single frame under-exposes (probe AUC $0.82$ single-frame $\to$ $0.99$ latent-history $\to$ $0.999$ full $[z,a]$), lifting post-grasp $P(\text{success}\,|\,\text{grasp})$ from $76$ to $99$; on \textbf{Can/Square} the single frame already decodes grasp ($0.96$/$0.999$), so history-BC instead supplies the sequential multi-stage execution flat CEM cannot.}
+
+\subsection{The action-head objective is within training noise}\label{sec:negative}
+\begin{center}\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+can, $N{=}50$ & per training run & spread (all runs) \\
+\midrule
+detach=TRUE (embedding-intuition) & 74 / 72 / 76 $=$ \textbf{74.0} & \{70.7, 80, 74, 72, 76\} \\
+solveact (raw action, $w_{\text{intent}}{=}0$) & 70 / 70 $=$ \textbf{70.0} & \{76.7, 70, 70\} \\
+detach=FALSE / anti-collapse (SIGReg) & \multicolumn{2}{c}{also $\sim$72, within the same band} \\
+\bottomrule
+\end{tabular}
+\end{center}
+The variants are \textbf{statistically tied ($\sim$72$\pm$5)}: the $\sim$10-point training-run variance swamps the $4$--$7$-point effects that single runs showed. Earlier ``solveact wins'' / ``\texttt{intent\_loss} hurts'' headlines were single-training-run artifacts. We additionally verify that \texttt{act\_emb} does not collapse (its std \emph{grows} to $1.28$ without regularization) and that anti-collapse SIGReg does not help ($80$ vs.\ $76$). We therefore report this as a negative result and caution that single-training-run A/Bs (and eval-seed-only ``3-seed'') mislead.
+
+\section{Discussion}
+\todo{Limitations: contribution is analysis + mechanism, not SR. Next: hierarchical subgoal-LeWAM (WM plans subgoal latents, history policy executes) to attack the contact planning$=0$ regime (WorldDP/LDP-style); the two-part diagnosis motivates it precisely---subgoaling directly targets the \emph{multi-stage} failure on Can/Square (where the latent already sees grasp), while the \emph{perception} failure on Lift needs richer per-frame features instead. Open question: does subgoaling beat flat history-BC on the multi-stage tasks.}
+
+\bibliographystyle{plain}
+\bibliography{lewam_refs}
+\end{document}

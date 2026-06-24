@@ -1,0 +1,144 @@
+\documentclass[aspectratio=169,9pt]{beamer}
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\title[LeWAM]{LeWAM: a Latent World-Action Model}
+\subtitle{joint (state, action) prediction --- the WAM sibling to LeWM}
+\author{Minghao Fu}
+\institute{\small notes for discussion with R.\ Balestriero}
+\date{\today}
+
+\begin{document}
+\frame{\titlepage}
+
+\begin{frame}{From VLA / BC to World--Action Models (WAM)}
+\begin{itemize}
+  \item VLA / BC: observation $\to$ action --- imitate, no explicit dynamics.
+  \item \textbf{WAM}: jointly model world \emph{and} action (predict next state \emph{and} action) $\Rightarrow$ a forward model you can plan with / verify against, not just imitate.
+  \item Community shift 2024$\to$26: explicit world dynamics over BC-only (the trend you flagged).
+  \item \textbf{LeWAM} $=$ LeWM's JEPA latent $+$ a jointly-trained action pathway. ``All-in, all-out'' state--action; the \emph{latent} WAM in your Le-family.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{The WAM / latent-planner landscape (the fast-moving part)}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+family & examples (arXiv) & how it gets actions \\
+\midrule
+pure CEM/MPC, no prior & LeWM 2603.19312, DINO-WM 2411.04983, V-JEPA2-AC 2506.09985 & sample + score; no learned proposal \\
+policy-prior warm-starts search & TD-MPC2 2310.16828, PiJEPA 2603.25981, Newt 2511.19584 & learned $\pi$ seeds MPPI/CEM \\
+amortize / replace search & GC-IDM 2605.08732 (on LeWM latent!), TD-JEPA 2510.00739 & $(z,z_g,h)\to a$, no search \\
+\textbf{search-free WAM} & \textbf{DreamZero 2602.15922} (video), \textbf{Being-H0.7 2605.00078} (latent) & direct action, \emph{no} test-time search \\
+hierarchical / diffusion-exec & LDP 2504.16925, WorldDP 2606.08775, FF-JEPA 2606.09311 & WM picks subgoals, policy executes \\
+``repr.\ $>$ planning'' challenge & MR.Q 2606.05555 & model-free + aux predictive losses \\
+\bottomrule
+\end{tabular}
+\vspace{0.4em}
+\par\footnotesize Axes to keep in mind: \textbf{search $\leftrightarrow$ amortize}, \textbf{flat $\leftrightarrow$ hierarchical}, \textbf{pixel/video $\leftrightarrow$ latent}.
+\end{frame}
+
+\begin{frame}{The WAM field is going \emph{search-free} --- LeWAM asks ``should we still plan?''}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\textbf{Search-free WAMs (the trend)}
+\begin{itemize}\footnotesize
+  \item \textbf{DreamZero}: video diffusion, $p(\text{video},a)$, physics from internet-scale video.
+  \item \textbf{Being-H0.7}: a \emph{latent} WAM (our exact term!), 200k h egocentric video, future-aware latent workspace.
+  \item Both \emph{amortize planning into one forward pass} --- no test-time search / rollout.
+\end{itemize}
+\end{column}
+\begin{column}{0.46\textwidth}
+\textbf{LeWAM (contrarian)}
+\begin{itemize}\footnotesize
+  \item Light JEPA latent ($\sim$$25$\,GB), joint $(z_{t+1},a_t)$.
+  \item \emph{Keeps} a short-horizon search loop + history/past-action policy.
+  \item Asks: \emph{when is search worth keeping?}
+\end{itemize}
+\end{column}
+\end{columns}
+\vspace{0.4em}
+\textbf{Positioning.} LeWAM is \emph{not} ``the latent WAM'' (Being-H0.7 owns that at scale). It is the \textbf{per-family analysis} of when latent WM-planning pays off (geometry: yes; contact: no $\Rightarrow$ fall back to history-BC) --- the question the search-free WAMs sidestep by never searching.
+\end{frame}
+
+\begin{frame}{LeWAM architecture (concise)}
+\begin{itemize}
+  \item Encoder (DINOv2/ViT) $\to$ latent $z$; WM predictor for $z$-dynamics, SIGReg-regularized $\Rightarrow$ isotropic, plannable.
+  \item Action / intention head: autoregressive on latent history $z_{\le t}$ + past actions $a_{<t}$ $\to$ action-embedding $\to$ decoder $\to$ raw action.
+  \item Frozen-CLIP task token (multitask); padded+masked action dims (cross-embodiment).
+  \item One latent, three eval modes: history-BC \,/\, intuition-guided \,/\, CEM-planning.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Finding 1 --- planning is \emph{per-family}}
+\begin{itemize}
+  \item WM-planning (CEM) \textbf{works} on geometry / goal-reaching: OGBench-Cube $68\!\to\!78\!\to\!88$, Push-T, Reacher, Two-Room.
+  \item \textbf{Collapses to $\approx 0$} on contact-rich robomimic Lift/Can/Square.
+  \item \textbf{Mechanism} (verified): both are grasp tasks, identical eval --- so \emph{not} ``push vs grasp.'' On Cube the goal-image shows the object \emph{displaced} $\Rightarrow$ CEM must grasp+carry to lower latent cost. On Lift the goal is the cube $+$few cm, \emph{swamped by arm pose} $\Rightarrow$ CEM matches pose, skips the grasp; grasp only weakly exposed in one frame (probe $0.82\!\to\!0.99$ with history). On \textbf{Can/Square} the latent \emph{does} see grasp ($0.96$/$0.999$) but the task is \emph{multi-stage} (approach$\to$grasp$\to$place) so flat CEM still fails. (Data: cube $\sim$1M vs robomimic 200 demos.)
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Finding 2 --- history-BC $\gg$ CEM on contact}
+\begin{itemize}
+  \item On robomimic, history / past-action conditioned BC \textbf{recovers grasp state}: post-grasp $P(\text{success}\,|\,\text{grasp})\ 76\!\to\!99$.
+  \item history-BC: Lift $\sim$95, Can $\sim$48--72, Square $\sim$60s\ \ vs\ \ online CEM $=0$.
+  \item The action pathway, conditioned on \emph{past actions}, carries contact tasks where single-frame WM planning cannot.
+  \item Closest published latent planner LDP $0.69/0.70/0.46$; we beat it on Square.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Finding 3 (honest negative) --- the action-head A/B is within noise}
+\begin{itemize}
+  \item detach=TRUE / FALSE / solveact (raw action) / SIGReg-on-act-emb: all \textbf{tied $\approx 72\pm5$ on Can}, $N{=}50$, 3 \emph{training} seeds.
+  \item The $\sim$10-pt \textbf{training-run variance swamps} the 4--7-pt effects single runs showed.
+  \item Lesson: multi-\emph{train}-seed is mandatory; single-run A/Bs (and eval-seed-only ``3-seed'') mislead. We caught a false ``solveact wins / intent\_loss hurts'' headline before publishing.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Contribution \& positioning}
+\begin{itemize}
+  \item LeWAM $=$ unified JEPA \emph{latent} world-action model. Contributions:
+  \begin{enumerate}
+    \item the per-family \emph{``when does WM-planning help''} analysis;
+    \item history / past-action-conditioned action pathway recovering contact state (history-BC $\gg$ CEM);
+    \item the WAM reframe + honest variance accounting (the latent counterpart to DreamZero's video WAM).
+  \end{enumerate}
+  \item \textbf{Not} a fine action-head SR win --- that washed out. The story is mechanism + analysis + the history-conditioned wedge.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Differentiation (related work, head-on)}
+\footnotesize
+\begin{itemize}
+  \item \textbf{DreamZero} (video WAM, no search): LeWAM $=$ light latent + the planning analysis it sidesteps.
+  \item \textbf{Newt / PiJEPA} (JEPA priors, Markovian/raw-action): LeWAM $=$ history+past-action conditioned.
+  \item \textbf{GC-IDM} (amortize on LeWM latent --- must-beat): LeWAM $=$ warm-start-\emph{then}-refine, not replace search.
+  \item \textbf{WorldDP / LDP} (hierarchical + diffusion exec): they \emph{assume} flat planning fails; we \emph{map when} it fails.
+  \item \textbf{MR.Q} (repr.\ $>$ planning): our action pathway \emph{is} that predictive representation; we restrict planning to where it provably helps.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Next directions}
+\begin{itemize}
+  \item \textbf{Hierarchical subgoal-LeWAM} (WorldDP / LDP style): WM plans subgoal latents, the history policy executes each $\Rightarrow$ attack robomimic planning$=0$ (the per-family limit). Implemented EMA-target + the scaffolding; test next.
+  \item Unified ``$z, a$ interleaved, all-in-all-out'' tokenization (one trunk).
+  \item Open test: does subgoaling beat flat history-BC where a single frame only weakly exposes contact?
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Discussion / asks}
+\begin{itemize}
+  \item Framing \& venue: LeWAM as the latent-WAM showcase (your ``different needs than pure LeWM'').
+  \item Which to push first: the hierarchical-subgoal method, or the per-family planning \emph{analysis} paper?
+  \item Your read on positioning vs the video-WAM wave (DreamZero) --- is the per-family planning story the right headline?
+\end{itemize}
+\vspace{0.8em}
+\centering \footnotesize (numbers to re-pull fresh before presenting: robomimic histbc 3-seed, cube 68/78/88, the Can A/B 74/72/76 $\approx$ 70/70 $=$ tied.)
+\end{frame}
+
+\end{document}

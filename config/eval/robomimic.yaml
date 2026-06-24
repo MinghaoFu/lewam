@@ -1,0 +1,41 @@
+defaults:
+  - launcher: local
+  - solver: cem
+  - _self_
+
+world:
+  env_name: swm/RoboMimic-v0
+  task: Lift
+  num_envs: ${eval.num_eval}
+  max_episode_steps: ???   # set to 2*eval_budget by eval.py
+
+dataset:
+  stats: ${eval.dataset_name}
+  keys_to_cache:
+    - action
+    - proprio
+    - state
+
+seed: 42
+policy: random
+
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5   # frameskip
+
+# evaluation from dataset (reset to a demo state; success = env.is_success()['task'])
+eval:
+  num_eval: 50
+  goal_offset_steps: 25
+  eval_budget: 50
+  img_size: 224
+  dataset_name: lift
+  callables:
+    - method: set_state
+      args:
+        state:
+          value: state
+
+output:
+  filename: robomimic_results.txt

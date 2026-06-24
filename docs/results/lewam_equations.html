@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LeWAM — equations ↔ code, per setting</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:1100px;margin:24px auto;padding:0 18px;color:#1a1a1a;line-height:1.55}
+  h1{font-size:24px;border-bottom:3px solid #34506b;padding-bottom:6px}
+  h2{font-size:19px;background:#34506b;color:#fff;padding:6px 11px;border-radius:4px;margin-top:30px}
+  h3{font-size:16px;color:#b5651d;margin:16px 0 6px}
+  p{margin:8px 0}
+  .blk{border:1px solid #ccd;border-radius:6px;padding:10px 16px;margin:14px 0;background:#fafbfc}
+  .base{border:2px solid #2e7d32;background:#f3faf3}
+  .abl{border-left:5px solid #b5651d;background:#fdf8f3}
+  .notimpl{border-left:5px solid #c62828;background:#fdf3f3}
+  .eq{font-family:"Latin Modern Roman",Cambria,Georgia,serif;font-size:17px;background:#eef3f8;
+      border-left:4px solid #34506b;padding:9px 15px;margin:7px 0;border-radius:4px;overflow-x:auto;white-space:nowrap}
+  .eq i{font-style:italic}
+  .eq.small{font-size:15px}
+  sub,sup{font-size:72%;line-height:0}
+  .grad{color:#1b7a2e;font-weight:700}
+  .stop{color:#c62828;font-weight:700}
+  .op{color:#555}
+  .lbl{font-size:12px;color:#1565c0;font-weight:700;font-family:Menlo,Consolas,monospace;margin:8px 0 2px}
+  pre.code{background:#222834;color:#d6e2f0;padding:10px 13px;border-radius:5px;font-size:12.5px;
+           line-height:1.45;overflow-x:auto;margin:3px 0 6px;font-family:Menlo,Consolas,monospace;white-space:pre}
+  pre.code .cm{color:#7f8da3}
+  pre.code .kw{color:#e0b870}
+  pre.code .hl{color:#7fd1a0;font-weight:700}
+  code{background:#eef1f4;padding:1px 5px;border-radius:3px;font-size:13px;font-family:Menlo,Consolas,monospace}
+  table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13.5px}
+  th,td{border:1px solid #ccd;padding:5px 9px;text-align:left;vertical-align:top}
+  th{background:#eef1f4}
+  .tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:10px;color:#fff;margin-left:6px;vertical-align:middle}
+  .tg-impl{background:#2e7d32}.tg-cfg{background:#1565c0}.tg-no{background:#c62828}
+  .legend{font-size:14px;background:#eef1f4;padding:9px 13px;border-radius:5px}
+  pre.fig{background:#1e2733;color:#d6e2f0;padding:14px;border-radius:6px;overflow-x:auto;font-size:12.5px;line-height:1.4}
+</style>
+</head>
+<body>
+
+<h1>LeWAM — equations ↔ code, per setting</h1>
+<p><b>Source of truth:</b> L40S <code>le-wm-repro</code> — <code>jepa.py</code> (model) + <code>train.py</code> <code>lejepa_forward</code> (loss). Each block pairs the <b>equation</b> with the <b>verbatim code</b> that implements it. <span class="grad">Green</span> = gradient flows; <span class="stop">red sg[·]</span> = stop-gradient.</p>
+
+<div class="legend">
+<b>Notation.</b> <i>x</i><sub>t</sub> frame · <i>z</i><sub>t</sub>=φ(<i>x</i><sub>t</sub>) latent · <i>a</i><sub>t</sub> action · <i>e</i><sub>t</sub>=ψ(<i>a</i><sub>t</sub>) action emb · <i>p</i><sub>t</sub> proprio · <i>g</i>=<i>z</i><sub>goal</sub> · <i>h</i> horizon · τ task vec · <i>F</i>=predict (FDM) · π=action_predictor · <i>D</i>=action_decoder · <i>T</i>=history_size=3 · <i>u</i><sub>t</sub> intention · ẑ,â predicted latent/action.
+</div>
+
+<h2>Data flow</h2>
+<pre class="fig">
+   x_t ─φ─► z_t ──┬─ SIGReg(z)  (anti-collapse)
+                  ├─ F(z_≤t, e_≤t) ─► ẑ_{t+1} ── pred_loss vs z_{t+1}
+   a_t ─ψ─► e_t   └─ π(z_≤t, a_<t [+g][+τ]) ─► u_t ─[AdaLN(h)]─► D ─► â_t
+                        intent_loss: u_t vs sg[e_t]     act_loss: â_t vs a_t
+                        w_cyc:  F(z_≤t, ψ(â_t)) vs sg[z_{t+1}]
+   eval:  PLANNING = CEM over F + cost‖ẑ_T−z_goal‖   ·   GC = intention_rollout(g)   ·   BC = intention_rollout()
+</pre>
+
+<h2>Shared primitives <span class="src">jepa.py</span></h2>
+<div class="blk">
+<h3>Encode</h3>
+<div class="eq"><i>z</i><sub>t</sub> = φ(<i>x</i><sub>t</sub>) = proj( enc(<i>x</i><sub>t</sub>)<sub>[CLS]</sub> ) <span class="op">,&nbsp;</span> <i>e</i><sub>t</sub> = ψ(<i>a</i><sub>t</sub>)</div>
+<div class="lbl">↳ jepa.py:132–145</div>
+<pre class="code">pixels_emb = output.last_hidden_state[:, 0]   <span class="cm"># CLS token</span>
+emb = self.projector(pixels_emb)              <span class="cm"># z_t</span>
+info["emb"] = rearrange(emb, "(b t) d -&gt; b t d", b=b)
+info["act_emb"] = self.action_encoder(info["action"])   <span class="cm"># e_t = ψ(a_t)</span></pre>
+
+<h3>Forward dynamics <i>F</i> (action-conditioned next latent)</h3>
+<div class="eq">ẑ<sub>t+1</sub> = <i>F</i>( <i>z</i><sub>≤t</sub>, <i>e</i><sub>≤t</sub>(+τ), <i>p</i><sub>≤t</sub> )</div>
+<div class="lbl">↳ jepa.py:152–171</div>
+<pre class="code"><span class="kw">def</span> predict(self, emb, act_emb, proprio_emb=None, task_vec=None):
+    <span class="kw">if</span> task_vec <span class="kw">is not</span> None: act_emb = act_emb + task_vec[:, None, :]
+    preds = self.predictor(emb, act_emb, proprio_emb)
+    preds = self.pred_proj(rearrange(preds, "b t d -&gt; (b t) d"))
+    <span class="kw">return</span> rearrange(preds, "(b t) d -&gt; b t d", b=b)            <span class="cm"># ẑ_{t+1}</span></pre>
+
+<h3>Action head π (history-conditioned; optional goal / horizon / detach)</h3>
+<div class="eq">ã<sub>&lt;t</sub> = <i>e</i><sub>&lt;t</sub> (<span class="stop">0</span> if ¬use_action_history) (+τ)(+<i>g</i>) <span class="op">;</span> <i>u</i><sub>t</sub> = π(<i>z</i><sub>≤t</sub>, ã<sub>&lt;t</sub>) <span class="op">;</span> â<sub>t</sub> = <i>D</i>(dec_in)</div>
+<div class="lbl">↳ jepa.py:189–213</div>
+<pre class="code"><span class="kw">if not</span> self.use_action_history:
+    past_act_emb = torch.zeros_like(past_act_emb)        <span class="cm"># A2: state-only</span>
+<span class="kw">if</span> task_vec <span class="kw">is not</span> None: past_act_emb = past_act_emb + task_vec[:, None, :]
+<span class="kw">if</span> goal_emb <span class="kw">is not</span> None: past_act_emb = past_act_emb + goal_emb[:, None, :]   <span class="cm"># +g</span>
+out = self.action_predictor(emb, past_act_emb, proprio_emb)
+intention = out <span class="kw">if</span> proprio_emb <span class="kw">is</span> None <span class="kw">else</span> out[1]            <span class="cm"># u_t</span>
+<span class="kw">if</span> self.horizon_modulator <span class="kw">is not</span> None <span class="kw">and</span> horizon <span class="kw">is not</span> None:
+    intention = self.horizon_modulator(intention, horizon)   <span class="cm"># AdaLN(h)</span>
+dec_in = intention.detach() <span class="kw">if</span> detach_decoder <span class="kw">else</span> intention    <span class="cm"># A1 switch</span>
+action = self.action_decoder(rearrange(dec_in, "b t d -&gt; (b t) d"))   <span class="cm"># â_t</span></pre>
+</div>
+
+<h2>BASE MODEL = the method (raw-direct, end-to-end)</h2>
+<div class="blk base">
+<p><b>Config:</b> <code>freeze_wm=false · w_intent=0 · w_act=1 · detach_decoder=false · use_action_history=true · history_size=3 · sigreg λ=0.09 · w_cyc=0 · head=mse</code></p>
+<div class="eq">ℒ = ‖ ẑ<sub>t+1</sub> − <span class="grad"><i>z</i><sub>t+1</sub></span> ‖<sup>2</sup> <span class="op">+</span> λ·SIGReg(<i>z</i>) <span class="op">+</span> <i>w</i><sub>act</sub>·‖ â<sub>t</sub> − <i>a</i><sub>t</sub> ‖<sup>2</sup> <span class="op">&nbsp;&nbsp;(w<sub>intent</sub>=0)</span></div>
+<div class="lbl">↳ train.py:50–52, 116, 125–128</div>
+<pre class="code">output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()     <span class="cm"># tgt NOT detached!</span>
+output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
+output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
+...
+output["act_loss"] = (pred_act - tgt_act).pow(2).mean()      <span class="cm"># raw action</span>
+output["loss"] = (output["loss"]
+    + ap.get("w_intent", 1.0) * output["intent_loss"]        <span class="cm"># ×0 in BASE</span>
+    + ap.get("w_act", 1.0) * output["act_loss"])</pre>
+<table>
+<tr><th>module</th><th>gradient sources</th></tr>
+<tr><td>φ encoder</td><td>pred_loss (both ẑ and <i>z</i>), SIGReg, act_loss (via <i>D</i>→π; decoder not detached)</td></tr>
+<tr><td><i>F</i> · π · <i>D</i></td><td>pred_loss · act_loss · act_loss</td></tr>
+</table>
+<p class="src">⚠ pred_loss does NOT stop-grad <i>z</i><sub>t+1</sub> (train.py:50, no <code>.detach()</code>) — SIGReg replaces the EMA/stop-grad target of BYOL/DINO-WM.</p>
+</div>
+
+<h2>Ablations (each = BASE with ONE change)</h2>
+
+<div class="blk abl">
+<h3>A1 · predict the action EMBEDDING (LeWM-style) <span class="tag tg-cfg">config</span></h3>
+<p><b>Change:</b> <code>w_intent=1</code>, <code>detach_decoder=true</code>.</p>
+<div class="eq">+ <i>w</i><sub>int</sub>·‖ <i>u</i><sub>t</sub> − <span class="stop">sg[<i>e</i><sub>t</sub>]</span> ‖<sup>2</sup> <span class="op">&nbsp;;&nbsp;</span> dec_in = <span class="stop">sg[<i>u</i><sub>t</sub>]</span></div>
+<div class="lbl">↳ train.py:103–104, 127 · jepa.py:209</div>
+<pre class="code"><span class="cm"># train.py</span>
+tgt_act_emb = ctx_act.detach() <span class="kw">if</span> ap.get("detach_target", True) <span class="kw">else</span> ctx_act
+output["intent_loss"] = (intention - tgt_act_emb).pow(2).mean()   <span class="hl"># u_t vs sg[e_t]</span>
+... + ap.get("w_intent", 1.0) * output["intent_loss"]            <span class="hl"># w_intent=1 here</span>
+<span class="cm"># jepa.py</span>
+dec_in = intention.detach() <span class="kw">if</span> detach_decoder <span class="kw">else</span> intention   <span class="hl"># detach_decoder=True</span></pre>
+</div>
+
+<div class="blk abl">
+<h3>A2 · drop the action history (state-only) <span class="tag tg-cfg">config</span></h3>
+<p><b>Change:</b> <code>use_action_history=false</code> ⇒ ã<sub>&lt;t</sub>=0. (§18: helped pusht GC 31→42.)</p>
+<div class="eq"><i>u</i><sub>t</sub> = π( <i>z</i><sub>≤t</sub>, <span class="stop">0</span> [+<i>g</i>] )</div>
+<div class="lbl">↳ jepa.py:189–190</div>
+<pre class="code"><span class="kw">if not</span> self.use_action_history:
+    past_act_emb = torch.zeros_like(past_act_emb)   <span class="hl"># a_&lt;t := 0</span></pre>
+</div>
+
+<div class="blk abl">
+<h3>A3 · Markovian, single-frame <span class="tag tg-cfg">config</span></h3>
+<p><b>Change:</b> <code>history_size=1</code> ⇒ <i>z</i><sub>≤t</sub>=<i>z</i><sub>t</sub> (gcidm-style).</p>
+<div class="eq"><i>u</i><sub>t</sub> = π( <i>z</i><sub>t</sub>, ã<sub>&lt;t</sub> )</div>
+<div class="lbl">↳ train.py:23, 28–29</div>
+<pre class="code">ctx_len = cfg.history_size                <span class="hl"># =1 -&gt; single frame</span>
+ctx_emb = emb[:, :ctx_len]                <span class="cm"># z_≤t becomes z_t</span></pre>
+</div>
+
+<div class="blk abl">
+<h3>A4 · encoder = pretrained DINOv2 <span class="tag tg-cfg">config</span></h3>
+<p><b>Change:</b> φ = DINOv2 (pretrained) vs vit-tiny-192 (scratch). Equations unchanged; only φ's weights/arch. Still end-to-end.</p>
+<div class="lbl">↳ config/train/model/lewm_dinov2.yaml (encoder._target_, pretrained: true)</div>
+</div>
+
+<div class="blk abl">
+<h3>A5 · SIGReg off <span class="tag tg-cfg">config</span></h3>
+<p><b>Change:</b> λ=0.</p>
+<div class="eq">ℒ = ‖ ẑ<sub>t+1</sub> − <i>z</i><sub>t+1</sub> ‖<sup>2</sup> <span class="op">+</span> <i>w</i><sub>act</sub>·‖ â<sub>t</sub> − <i>a</i><sub>t</sub> ‖<sup>2</sup></div>
+<div class="lbl">↳ train.py:52 (lambd = cfg.loss.sigreg.weight → 0)</div>
+<pre class="code">output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]   <span class="hl"># lambd=0 → term off</span></pre>
+</div>
+
+<div class="blk abl">
+<h3>A6 · consistency loss w_cyc on <span class="tag tg-impl">implemented</span></h3>
+<p><b>Change:</b> <code>w_cyc&gt;0</code> (head=mse).</p>
+<div class="eq">+ <i>w</i><sub>cyc</sub>·‖ <i>F</i>( <i>z</i><sub>≤t</sub>, ψ(â<sub>t</sub>) ) − <span class="stop">sg[<i>z</i><sub>t+1</sub>]</span> ‖<sup>2</sup></div>
+<div class="lbl">↳ train.py:138–147</div>
+<pre class="code">_w_cyc = float(ap.get("w_cyc", 0.0))
+<span class="kw">if</span> _w_cyc &gt; 0.0 <span class="kw">and</span> head == "mse" <span class="kw">and</span> pred_act <span class="kw">is not</span> None:
+    a_hat = pred_act                                        <span class="cm"># â_t</span>
+    a_hat_emb = self.model.action_encoder(a_hat)           <span class="cm"># ψ(â_t)</span>
+    _cyc = self.model.predict(ctx_emb, a_hat_emb, ctx_proprio, task_vec=task_vec)
+    cyc_pred = _cyc[0] <span class="kw">if</span> ctx_proprio <span class="kw">is not</span> None <span class="kw">else</span> _cyc
+    output["cyc_loss"] = (cyc_pred - tgt_emb.detach()).pow(2).mean()   <span class="hl"># vs sg[z_{t+1}]</span>
+    output["loss"] = output["loss"] + _w_cyc * output["cyc_loss"]</pre>
+</div>
+
+<div class="blk abl">
+<h3>A7 · action head = diffusion / GMM <span class="tag tg-impl">implemented</span></h3>
+<p><b>Change:</b> <code>head=diffusion|gmm</code> ⇒ <code>decode=false</code>; loss from the multimodal decoder.</p>
+<div class="eq">act_loss = <i>D</i>.loss( dec_in, <i>a</i><sub>t</sub> ) <span class="op">&nbsp;(DDPM / mixture-NLL on <i>u</i><sub>t</sub>)</span></div>
+<div class="lbl">↳ jepa.py:206–208 · train.py:118–124</div>
+<pre class="code"><span class="cm"># jepa.py</span>
+<span class="kw">if not</span> decode: <span class="kw">return</span> intention, None       <span class="cm"># skip point-decode</span>
+<span class="cm"># train.py</span>
+dec_in = intention.detach() <span class="kw">if</span> ap.get("detach_decoder", False) <span class="kw">else</span> intention
+output["act_loss"] = self.model.action_decoder.loss(flat_emb, flat_tgt, w)   <span class="hl"># NLL/DDPM</span></pre>
+</div>
+
+<div class="blk notimpl">
+<h3>A8 · input = predicted ẑ<sub>t+1</sub> (free-running) &nbsp;/&nbsp; A9 · history + predicted ẑ<sub>t+1</sub> <span class="tag tg-no">NOT IMPLEMENTED</span></h3>
+<p>Training conditions π on the <b>encoded</b> history (teacher-forced) — there is NO FDM↔head rollout in the loss. The code proves it: <code>predict_intention</code> is called <b>once</b> on <code>ctx_emb</code>.</p>
+<div class="lbl">↳ train.py:92–95 (the only call site in the loss)</div>
+<pre class="code">intention, pred_act = self.model.predict_intention(
+    ctx_emb, past_act, detach_decoder=ap.get("detach_decoder", False),   <span class="hl"># ctx_emb = ENCODED z_≤t</span>
+    proprio_emb=ctx_proprio, task_vec=task_vec, goal_emb=goal_emb,
+    decode=(head == "mse"), horizon=horizon_norm)        <span class="cm"># no ẑ_{t+1} fed back → A8/A9 need new code</span></pre>
+</div>
+
+<h2>Eval / control settings (same trained model, no retrain)</h2>
+<table>
+<tr><th>setting</th><th>action selection</th><th>equation / code</th></tr>
+<tr><td><b>Planning (CEM)</b></td><td>sample action seqs, roll <i>F</i>, pick min-cost</td><td>cost = ‖ ẑ<sub>T</sub> − <span class="stop">sg[<i>z</i><sub>goal</sub>]</span> ‖<sup>2</sup> <span class="src">rollout/criterion/get_cost</span></td></tr>
+<tr><td><b>GC policy</b> (planning-free)</td><td>one autoregressive pass with the goal</td><td>â = intention_rollout( <i>z</i><sub>≤t</sub>, <i>g</i>, <i>h</i> ) <span class="src">jepa.py:257+</span></td></tr>
+<tr><td><b>BC</b> (goal-agnostic)</td><td>one autoregressive pass, no goal</td><td>â = intention_rollout( <i>z</i><sub>≤t</sub> )</td></tr>
+</table>
+
+<p class="src">Generated from L40S le-wm-repro (jepa.py + train.py), 2026-06-22. Plain HTML/Unicode (no MathJax) + verbatim code snippets.</p>
+
+</body>
+</html>

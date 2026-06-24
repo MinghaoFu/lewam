@@ -1,0 +1,155 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{1.1ex}{0.6ex}
+\titlespacing*{\subsection}{0pt}{0.8ex}{0.4ex}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-3em}\textbf{GIP: Generalized Intuition Pretraining in Padded\\
+Joint-Embedding Predictive Architectures for Multi-Task Control}}
+\author{Minghao Fu}
+\date{\today}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\begin{abstract}
+\noindent
+A world model can control in two ways that rarely meet: by \emph{searching} (model-predictive
+control over imagined rollouts, accurate but slow and high-variance) or by \emph{reacting} (an
+amortized policy, fast but myopic). We propose GIP, a latent world model that carries a fast
+\emph{intuition head}, an amortized action predictor living in the model's own latent space, and
+uses it to guide slow deliberative planning. The intuition proposes a short action sequence that
+warm-starts the planner; the world model then rolls candidates to the goal and selects. Across
+goal-reaching control this intuition-guided planning matches or beats both pure planning and the
+reactive policy, and reaches the planner's ceiling in 4--5$\times$ fewer search iterations. We
+pretrain the intuition jointly across seven heterogeneous tasks inside a single padded
+joint-embedding predictive architecture (JEPA), using per-task action masks, a frozen language
+task token, and a predicted proprioception token. We propose to scale this generalized intuition
+pretraining toward a reusable multi-task control prior.
+\end{abstract}
+
+\section{Motivation}
+A world model affords two modes of control. Model-predictive control, for instance the cross-entropy
+method (CEM) over imagined rollouts, is accurate but pays a search cost at every step and is
+sensitive to how the search is initialized. A reactive policy read out of the model is fast but
+cannot look ahead. These are the fast and slow systems of control. We ask whether one world model
+can hold both: a fast \emph{intuition} that proposes, and a slow deliberation that checks and
+refines. We further ask whether that intuition can be pretrained once across many tasks and reused,
+rather than relearned per task. GIP is our attempt at both.
+
+\section{Method}
+\textbf{Latent world model.} We build on a joint-embedding predictive architecture. An image encoder
+produces a per-frame latent; an autoregressive predictor advances that latent conditioned on an
+action embedding; training minimizes latent consistency (predict the next encoded frame) with a
+sketched-Gaussian variance regularizer that prevents collapse. This is the LeWM base on which
+everything else is mounted.
+
+\textbf{The intuition head.} Alongside the predictor we attach a second autoregressive module, the
+intuition head, that predicts the next action $a_t$ from the latent state history $z_{\le t}$,
+optionally conditioned on the shifted past actions $a_{<t}$. It is trained against both the action
+embedding (a JEPA-style latent target) and a decoded raw action. The head is a fast amortized
+policy: one forward pass, no search.
+
+\textbf{Intuition-guided planning.} At decision time the head rolls out a short proposed action
+sequence. That proposal warm-starts CEM in place of a zero or Gaussian initialization; the world
+model then rolls the candidate sequences to the goal latent and selects the best. One switch yields
+three modes: \emph{reactive} (the head alone), \emph{planning} (search alone, the plain world
+model), and \emph{guided} (the intuition warm-starts search).
+
+\textbf{Generalized pretraining: padded multi-task JEPA.} To pretrain the intuition across tasks with
+different action and proprioception dimensions, we pad every task to a common block and mask the
+invalid dimensions before the action encoder, in the loss, and at decode. Task identity enters as a
+frozen language (CLIP) token, proprioception as a separate predicted token. Task sampling uses a
+temperature $\alpha$ ($p \propto n^{\alpha}$) to balance per-task effective epochs under extreme
+dataset-size skew.
+
+\section{Preliminary results}
+
+\subsection{Intuition-guided planning matches or beats both baselines}
+On goal-reaching control the reactive head alone is weak, plain planning is strong, and guiding the
+planner with the intuition matches or exceeds plain planning while cutting its variance. Table~\ref{tab:modes}
+reports success rate at convergence with the full CEM budget; the guided and planning columns are
+paired over three seeds.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+task & reactive & planning & guided \\
+\midrule
+PushT   & 58   & $64.7\pm6.1$ & $\mathbf{76.7\pm4.2}$ \\
+TwoRoom & 44   & $\mathbf{94.7}$ & $91.3$ \\
+Reacher & 2    & $\mathbf{83.3}$ & $82.7$ \\
+\bottomrule
+\end{tabular}
+\caption{Success rate (\%) on goal-reaching. Guided wins PushT on all three seeds and ties elsewhere.
+The reactive head alone is myopic on goal-reaching (Reacher 2, TwoRoom 44); its value is as a
+\emph{prior for search}, not as a standalone controller.}
+\label{tab:modes}
+\end{table}
+
+The benefit of guiding is robustness, not a higher ceiling: cold planning is high-variance across
+seeds, whereas the guided initialization is tight, and guided reaches the same ceiling in roughly
+4--5$\times$ fewer CEM iterations. On an aligned pixel manipulation task (OGBench Cube) the ordering
+is sharper: guided $88 >$ planning $78 >$ the un-finetuned world-model reproduction $68$. GIP joint
+training lifts planning from $68$ to $78$, and the intuition warm-start lifts $78$ to $88$.
+
+\subsection{What the intuition encodes: contact-state memory}
+Conditioning the intuition on action history helps decisively on exactly one family, contact
+manipulation, and the reason is informative. On robomimic Lift, history-aware intuition raises
+success from $66.0$ to $96.7$ (three seeds). A stage decomposition over 900 instrumented episodes
+shows the entire gain is post-grasp: $P(\text{success}\mid\text{grasped})$ rises $76.2 \to 99.3$
+while grasp attainment is unchanged. The history supplies the contact state, ``I am holding it,''
+that low-resolution pixels hide. The intuition is therefore reading a latent variable the
+reconstruction objective does not capture. This dictates a per-family evaluation: guided planning
+for goal-reaching, history-aware reactive control for contact manipulation.
+
+\subsection{Generalized pretraining across seven tasks}
+Joint training on seven tasks with $\alpha\!\approx\!0.4$ and a doubled budget reaches or beats the
+single-task reference where per-task effective epochs suffice (TwoRoom $100$ vs.\ single $93.3$;
+Lift $94$; Can $66$). Uniform-frame sampling ($\alpha\!=\!1$) starves the small tasks (Square $9.3$),
+confirming that the controlling quantity under size skew is effective epochs, not raw draws.
+Multi-task training matches scratch single-task performance to the decimal, so the joint objective
+does not interfere. Budget-matched from-scratch training also matches the warm-started endpoint, yet
+a frozen-representation probe shows a large pretraining gap ($+28.7/+11.3/+16.0$ on Lift/Can/Square).
+The pretrained latent is real; its benefit is efficiency and reuse rather than a higher ceiling.
+
+\subsection{A clean, reproducible implementation}
+The full method (the model, the three eval modes, and multi-task pretraining) has been re-expressed
+as a standalone extension of the stable-worldmodel framework, with the intuition exposed natively
+through the planner's action-prior interface. A from-scratch PushT run on that implementation
+reproduces the original decode quality ($R^2\!\approx\!0.885$ vs.\ $0.88$) and the mode ordering
+(guided $95 >$ planning $85 >$ reactive $65$), so the result is implementation-independent.
+
+\section{Proposed work}
+\begin{itemize}
+\itemsep0.2em
+\item \textbf{Scale the intuition prior.} Extend generalized intuition pretraining to more tasks and
+larger data, and toward a unified action space across embodiments, padding and masking as here.
+\item \textbf{Close the fast/slow loop.} Feed the planner's corrected trajectories back to retrain the
+intuition, so deliberation teaches intuition and intuition shortens deliberation.
+\item \textbf{Characterize when intuition helps.} Make precise where a fast prior aids search
+(variance reduction, fewer iterations) versus where a noisy prior misleads it (random-action data,
+e.g.\ Reacher, where guided $\le$ planning).
+\item \textbf{Transfer.} Evaluate the pretrained intuition as a control prior on held-out tasks,
+measuring sample- and search-efficiency against per-task learning.
+\end{itemize}
+
+\begin{thebibliography}{9}
+\small
+\bibitem{lewm} Q.\ Le~Lidec et al.\ \emph{Learning a world model and planning with it (LeWM).}
+\bibitem{jepa} A.\ Bardes et al.\ \emph{Joint-embedding predictive architectures}; M.\ Zhou et al.\ \emph{DINO-WM}.
+\bibitem{fastslow} D.\ Kahneman. \emph{Thinking, Fast and Slow}; D.\ Silver et al.\ \emph{MuZero}; policy-prior-guided search.
+\bibitem{clip} A.\ Radford et al.\ \emph{Learning transferable visual models (CLIP).}
+\bibitem{swm} \emph{stable-worldmodel} / \emph{stable-pretraining} frameworks.
+\end{thebibliography}
+
+\end{document}

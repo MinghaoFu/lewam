@@ -1,0 +1,11 @@
+dataset:
+  num_steps: ${eval:'${num_preds} + ${history_size}'}
+  frameskip: 5
+  name: reacher.h5
+  keys_to_load:
+    - pixels
+    - action
+    - observation
+  keys_to_cache:
+    - action
+    - observation

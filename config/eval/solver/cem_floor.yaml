@@ -1,0 +1,17 @@
+# CEM solver WITH an opt-in variance floor (intuition-seeded planning refinement).
+# Identical to cem.yaml + a VarFloorCallback so CEM REFINES around the intuition-seeded
+# mean instead of collapsing onto it (swm CEM updates var=elites.std() with no floor).
+# Used by the planning-METHOD study (budget sweep). The DINOv2 cube ENCODER ablation keeps
+# solver=cem (no floor) so the encoder comparison is on the validated config.
+_target_: stable_worldmodel.solver.CEMSolver
+model: ???
+batch_size: 1
+num_samples: 300
+var_scale: 1.0
+n_steps: 30
+topk: 30
+device: "cuda"
+seed: ${seed}
+callbacks:
+  - _target_: gip.VarFloorCallback
+    min_var: 0.1

@@ -1,0 +1,46 @@
+This is BibTeX, Version 0.99e (TeX Live 2026)
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: lewam_paper_skeleton.aux
+The style file: plain.bst
+Database file #1: lewam_refs.bib
+You've used 26 entries,
+            2118 wiz_defined-function locations,
+            589 strings with 7674 characters,
+and the built_in function-call counts, 8065 in all, are:
+= -- 660
+> -- 592
+< -- 0
++ -- 232
+- -- 206
+* -- 512
+:= -- 1388
+add.period$ -- 66
+call.type$ -- 26
+change.case$ -- 176
+chr.to.int$ -- 0
+cite$ -- 26
+duplicate$ -- 255
+empty$ -- 628
+format.name$ -- 206
+if$ -- 1648
+int.to.chr$ -- 0
+int.to.str$ -- 26
+missing$ -- 11
+newline$ -- 121
+num.names$ -- 52
+pop$ -- 291
+preamble$ -- 1
+purify$ -- 150
+quote$ -- 0
+skip$ -- 204
+stack$ -- 0
+substring$ -- 130
+swap$ -- 36
+text.length$ -- 0
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 104
+warning$ -- 0
+while$ -- 52
+width$ -- 28
+write$ -- 238

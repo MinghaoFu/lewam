@@ -1,0 +1,36 @@
+dataset:
+  num_steps: ${eval:'${num_preds} + ${history_size}'}
+  frameskip: 5
+  name: multitask7   # placeholder (popped); per-task h5 names below
+  tasks:
+    - name: pusht_expert_train.h5
+      task: pusht
+      keys_to_load: [pixels, action, proprio]
+      keys_to_cache: [action, proprio]
+    - name: tworoom.h5
+      task: tworoom
+      keys_to_load: [pixels, action, proprio]
+      keys_to_cache: [action, proprio]
+    - name: reacher.h5
+      task: reacher
+      proprio_key: observation
+      keys_to_load: [pixels, action, observation]
+      keys_to_cache: [action, observation]
+    - name: ogbench/cube_single_expert.h5
+      task: cube
+      keys_to_load: [pixels, action, observation]
+      keys_to_cache: [action, observation]
+      keys_to_merge:
+        proprio: proprio
+    - name: lift.h5
+      task: lift
+      keys_to_load: [pixels, action, proprio]
+      keys_to_cache: [action, proprio]
+    - name: can.h5
+      task: can
+      keys_to_load: [pixels, action, proprio]
+      keys_to_cache: [action, proprio]
+    - name: square.h5
+      task: square
+      keys_to_load: [pixels, action, proprio]
+      keys_to_cache: [action, proprio]

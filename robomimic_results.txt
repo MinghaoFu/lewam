@@ -1,0 +1,237 @@
+
+==== CONFIG ====
+cache_dir: null
+solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 30
+  topk: 30
+  device: cuda
+  seed: ${seed}
+world:
+  env_name: swm/RoboMimic-v0
+  task: PickPlaceCan
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 280
+dataset:
+  stats: can
+  keys_to_cache:
+  - action
+  - proprio
+  - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5
+eval:
+  num_eval: 10
+  goal_offset_steps: 80
+  eval_budget: 140
+  img_size: 224
+  dataset_name: can
+  callables:
+  - method: set_state
+    args:
+      state:
+        value: state
+output:
+  filename: robomimic_results.txt
+
+==== RESULTS ====
+metrics: {'success_rate': 0.0, 'episode_successes': array([False, False, False, False, False, False, False, False, False,
+       False]), 'seeds': None}
+evaluation_time: 45.754812240600586 seconds
+
+==== CONFIG ====
+cache_dir: null
+solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 30
+  topk: 30
+  device: cuda
+  seed: ${seed}
+world:
+  env_name: swm/RoboMimic-v0
+  task: NutAssemblySquare
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 360
+dataset:
+  stats: square
+  keys_to_cache:
+  - action
+  - proprio
+  - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5
+eval:
+  num_eval: 10
+  goal_offset_steps: 110
+  eval_budget: 180
+  img_size: 224
+  dataset_name: square
+  callables:
+  - method: set_state
+    args:
+      state:
+        value: state
+output:
+  filename: robomimic_results.txt
+
+==== RESULTS ====
+metrics: {'success_rate': 0.0, 'episode_successes': array([False, False, False, False, False, False, False, False, False,
+       False]), 'seeds': None}
+evaluation_time: 56.23249268531799 seconds
+
+==== CONFIG ====
+cache_dir: null
+solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 30
+  topk: 30
+  device: cuda
+  seed: ${seed}
+world:
+  env_name: swm/RoboMimic-v0
+  task: PickPlaceCan
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 220
+dataset:
+  stats: can
+  keys_to_cache:
+  - action
+  - proprio
+  - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5
+eval:
+  num_eval: 4
+  goal_offset_steps: 70
+  eval_budget: 110
+  img_size: 224
+  dataset_name: can
+  callables:
+  - method: set_state
+    args:
+      state:
+        value: state
+output:
+  filename: robomimic_results.txt
+
+==== RESULTS ====
+metrics: {'success_rate': 0.0, 'episode_successes': array([False, False, False, False]), 'seeds': None}
+evaluation_time: 13.864710807800293 seconds
+
+==== CONFIG ====
+cache_dir: null
+solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 30
+  topk: 30
+  device: cuda
+  seed: ${seed}
+world:
+  env_name: swm/RoboMimic-v0
+  task: NutAssemblySquare
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 300
+dataset:
+  stats: square
+  keys_to_cache:
+  - action
+  - proprio
+  - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5
+eval:
+  num_eval: 4
+  goal_offset_steps: 95
+  eval_budget: 150
+  img_size: 224
+  dataset_name: square
+  callables:
+  - method: set_state
+    args:
+      state:
+        value: state
+output:
+  filename: robomimic_results.txt
+
+==== RESULTS ====
+metrics: {'success_rate': 0.0, 'episode_successes': array([False, False, False, False]), 'seeds': None}
+evaluation_time: 17.842224836349487 seconds
+
+==== CONFIG ====
+cache_dir: null
+solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 30
+  topk: 30
+  device: cuda
+  seed: ${seed}
+world:
+  env_name: swm/RoboMimic-v0
+  task: PickPlaceCan
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 180
+dataset:
+  stats: can
+  keys_to_cache:
+  - action
+  - proprio
+  - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5
+eval:
+  num_eval: 3
+  goal_offset_steps: 70
+  eval_budget: 90
+  img_size: 224
+  dataset_name: can
+  callables:
+  - method: set_state
+    args:
+      state:
+        value: state
+output:
+  filename: robomimic_results.txt
+
+==== RESULTS ====
+metrics: {'success_rate': 0.0, 'episode_successes': array([False, False, False]), 'seeds': None}
+evaluation_time: 8.855820655822754 seconds

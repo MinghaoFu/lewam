@@ -1,0 +1,21 @@
+# cnn.yaml — decoder-TRAINING knobs for decode_lewm.py (image-decoder probe).
+#
+# Standalone OmegaConf config (loaded directly by decode_lewm.py via
+# OmegaConf.load — NOT a Hydra defaults list, mirroring how the swm decode
+# probe is run as a one-off diagnostic). The RUNTIME PATH args (--lance, the
+# checkpoint dir, --tag) stay on the CLI; this file holds only the decoder
+# build + training hyperparameters so they are not hardcoded in the script.
+#
+# Default (enabled: true with these numbers) reproduces the original exx
+# world-forge behavior exactly: a fresh CNN decoder trained on the frozen
+# LeWM CLS latent, Adam + cosine LR, plateau-stopped held-out recon.
+decode:
+  enabled: true          # YES by default = train a fresh decoder; false = load decoder_conv_best.pt and SKIP training
+  kind: cnn
+  embed_dim: 192         # ideally read from the checkpoint config.json; this is the fallback/assert value
+  image_shape: [3, 128, 128]
+  max_epochs: 250
+  min_epochs: 100
+  lr: 1.0e-3             # cosine schedule
+  plateau_patience: 18   # auto-stop
+  eval_every: 2          # held-out recon MSE cadence

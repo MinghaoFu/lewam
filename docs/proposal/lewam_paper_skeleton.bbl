@@ -1,0 +1,142 @@
+\begin{thebibliography}{10}
+
+\bibitem{decisiondiffuser}
+Anurag Ajay, Yilun Du, Abhi Gupta, Joshua Tenenbaum, Tommi Jaakkola, and Pulkit
+  Agrawal.
+\newblock Is conditional generative modeling all you need for decision-making?
+\newblock In {\em ICLR}, 2023.
+
+\bibitem{exit}
+Thomas Anthony, Zheng Tian, and David Barber.
+\newblock Thinking fast and slow with deep learning and tree search.
+\newblock In {\em NeurIPS}, 2017.
+
+\bibitem{mbop}
+Arthur Argenson and Gabriel Dulac-Arnold.
+\newblock Model-based offline planning.
+\newblock In {\em ICLR}, 2021.
+
+\bibitem{rt2}
+Anthony Brohan et~al.
+\newblock {RT-2}: Vision-language-action models transfer web knowledge to
+  robotic control.
+\newblock In {\em CoRL}, 2023.
+
+\bibitem{pijepa}
+Amirhosein Chahe and Lifeng Zhou.
+\newblock Policy-guided world model planning for language-conditioned visual
+  navigation, 2026.
+
+\bibitem{diffusionpolicy}
+Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin
+  Burchfiel, and Shuran Song.
+\newblock Diffusion policy: Visuomotor policy learning via action diffusion.
+\newblock In {\em RSS}, 2023.
+
+\bibitem{worlddp}
+Raktim~Gautam Goswami, Prashanth Krishnamurthy, Yann LeCun, and Farshad
+  Khorrami.
+\newblock Unifying object-centric world models and diffusion policy: A
+  hierarchical framework for multi-stage robotic tasks ({WorldDP}), 2026.
+\newblock [VERIFY] post-cutoff.
+
+\bibitem{tdmpc2}
+Nicklas Hansen, Hao Su, and Xiaolong Wang.
+\newblock {TD-MPC2}: Scalable, robust world models for continuous control.
+\newblock In {\em ICLR}, 2024.
+
+\bibitem{newt}
+Nicklas Hansen, Hao Su, and Xiaolong Wang.
+\newblock Learning massively multitask world models for continuous control
+  ({Newt}), 2025.
+\newblock [VERIFY] post-cutoff.
+
+\bibitem{tdmpc}
+Nicklas Hansen, Xiaolong Wang, and Hao Su.
+\newblock Temporal difference learning for model predictive control.
+\newblock In {\em ICML}, 2022.
+
+\bibitem{diffuser}
+Michael Janner, Yilun Du, Joshua~B. Tenenbaum, and Sergey Levine.
+\newblock Planning with diffusion for flexible behavior synthesis.
+\newblock In {\em ICML}, 2022.
+
+\bibitem{openvla}
+Moo~Jin Kim et~al.
+\newblock {OpenVLA}: An open-source vision-language-action model.
+\newblock In {\em CoRL}, 2024.
+
+\bibitem{vqbet}
+Seungjae Lee, Yibin Wang, Haritheja Etukuru, H.~Jin Kim, Nur Muhammad~Mahi
+  Shafiullah, and Lerrel Pinto.
+\newblock Behavior generation with latent actions ({VQ-BeT}).
+\newblock In {\em ICML}, 2024.
+
+\bibitem{beingh07}
+Hao Luo, Wanpeng Zhang, Yicheng Feng, Sipeng Zheng, Haiweng Xu, Chaoyi Xu,
+  Ziheng Xi, Yuhui Fu, and Zongqing Lu.
+\newblock {Being-H0.7}: A latent world-action model from egocentric videos,
+  2026.
+
+\bibitem{lewm}
+Lucas Maes, Quentin Le~Lidec, Damien Scieur, Yann LeCun, and Randall
+  Balestriero.
+\newblock {LeWorldModel}: Stable end-to-end joint-embedding predictive
+  architecture from pixels, 2026.
+
+\bibitem{ffjepa}
+Sergi Masip, Jonathan Swinnen, Yutong Hu, Renaud Detry, and Tinne Tuytelaars.
+\newblock {FF-JEPA}: Long-horizon planning in world models with latent
+  planners, 2026.
+
+\bibitem{vjepa2}
+{Meta AI (FAIR)}.
+\newblock {V-JEPA 2}: Self-supervised video models enable understanding,
+  prediction and planning, 2025.
+
+\bibitem{gcidm}
+Hoang Nguyen, Xiaohao Xu, and Xiaonan Huang.
+\newblock Latent geometry beyond search: Amortizing planning in world models,
+  2026.
+
+\bibitem{mrq}
+Johan Obando-Ceron, Lu~Li, Scott Fujimoto, Pierre-Luc Bacon, Aaron Courville,
+  and Pablo~Samuel Castro.
+\newblock Representation learning enables scalable multitask deep reinforcement
+  learning, 2026.
+
+\bibitem{dppo}
+Allen~Z. Ren et~al.
+\newblock Diffusion policy policy optimization, 2024.
+
+\bibitem{muzero}
+Julian Schrittwieser et~al.
+\newblock Mastering atari, go, chess and shogi by planning with a learned
+  model.
+\newblock {\em Nature}, 2020.
+
+\bibitem{tempstraight}
+Ying Wang, Oumayma Bounou, Gaoyue Zhou, Randall Balestriero, Tim G.~J. Rudner,
+  Yann LeCun, and Mengye Ren.
+\newblock Temporal straightening for latent planning, 2026.
+
+\bibitem{ldp}
+Amber Xie, Oleh Rybkin, Dorsa Sadigh, and Chelsea Finn.
+\newblock Latent diffusion planning for imitation learning, 2025.
+
+\bibitem{dreamzero}
+Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, et~al.
+\newblock World action models are zero-shot policies ({DreamZero}), 2026.
+\newblock [VERIFY] post-cutoff.
+
+\bibitem{fastwam}
+Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao.
+\newblock {Fast-WAM}: Do world action models need test-time future
+  imagination?, 2026.
+
+\bibitem{dinowm}
+Gaoyue Zhou, Hengkai Pan, Yann LeCun, and Lerrel Pinto.
+\newblock {DINO-WM}: World models on pre-trained visual features enable
+  zero-shot planning, 2024.
+
+\end{thebibliography}
