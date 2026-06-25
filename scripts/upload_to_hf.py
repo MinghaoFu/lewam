@@ -24,8 +24,8 @@ what = sys.argv[1] if len(sys.argv) > 1 else "all"
 api = HfApi(token=os.environ.get("HF_TOKEN"))  # None -> uses stored `huggingface-cli login`
 
 # 1. create the private repos (idempotent — no-op if they already exist)
-api.create_repo(f"{USER}/lewam-data",  repo_type="dataset", private=True, exist_ok=True)
-api.create_repo(f"{USER}/lewam-ckpts", repo_type="model",   private=True, exist_ok=True)
+api.create_repo(f"{USER}/lewam-data",  repo_type="dataset", private=False, exist_ok=True)
+api.create_repo(f"{USER}/lewam-ckpts", repo_type="model",   private=False, exist_ok=True)
 print("[upload] repos ready:", f"{USER}/lewam-data (dataset),", f"{USER}/lewam-ckpts (model)", flush=True)
 
 # 2. datasets (~425 GB) -> lewam-data  [resumable, parallel, multi-commit]
