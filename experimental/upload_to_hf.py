@@ -24,25 +24,25 @@ what = sys.argv[1] if len(sys.argv) > 1 else "all"
 api = HfApi(token=os.environ.get("HF_TOKEN"))  # None -> uses stored `huggingface-cli login`
 
 # 1. create the private repos (idempotent — no-op if they already exist)
-api.create_repo(f"{USER}/lewam-data",  repo_type="dataset", private=False, exist_ok=True)
-api.create_repo(f"{USER}/lewam-ckpts", repo_type="model",   private=False, exist_ok=True)
-print("[upload] repos ready:", f"{USER}/lewam-data (dataset),", f"{USER}/lewam-ckpts (model)", flush=True)
+api.create_repo(f"{USER}/lewm-official-data",  repo_type="dataset", private=False, exist_ok=True)
+api.create_repo(f"{USER}/lewm-official-ckpts", repo_type="model",   private=False, exist_ok=True)
+print("[upload] repos ready:", f"{USER}/lewm-official-data (dataset),", f"{USER}/lewm-official-ckpts (model)", flush=True)
 
-# 2. datasets (~425 GB) -> lewam-data  [resumable, parallel, multi-commit]
+# 2. datasets (~425 GB) -> lewm-official-data  [resumable, parallel, multi-commit]
 if what in ("all", "data"):
-    print(f"[upload] === datasets: {BASE}/datasets -> {USER}/lewam-data ===", flush=True)
+    print(f"[upload] === datasets: {BASE}/datasets -> {USER}/lewm-official-data ===", flush=True)
     api.upload_large_folder(
-        repo_id=f"{USER}/lewam-data", repo_type="dataset",
+        repo_id=f"{USER}/lewm-official-data", repo_type="dataset",
         folder_path=f"{BASE}/datasets", num_workers=WORKERS, print_report=True)
 
-# 3. checkpoints + decoders (~112 GB) -> lewam-ckpts (structure preserved: checkpoints/** + decoders/**)
+# 3. checkpoints + decoders (~112 GB) -> lewm-official-ckpts (structure preserved: checkpoints/** + decoders/**)
 if what in ("all", "ckpts"):
-    print(f"[upload] === checkpoints+decoders: {BASE} -> {USER}/lewam-ckpts ===", flush=True)
+    print(f"[upload] === checkpoints+decoders: {BASE} -> {USER}/lewm-official-ckpts ===", flush=True)
     api.upload_large_folder(
-        repo_id=f"{USER}/lewam-ckpts", repo_type="model",
+        repo_id=f"{USER}/lewm-official-ckpts", repo_type="model",
         folder_path=BASE, allow_patterns=["checkpoints/**", "decoders/**"],
         num_workers=WORKERS, print_report=True)
 
 print("[upload] ALL DONE — pull on the new box with:", flush=True)
-print(f"  huggingface-cli download {USER}/lewam-data  --repo-type dataset --local-dir $DATA/.stable-wm/datasets", flush=True)
-print(f"  huggingface-cli download {USER}/lewam-ckpts --repo-type model   --local-dir $DATA/.stable-wm", flush=True)
+print(f"  huggingface-cli download {USER}/lewm-official-data  --repo-type dataset --local-dir $DATA/.stable-wm/datasets", flush=True)
+print(f"  huggingface-cli download {USER}/lewm-official-ckpts --repo-type model   --local-dir $DATA/.stable-wm", flush=True)

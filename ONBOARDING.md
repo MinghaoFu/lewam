@@ -43,8 +43,8 @@ Pick a disk with space and call it `<DATA>`. Two ways:
 
 - **HuggingFace** (once uploaded — *pending*): 
   ```bash
-  huggingface-cli download MinghaoFu/lewam-data  --repo-type dataset --local-dir <DATA>/.stable-wm/datasets
-  huggingface-cli download MinghaoFu/lewam-ckpts --repo-type model   --local-dir <DATA>/.stable-wm
+  huggingface-cli download MinghaoFu/lewm-official-data  --repo-type dataset --local-dir <DATA>/.stable-wm/datasets
+  huggingface-cli download MinghaoFu/lewm-official-ckpts --repo-type model   --local-dir <DATA>/.stable-wm
   ```
   (private repos → set the HF token first: `huggingface-cli login`; token is in the personal vault.)
 - **rsync from the source box** (current home) — exact commands + sizes in `docs/MACHINE_TRANSFER.md §2`.
