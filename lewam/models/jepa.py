@@ -27,8 +27,8 @@ class HorizonModulator(nn.Module):
       x      : (B, T, D) intention embedding (or (B, D))
       h_norm : (B,) float in [0,1]  = min(steps_left, H_max)/H_max  (caller owns
                the normalization so train and eval agree, mirroring GCIDMHead).
-    AdaLN-Zero => at init scale=shift=0 => x unchanged => the head is byte-identical
-    to the horizon-agnostic policy until the conditioning is learned in.
+    AdaLN-Zero: at init scale=shift=0 so x is unchanged (identity at init),
+    matching the horizon-agnostic policy until the conditioning is learned.
     """
 
     def __init__(self, emb_dim, n_freqs=64, cond_dim=128):
@@ -191,8 +191,8 @@ class JEPA(nn.Module):
         policy with an OPTIONAL goal, NOT a Markovian IDM).
         horizon (B,): remaining-horizon h ALREADY normalized to [0,1]
         (= min(steps_left, H_max)/H_max, caller owns the normalization, mirroring
-        gcidm). Conditions the intention embedding via AdaLN-Zero (self.horizon_modulator),
-        the SAME hook the GC-IDM arm uses. None or no modulator -> identity (default OFF).
+        gcidm). Conditions the intention embedding via AdaLN-Zero (self.horizon_modulator).
+        None or no modulator gives identity.
 
         Returns:
           intention: (B, T, D)     -- intention embedding (trained vs act_emb_t)
@@ -274,10 +274,9 @@ class JEPA(nn.Module):
         horizon_norm:   (B,) remaining-horizon h already normalized to [0,1]
                         (= min(steps_left, H_max)/H_max), or a python float, or None.
                         When self.horizon_modulator is set this is fed to the AdaLN-Zero
-                        hook at EVERY proposed step (the SAME conditioning GC-IDM uses);
-                        None / no modulator -> identity (default OFF). The decrement-per-
-                        replan bookkeeping lives in the policy (gip.BCPolicy), mirroring
-                        gip.GCIDMPolicy, so train and eval feed h identically.
+                        hook at every proposed step; None / no modulator gives identity.
+                        The decrement-per-replan bookkeeping lives in the policy
+                        (gip.BCPolicy), so train and eval feed h identically.
         returns:        (B, horizon, Adim), Adim = frameskip * action_dim
         Adapted to the Actionable protocol by gip.attach_intention_actor.
         """

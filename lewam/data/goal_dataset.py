@@ -1,7 +1,6 @@
-"""Goal-sampling dataset wrapper for the goal-conditioned policy (mode 2).
+"""Goal-sampling dataset wrapper for the goal-conditioned policy.
 
-Config-gated: constructed ONLY when `action_pred.goal_conditioned=true`, so base
-training is byte-identical otherwise. Wraps a swm EpisodeDataset; for each window
+Constructed only when `action_pred.goal_conditioned=true`. Wraps a swm EpisodeDataset; for each window
 it adds a HINDSIGHT goal -- a frame at `t+h` (h ~ Uniform[1, hindsight_max_k]
 observation-steps ahead of the window's last observed frame, clamped to the
 episode end) -- plus the realized horizon `h`. This is what turns the demo set

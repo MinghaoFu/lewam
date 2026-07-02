@@ -15,7 +15,7 @@ head instead of the Markovian GC-IDM:
 It REUSES the SAME frozen-LeWM latent cache the gcidm arm built
 (checkpoints/cube_gcidm/latents_cache.pt: per-ep lat[ep] (n+1,192) = the projected
 emb encode(pixels)['emb'][:,0], act[ep] (n,25) z-scored), so OURS and GC-IDM train
-on byte-identical frozen features -> maximally fair comparison.
+on the same frozen features, for a fair comparison.
 
 The action_encoder is the FROZEN base action_encoder (so a_<t embeddings match the
 base); action_predictor/decoder/horizon_modulator are trained from scratch.

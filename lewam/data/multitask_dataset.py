@@ -1,4 +1,4 @@
-"""Multi-task dataset for le-wm-repro (config-gated via data=multitask7).
+"""Multi-task dataset (enabled via data=multitask7).
 
 Wraps N per-task swm datasets (each with its own column normalizers) behind
 two-step task-balanced sampling (Newt / MT-JEPA convention):

@@ -1,4 +1,4 @@
-"""GIP step-1 success-rate eval (single entry, config-gated).
+"""GIP step-1 success-rate eval.
 
 Reuses eval.py's env/dataset machinery; the policy is chosen by ONE knob:
 

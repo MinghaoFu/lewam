@@ -15,8 +15,7 @@ Modes (cfg.gip_eval.mode, default "policy"):
   - policy   : OURS -- history-conditioned forward GC policy. With
                +gip_eval.goal_conditioned=true it encodes info_dict["goal"] ->
                z_goal and threads it (and the AdaLN-Zero horizon) into the head.
-               goal_conditioned=false -> the original goal-AGNOSTIC history-bc
-               (byte-identical to the prior file).
+               goal_conditioned=false uses the goal-agnostic history-BC.
   - gcidm    : GC-IDM (Markovian) -- single-frame planning-free IDM. Each replan
                does ONE forward pass GCIDMHead(z_t, z_goal, h) -> action block.
                NO history, NO CEM. Faithful reproduction of `gcidm` (2605.08732),
@@ -58,8 +57,8 @@ import lewam.models.gip as gip
 class HistoryBCPolicy(BasePolicy):
     """Autoregressive BC with the real frame + executed-action history.
 
-    goal_conditioned=False -> the original goal-AGNOSTIC history-bc (byte-identical).
-    goal_conditioned=True  -> OURS: encode info_dict["goal"] -> z_goal, thread it (and
+    goal_conditioned=False uses the goal-agnostic history-BC.
+    goal_conditioned=True encodes info_dict["goal"] -> z_goal, threading it (and
     the AdaLN-Zero horizon, if the model carries a horizon_modulator) into the head
     via predict_intention(goal_emb=..., horizon=...). The history wedge is unchanged;
     the goal/horizon are optional additive hooks (a strict superset).

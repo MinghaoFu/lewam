@@ -334,7 +334,7 @@ def load_gcidm_model(run_name):
     The trainer (train_gcidm.py) writes checkpoints/<run_name>/gcidm_config.json
     (head dims, frozen-LeWM weights path, action z-score stats) and
     gcidm_head_best.pt. We rebuild the frozen LeWM exactly like train_gcidm
-    (so z = encode({pixels})['emb'][:,0] is byte-identical) and the GCIDMHead,
+    (so z = encode({pixels})['emb'][:,0] matches) and the GCIDMHead,
     then load the head weights. Returns (lewm, head, gcfg)."""
     import lewam.models.gcidm as _gcidm
     from train_gcidm import build_frozen_lewm
@@ -535,8 +535,8 @@ class VarFloorCallback(_SWMCallback):
     The full-horizon intuition seed is ALREADY provided by the swm path
     (prepare_init_action -> model.get_action(horizon) -> jepa.intention_rollout);
     this floor is the missing piece that lets that good seed be *refined* rather
-    than just collapsed onto. Validated path is byte-identical unless this callback
-    is added with ``min_var > 0`` (the default solver config has no callbacks).
+    than just collapsed onto. This callback has no effect unless it is added
+    with ``min_var > 0`` (the default solver config has no callbacks).
     """
 
     def __init__(self, min_var: float = 0.1, reduction: str = "none"):
