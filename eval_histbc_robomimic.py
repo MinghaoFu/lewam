@@ -78,8 +78,7 @@ class HistoryBCPolicy(BasePolicy):
         self.process = process or {}
         self.transform = transform or {}
         self.device = next(model.parameters()).device
-        # OURS GC head: AdaLN-Zero horizon countdown. Active only when the trained
-        # model carries a horizon_modulator (else h is never fed -> identity).
+        # AdaLN-Zero horizon countdown; active only if the model carries a horizon_modulator (else identity)
         self.use_horizon = getattr(self.model, "horizon_modulator", None) is not None
         self.H_max = int(H_max)
         self.horizon0 = float(horizon0) if horizon0 is not None else None
@@ -129,7 +128,6 @@ class HistoryBCPolicy(BasePolicy):
         for i in range(n):
             if dead[i] or len(self._abuf[i]) > 0:
                 continue
-            # encode the current frame, push its latent
             z = self.model.encode({"pixels": cur[i:i + 1].unsqueeze(1)})["emb"][0, 0]  # (D,)
             self._zhist[i].append(z)
             emb = torch.stack(list(self._zhist[i]))[None]    # (1, t, D)
@@ -145,8 +143,7 @@ class HistoryBCPolicy(BasePolicy):
                 if not torch.is_tensor(pr):
                     pr = torch.as_tensor(pr)
                 pr_cur = (pr[:, -1] if pr.ndim == 3 else pr)[i:i + 1].to(self.device).float()
-                # multi-task ckpt: encoder expects p_max-dim proprio -> zero-pad (post-normalize,
-                # same as training). Single-task: dims already match, no-op.
+                # multi-task ckpt: pad proprio to p_max dims (post-normalize, as in training); single-task no-op
                 ped = self.model.proprio_encoder.patch_embed.weight.shape[1]
                 if pr_cur.shape[-1] < ped:
                     pr_cur = torch.nn.functional.pad(pr_cur, (0, ped - pr_cur.shape[-1]))
@@ -154,13 +151,12 @@ class HistoryBCPolicy(BasePolicy):
                 self._phist[i].append(pz)
                 proprio_emb = torch.stack(list(self._phist[i]))[None]  # (1, t, D)
             tv = self.model._eval_task_vec(1, self.device)  # (1, D) or None (multi-task only)
-            # OURS GC head: encode this env's goal frame -> z_goal (additive into the head).
+            # encode this env's goal frame -> z_goal
             goal_emb = None
             if goal_px is not None:
                 goal_emb = self.model.encode({"pixels": goal_px[i:i + 1].unsqueeze(1)})["emb"][:, 0]  # (1, D)
-            # OURS GC head: remaining-horizon (normalized) for the AdaLN-Zero hook. Per-env
-            # obs-step countdown, init = goal_offset/frameskip, decremented one obs-step per
-            # replan. Only used when use_horizon; else None -> identity.
+            # remaining-horizon (normalized) for the AdaLN-Zero hook: per-env obs-step countdown,
+            # init = goal_offset/frameskip, -1 per replan. Only when use_horizon, else None -> identity.
             horizon = None
             if self.use_horizon and self._steps_left is not None:
                 steps = max(self._steps_left[i], 1.0)
@@ -185,11 +181,8 @@ class HistoryBCPolicy(BasePolicy):
         return action
 
 
-# --------------------------------------------------------------------------- #
-# GC-IDM (Markovian, planning-free) for the robomimic histbc env loop          #
-#   faithful repro of `gcidm` (2605.08732); ported from gip.GCIDMPolicy.       #
-#   Single frame, NO history: z_t = encode(cur); z_goal = encode(goal); h.     #
-# --------------------------------------------------------------------------- #
+# GC-IDM (Markovian, planning-free) for the robomimic histbc env loop.
+# Faithful repro of `gcidm` (2605.08732), ported from gip.GCIDMPolicy; single frame, no history.
 class GCIDMRobomimicPolicy(BasePolicy):
     """Planning-free goal-conditioned IDM in the robomimic histbc env loop.
 
@@ -283,15 +276,12 @@ def _eval_loop(world, policy, dataset, episodes, starts, cfg, tag):
     for _c in range(0, len(episodes), _ne):
         _ep = list(episodes[_c:_c + _ne]); _st = list(starts[_c:_c + _ne]); _k = len(_ep)
         while len(_ep) < _ne: _ep.append(_ep[0]); _st.append(_st[0])
-        # CHUNK-RESET (fixes the chunk-1-then-zeros artifact): eval runs in mode='wait',
-        # which never sends _needs_flush, so a reused policy carries chunk N-1's per-env
-        # deques/horizon-counters into chunk N -> corrupted history -> 0 success after chunk 1.
-        # Re-init the policy's per-env state to a clean slate before each chunk (set_env is
-        # idempotent: it re-creates the buffers/counters). Each chunk = a fresh 10 episodes.
-        # Pass world.envs (the vec env) exactly as world.set_policy does, so self.env is the
-        # same object the rollout uses (action_space/num_envs resolve correctly).
+        # CHUNK-RESET: eval runs mode='wait' (never sends _needs_flush), so a reused policy carries
+        # chunk N-1's per-env deques/counters -> corrupted history -> 0 success after chunk 1. Re-init
+        # per-env state each chunk via set_env(world.envs) (idempotent; must pass the vec env
+        # world.set_policy uses so self.env matches the rollout).
         policy.set_env(world.envs)
-        _gm = str(cfg.eval.get("goal_mode", "mid"))  # S27_GOAL_MODE_PATCH
+        _gm = str(cfg.eval.get("goal_mode", "mid"))
         _m = world.evaluate(dataset=dataset, start_steps=_st, goal_offset=cfg.eval.goal_offset_steps,
             eval_budget=cfg.eval.eval_budget, episodes_idx=_ep, callables=_cbl, video=None,
             goal_mode=_gm)
@@ -315,7 +305,7 @@ def run(cfg: DictConfig):
     mode = str(cfg.get("gip_eval", {}).get("mode", "policy"))
     action_block = int(cfg.plan_config.action_block)
 
-    # ----------------------------- GC-IDM (Markovian) ----------------------------- #
+    # GC-IDM (Markovian)
     if mode == "gcidm":
         gc = cfg.gip_eval
         lewm, head, gcfg = gip.load_gcidm_model(gc.get("gcidm_run", cfg.policy))
@@ -336,13 +326,13 @@ def run(cfg: DictConfig):
               f"H_max={gcfg['H_max']} horizon0={horizon0:.2f} ablate_h={policy.ablate_horizon}")
         metrics = _eval_loop(world, policy, dataset, episodes, starts, cfg, "GCIDM")
         sub = "gcidm"
-    # ----------------------- OURS (history GC, mode=policy) ------------------------ #
+    # OURS (history GC, mode=policy)
     else:
         model, adim = gip.load_gip_model(cfg.policy, epoch=cfg.get("ckpt_epoch", None))
         model = model.to("cuda").eval()
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
-        # multi-task ckpt: select this task's conditioning vector (no-op for single-task models)
+        # multi-task ckpt: select this task's conditioning vector
         model.eval_task = cfg.eval.dataset_name if getattr(model, "task_proj", None) is not None else None
         if model.eval_task is not None:
             print(f"[HISTBC] multi-task conditioning: eval_task={model.eval_task} of {model.mt_task_names}")

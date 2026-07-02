@@ -111,8 +111,7 @@ class EMAActionEncoderCallback(Callback):
         tau = self.tau
         for p_ema, p_online in zip(ema.parameters(), online.parameters()):
             p_ema.mul_(tau).add_(p_online.detach(), alpha=1.0 - tau)
-        # copy buffers verbatim (e.g. norm running stats); EMA on buffers is
-        # unnecessary for the action encoder but we keep teacher == student here.
+        # copy buffers verbatim (e.g. norm running stats): keep teacher == student.
         for b_ema, b_online in zip(ema.buffers(), online.buffers()):
             b_ema.copy_(b_online)
 
@@ -120,7 +119,7 @@ class EMAActionEncoderCallback(Callback):
         model = getattr(pl_module, "model", None)
         ema = getattr(model, "action_encoder_ema", None) if model is not None else None
         if ema is None:
-            return  # ema_target off -> no teacher attached -> no-op
+            return  # ema_target off -> no teacher attached
         # only update on iterations where the optimizer actually stepped
         step = trainer.global_step
         if step == self._last_global_step:

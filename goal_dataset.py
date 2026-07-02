@@ -23,9 +23,8 @@ class GoalSamplingDataset(torch.utils.data.Dataset):
         self.goal_key = goal_key
         self.lengths = base.lengths
         self.clip_indices = base.clip_indices
-        # NOTE: base._load_slice ALREADY applies dataset.transform when set (verified: the base
-        # returns it directly), so the goal frame comes out preprocessed exactly like the window
-        # frames. Do NOT re-apply the img-preproc here (that double-normalizes -> [-11,9.9]).
+        # NOTE: base._load_slice ALREADY applies dataset.transform, so the goal frame comes out
+        # preprocessed like the window frames. Do NOT re-apply img-preproc here (double-normalizes -> [-11,9.9]).
         # passthrough attrs some trainers read off the dataset
         for a in ("get_dim", "get_col_data", "column_names", "offsets"):
             if hasattr(base, a) and not hasattr(self, a):

@@ -56,9 +56,8 @@ class RoboMimicEnv(gym.Env):
         o = self.env.get_observation()
         return np.concatenate([np.asarray(o[k], np.float32).ravel() for k in _PROPRIO_KEYS]).astype(np.float32)
 
-    # ---- per-stage instrumentation (falsifiable test: grasp-rate vs place-rate) ----
-    # Active only when $GRASP_LOG is set; appends one "task,grasped,success" CSV line
-    # per finished episode. Zero overhead otherwise.
+    # per-stage instrumentation: when $GRASP_LOG is set, append one "task,grasped,success"
+    # CSV line per finished episode.
     def _grasped(self):
         try:
             rs = self.env.env  # raw robosuite env under robomimic's EnvRobosuite
@@ -123,8 +122,7 @@ class RoboMimicEnv(gym.Env):
         return {"state": self._state(), "proprio": self._proprio()}, {}
 
     def set_state(self, state):
-        # new-episode entry point for the eval harness; guard avoids double-begin
-        # when called from inside reset() (0 steps taken -> nothing to flush/reset).
+        # new-episode entry point; guard avoids double-begin when called from reset() (0 steps taken)
         self._dbg("SET_STATE")
         if os.environ.get("GRASP_LOG") and getattr(self, "_ep_steps", 0) > 0:
             self._begin_ep()

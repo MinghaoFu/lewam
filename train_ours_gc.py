@@ -1,13 +1,5 @@
-# ============================================================================
-# EXTERNAL BASELINE -- gcidm (arXiv 2605.08732) FROZEN-LATENT reproduction.
-# NOT part of the LeWAM infra. Our LeWAM training is config-gated in train.py
-# via action_pred.goal_conditioned + freeze_wm. This file precomputes frozen latents to a
-# cache and trains only a separate head -- HERE the OURS history-conditioned
-# forward GC head -- on the SAME frozen-latent cache the gcidm arm uses, the
-# matched-protocol counterpart that reproduces gcidm's frozen-latent EVALUATION
-# setting for a fair OURS-vs-GC-IDM comparison. The end-to-end LeWAM version of
-# this same head lives in train.py (action_pred.goal_conditioned, freeze_wm=false).
-# ============================================================================
+# External baseline comparison: OURS history-conditioned forward GC head trained on the
+# same frozen-latent cache the gcidm arm (arXiv 2605.08732) uses, for a fair OURS-vs-GC-IDM comparison.
 """Fast cached trainer for OUR history-conditioned forward GC policy (cube).
 
 Mirrors train_gcidm.py's two-phase design (precompute frozen latents once, then
@@ -114,7 +106,7 @@ def main():
     ck = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"))
     run_dir = ck / args.run_name; run_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- reuse the gcidm frozen-latent cache (byte-identical frozen features) ----
+    # reuse the gcidm frozen-latent cache (same frozen features)
     cache_path = ck / args.cache_run / "latents_cache.pt"
     assert cache_path.exists(), f"missing latent cache {cache_path} (run train_gcidm precompute first)"
     blob = torch.load(cache_path, map_location="cpu")
@@ -138,7 +130,7 @@ def main():
     print(f"[ours-train] trainable params={n_tr/1e6:.2f}M "
           f"(action_predictor + action_decoder + horizon_modulator)", flush=True)
 
-    # ---- build flat sample index: (ep, t) with t>=HS-1 (full history) and t<n_obs ----
+    # build flat sample index: (ep, t) with t>=HS-1 (full history) and t<n_obs
     # store latents/actions per episode on device; sample windows vectorized per batch.
     lat_dev = [z.float().to(device) for z in lat_list]
     act_dev = [a.float().to(device) for a in act_list]
@@ -224,10 +216,9 @@ def main():
         save_pretrained(model, run_name=args.run_name, config=OmegaConf.create(cfg_model),
                         filename=filename)
 
-    # Early-stopping on val_act: keep the BEST-val-act checkpoint as weights_epoch_1.pt
-    # (the file load_gip_model picks = highest epoch #), and the LATEST as weights_epoch_0.pt
-    # (diagnostic, lower #, NOT picked). Convergence = val_act minimum; this avoids reporting
-    # an overfit-tail model. cube val_act plateaus ~epoch 14-15, so T_max should land lr~0 there.
+    # Early-stopping on val_act: BEST-val-act checkpoint -> weights_epoch_1.pt
+    # (load_gip_model picks highest epoch #); LATEST -> weights_epoch_0.pt (diagnostic, not picked).
+    # cube val_act plateaus ~epoch 14-15, so T_max should land lr~0 there.
     best_val = float("inf"); best_epoch = -1
     for ep in range(args.epochs):
         t0 = time.time()

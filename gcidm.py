@@ -99,8 +99,7 @@ class GCIDMHead(nn.Module):
         in_dim = 2 * self.emb_dim  # [z_t || z_goal]
 
         # horizon embedding: sinusoidal(64 freqs)=128-d -> 2-layer MLP -> cond_dim.
-        # cond_dim kept compact (128) so the per-layer AdaLN (scale,shift)
-        # projections stay small and the head lands near the paper's ~1.5M params.
+        # cond_dim compact (128) to land near the paper's ~1.5M params.
         sin_dim = 2 * self.n_freqs  # 128
         self.horizon_mlp = nn.Sequential(
             nn.Linear(sin_dim, cond_dim),

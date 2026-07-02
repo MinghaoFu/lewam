@@ -34,9 +34,7 @@ from stable_worldmodel.wm.utils import get_cache_dir
 from module import MLP
 
 
-# --------------------------------------------------------------------------- #
-# shared env / dataset / process helpers (single source of truth)             #
-# --------------------------------------------------------------------------- #
+# shared env / dataset / process helpers
 def img_transform(cfg):
     return transforms.Compose(
         [
@@ -109,9 +107,7 @@ def sample_eval_episodes(cfg, dataset):
     return episodes.tolist(), starts.tolist()
 
 
-# --------------------------------------------------------------------------- #
-# model loading                                                               #
-# --------------------------------------------------------------------------- #
+# model loading
 def load_gip_model(run_name, embed_dim=None, epoch=None):
     """Rebuild a GIP model (vanilla JEPA + runtime action_predictor/decoder) and
     load trained weights. load_pretrained() cannot: its config.json is cfg.model
@@ -133,11 +129,10 @@ def load_gip_model(run_name, embed_dim=None, epoch=None):
     config = OmegaConf.create(json.loads((run_dir / "config.json").read_text()))
     model = hydra_instantiate(config)
     if embed_dim is None:
-        embed_dim = int(config.predictor.input_dim)  # 192 vit-tiny / 384 dinov2-small (auto, fixes dinov2 eval)
+        embed_dim = int(config.predictor.input_dim)  # 192 vit-tiny / 384 dinov2-small
     adim = int(config.action_encoder.input_dim)
     model.action_predictor = hydra_instantiate(config.predictor)
-    # action-head: rebuild the decoder training used (config-gated). The spec rides
-    # in config.json (cfg.model.action_head); absent => the original MLP (mse).
+    # action-head: rebuild decoder from config.json (cfg.model.action_head); absent => MLP (mse).
     hspec = config.get("action_head", None)
     htype = hspec.get("type", "mse") if hspec is not None else "mse"
     if htype == "gmm":
@@ -149,8 +144,7 @@ def load_gip_model(run_name, embed_dim=None, epoch=None):
     else:
         model.action_decoder = MLP(embed_dim, 2048, adim)
     sd = torch.load(ckpt, map_location="cpu")
-    # proprio-as-alignment: alignment_projection is a train-time-only module (TC-WM InfoNCE) with
-    # no inference role; drop it so the strict unexpected-keys audit below stays meaningful.
+    # drop alignment_projection: train-time-only (TC-WM InfoNCE), no inference role; keeps the strict key audit meaningful.
     sd = {k: v for k, v in sd.items() if not k.startswith("alignment_projection")}
     if "proprio_encoder.patch_embed.weight" in sd:
         from module import Embedder
@@ -187,10 +181,7 @@ def attach_intention_actor(model, history_size=3, goal_conditioned=False):
             g = g[:, -1:] if g.ndim == 5 else g.unsqueeze(1)  # -> (B,1,C,H,W) single goal frame
             g = g.to(next(self.parameters()).device).float()
             goal_emb = self.encode({"pixels": g})["emb"][:, 0]
-        # OURS GC head: when the model carries a horizon_modulator, feed the AdaLN-Zero
-        # hook the remaining-horizon at the rollout start (a scalar h_norm broadcast over
-        # the proposal). Only the warm-start prior sees it; the CEM refinement is unchanged.
-        # None / no modulator -> identity (the original horizon-agnostic warm-start).
+        # horizon_modulator: feed AdaLN-Zero the remaining-horizon (h_norm) at rollout start; None -> identity.
         horizon_norm = getattr(self, "_guided_horizon_norm", None) if (
             getattr(self, "horizon_modulator", None) is not None) else None
         return self.intention_rollout(
@@ -202,9 +193,7 @@ def attach_intention_actor(model, history_size=3, goal_conditioned=False):
     return model
 
 
-# --------------------------------------------------------------------------- #
-# reactive BC policy (mode = bc)                                              #
-# --------------------------------------------------------------------------- #
+# reactive BC policy (mode = bc)
 class BCPolicy(BasePolicy):
     """Behavioral-cloning policy: run the intention head directly. Each replan
     encodes the current frame (position 0, as trained), proposes one
@@ -215,9 +204,7 @@ class BCPolicy(BasePolicy):
     def __init__(self, model, action_block, action_dim, process=None, transform=None,
                  goal_conditioned=False, H_max=50, horizon0=None, history_size=3, **kw):
         super().__init__(**kw)
-        # goal_conditioned=False -> the original goal-agnostic bc (mode 3, byte-identical).
-        # True -> encode the goal image -> z_goal -> the history-conditioned forward GC policy
-        # reaches it, one forward pass, NO solver (mode 2). Same head; the goal is optional.
+        # goal_conditioned: False -> goal-agnostic bc; True -> encode goal -> z_goal, one forward pass, NO solver.
         self.goal_conditioned = bool(goal_conditioned)
         self.type = "goal_cond_policy" if goal_conditioned else "behavioral_cloning"
         self.model = model.eval()
@@ -226,22 +213,14 @@ class BCPolicy(BasePolicy):
         self.action_block = int(action_block)
         self.action_dim = int(action_dim)
         self._action_buffer = None
-        # OURS GC head: AdaLN-Zero horizon conditioning at eval. Active ONLY when the
-        # trained model carries a horizon_modulator. Mirrors GCIDMPolicy EXACTLY: per-env
-        # remaining-horizon countdown in OBS-steps (init horizon0 = goal_offset/frameskip),
-        # decremented one obs-step per replan, clamped >=1, normalized min(h,H_max)/H_max,
-        # and fed to intention_rollout(horizon_norm=...). horizon_modulator absent -> the
-        # countdown is unused -> byte-identical to the horizon-agnostic policy.
+        # horizon countdown (obs-steps): init horizon0=goal_offset/frameskip, -1 per replan, clamp >=1,
+        # norm min(h,H_max)/H_max, fed to intention_rollout. Active only if horizon_modulator present.
         self.use_horizon = getattr(self.model, "horizon_modulator", None) is not None
         self.H_max = int(H_max)
         self.horizon0 = float(horizon0) if horizon0 is not None else None
-        self._steps_left = None  # per-env remaining obs-steps (only used when use_horizon)
-        # OURS history-conditioned head: the eval harness gives ONE obs-frame per step, but the
-        # head was TRAINED on an HS-frame latent history z_{t-HS+1..t} + the committed past
-        # actions a_{<t}. Consecutive replans ARE consecutive obs-steps, so we buffer the last
-        # HS observed frames + the last HS-1 emitted action blocks PER ENV and feed both to
-        # intention_rollout -> the planning-free eval context matches training EXACTLY. Active
-        # only for the history-conditioned GC head (use_history); else 1 frame as before.
+        self._steps_left = None  # per-env remaining obs-steps
+        # buffer last HS observed frames + last HS-1 emitted action blocks per env so the eval
+        # context (z_{t-HS+1..t} + a_{<t}) matches training. Active only for the history-conditioned GC head.
         self.history_size = int(history_size)
         self.use_history = bool(getattr(self.model, "use_action_history", True))
         self._frame_buf = None      # per-env deque of the last HS preprocessed frames
@@ -278,9 +257,7 @@ class BCPolicy(BasePolicy):
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
 
-        # OURS history-conditioned head: push the CURRENT obs-frame into each live env's
-        # rolling HS-frame buffer EVERY replan step (one replan == one obs-step). Only used
-        # when use_horizon (the history-conditioned GC head); plain bc ignores the buffers.
+        # push the current obs-frame into each live env's HS buffer every replan (one replan == one obs-step).
         cur_px = info_dict["pixels"]  # (n, 1, C, H, W) preprocessed
         if self.use_horizon and self._frame_buf is not None:
             for i in range(n):
@@ -292,16 +269,14 @@ class BCPolicy(BasePolicy):
         replan = [i for i in range(n) if len(self._action_buffer[i]) == 0 and not dead[i]]
         if replan:
             dev = next(self.model.parameters()).device
-            # goal-conditioned: encode the (already-transformed) goal frame -> z_goal and reach it.
+            # goal-conditioned: encode the (already-transformed) goal frame -> z_goal.
             goal_emb = None
             if self.goal_conditioned and "goal" in info_dict:
                 gpx = info_dict["goal"][replan]
                 gpx = gpx[:, -1:] if gpx.ndim == 5 else gpx.unsqueeze(1)  # -> (R,1,C,H,W) single goal frame
                 gpx = gpx.to(dev).float()
                 goal_emb = self.model.encode({"pixels": gpx})["emb"][:, 0]  # (R, D)
-            # OURS GC head: remaining-horizon (normalized) for the AdaLN-Zero hook,
-            # computed EXACTLY like GCIDMPolicy (per-env obs-step countdown). Only
-            # used when the model has a horizon_modulator; else None -> identity.
+            # remaining-horizon (normalized) for the AdaLN-Zero hook; None -> identity.
             horizon_norm = None
             if self.use_horizon and self._steps_left is not None:
                 steps = np.maximum(self._steps_left[replan], 1.0)
@@ -309,18 +284,15 @@ class BCPolicy(BasePolicy):
                 horizon_norm = torch.tensor(hn, device=dev, dtype=torch.float32)
 
             if self.use_horizon and self._frame_buf is not None:
-                # OURS history-conditioned eval: feed the buffered HS frames + the committed
-                # past-action blocks a_{<t} so intention_rollout reconstructs the EXACT training
-                # context (z_{t-HS+1..t} + a_{<t}). Per-env histories can differ in length early
-                # in an episode, so process each env with its own history then re-stack.
+                # feed buffered HS frames + past-action blocks a_{<t} to rebuild the training context;
+                # per-env histories differ in length early, so process each env then re-stack.
                 blocks = torch.full((len(replan), self.action_block * self.action_dim), float("nan"))
                 for row, i in enumerate(replan):
                     frames = list(self._frame_buf[i])                 # up to HS (C,H,W)
                     px_hist = torch.stack(frames, dim=0).unsqueeze(0).to(dev).float()  # (1,T0,C,H,W)
                     pab = None
                     if self.use_history and len(self._past_act_buf[i]) > 0:
-                        # align: a_{<t} are the last (T0-1) committed blocks (z-scored not needed;
-                        # the action_encoder consumes raw action blocks as in training).
+                        # a_{<t} = last (T0-1) committed blocks; action_encoder consumes raw blocks (no z-score), as in training.
                         n_past = px_hist.size(1) - 1
                         if n_past > 0:
                             past = list(self._past_act_buf[i])[-n_past:]
@@ -355,10 +327,7 @@ class BCPolicy(BasePolicy):
         return action
 
 
-# --------------------------------------------------------------------------- #
-# GC-IDM (planning-free goal-conditioned IDM on frozen LeWM latents)           #
-#   faithful repro of `gcidm` (arXiv 2605.08732). mode=gcidm. NO CEM / NO WM.  #
-# --------------------------------------------------------------------------- #
+# GC-IDM: planning-free goal-conditioned IDM on frozen LeWM latents (arXiv 2605.08732). mode=gcidm. NO CEM / NO WM.
 def load_gcidm_model(run_name):
     """Load a trained GC-IDM: the FROZEN LeWM encoder + the GCIDMHead.
 
@@ -480,25 +449,20 @@ class GCIDMPolicy(BasePolicy):
         return action
 
 
-# --------------------------------------------------------------------------- #
-# policy factory (the one config switch)                                      #
-# --------------------------------------------------------------------------- #
+# policy factory (the one config switch)
 def build_policy(cfg, model, adim, process, transform):
     """Dispatch on cfg.gip_eval.mode -> a configured policy."""
     mode = cfg.get("gip_eval", {}).get("mode", "bc")
     goal_conditioned = bool(cfg.get("gip_eval", {}).get("goal_conditioned", False))
     action_block = int(cfg.plan_config.action_block)
 
-    # mode=gcidm: planning-free goal-conditioned IDM (gcidm repro). The `model`
-    # passed in is unused here -- GCIDM has its OWN frozen-LeWM + head loaded by
-    # load_gcidm_model in eval_gip.py and stashed on cfg via gip_eval.gcidm_run.
+    # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
     if mode == "gcidm":
         gc = cfg.gip_eval
         lewm, head, gcfg = load_gcidm_model(gc.get("gcidm_run", cfg.policy))
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         lewm = lewm.to(dev); head = head.to(dev)
-        # remaining horizon at the FIRST replan = goal_offset(raw frames) / frameskip(=action_block)
-        # = number of obs-steps from start to the goal frame. Override via gip_eval.gcidm_horizon.
+        # horizon0 = goal_offset(raw frames)/frameskip(=action_block) = obs-steps to the goal frame. Override via gip_eval.gcidm_horizon.
         horizon0 = gc.get("gcidm_horizon", None)
         if horizon0 is None:
             horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
@@ -510,16 +474,12 @@ def build_policy(cfg, model, adim, process, transform):
             ablate_horizon=bool(gc.get("ablate_horizon", gcfg.get("ablate_horizon", False))),
         )
 
-    # mode=bc (goal-agnostic, mode 3) and mode=policy (optionally goal-conditioned, mode 2) are the
-    # SAME direct forward policy -- `policy` just exposes the goal_conditioned switch (bc == policy
-    # with goal_conditioned=false). One forward pass, NO solver.
+    # mode=bc and mode=policy are the SAME direct forward policy; `policy` exposes the goal_conditioned
+    # switch (bc == policy with goal_conditioned=false). One forward pass, NO solver.
     if mode in ("bc", "policy"):
         ge = cfg.get("gip_eval", {})
-        # OURS GC head: remaining-horizon at the FIRST replan = goal_offset(raw frames)
-        # / frameskip(=action_block) = obs-steps from start to the goal frame -- the SAME
-        # horizon0 GCIDMPolicy uses. Override via gip_eval.horizon0. H_max must match the
-        # training H_max (action_pred.horizon_H_max, default 50). Unused unless the model
-        # carries a horizon_modulator.
+        # horizon0 = goal_offset/frameskip (obs-steps to goal); override via gip_eval.horizon0.
+        # H_max MUST match training H_max (action_pred.horizon_H_max, default 50).
         horizon0 = ge.get("horizon0", None)
         if horizon0 is None:
             horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
@@ -535,15 +495,13 @@ def build_policy(cfg, model, adim, process, transform):
             history_size=int(cfg.get("history_size", 3)),
         )
 
-    # guided + planning both use the world-model CEM planner; `guided` additionally
-    # makes the model Actionable so CEM is warm-started from the intention proposal
-    # (goal-aware when goal_conditioned -> the prior reaches toward z_goal too).
+    # guided + planning both use the WM CEM planner; `guided` makes the model Actionable so CEM
+    # warm-starts from the intention proposal (goal-aware when goal_conditioned).
     if mode == "guided":
         attach_intention_actor(model, history_size=cfg.get("history_size", 3),
                                goal_conditioned=goal_conditioned)
-        # OURS GC head: if the model has a horizon_modulator, feed the warm-start the
-        # initial remaining-horizon (goal_offset/frameskip, normalized by H_max), matching
-        # OURS/GC-IDM. No modulator -> attr is unused -> existing guided behaviour.
+        # if the model has a horizon_modulator, feed the warm-start the initial horizon
+        # (goal_offset/frameskip, normalized by H_max).
         if getattr(model, "horizon_modulator", None) is not None:
             ge = cfg.get("gip_eval", {})
             H_max = float(ge.get("horizon_H_max", 50))
@@ -561,7 +519,7 @@ def build_policy(cfg, model, adim, process, transform):
     )
 
 
-# ============ intuition-seeded planning: opt-in CEM variance floor (2026-06-18) ============
+# intuition-seeded planning: opt-in CEM variance floor
 from stable_worldmodel.solver.callbacks import Callback as _SWMCallback
 
 

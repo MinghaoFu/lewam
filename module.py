@@ -255,9 +255,8 @@ class GMMHead(nn.Module):
 
     def __init__(self, input_dim, hidden_dim, output_dim, n_modes=5,
                  min_std=0.05, max_std=10.0):
-        # min_std floor raised from 1e-4 -> 0.05: at 1e-4 the mixture stds collapse
-        # to spikes and the NLL diverges (act_loss 3.96 -> 31 on can/40ep). The floor
-        # caps the per-sample penalty and stabilises training (standard MDN fix).
+        # min_std floor 0.05 (not 1e-4): a too-small floor lets mixture stds collapse to
+        # spikes and the NLL diverges (standard MDN fix).
         super().__init__()
         self.K = int(n_modes)
         self.adim = int(output_dim)
@@ -377,7 +376,7 @@ class ARPredictor(nn.Module):
     ):
         super().__init__()
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames, input_dim))
-        # proprio-as-token: type embedding for [pixel, proprio] tokens (used only when proprio is passed)
+        # proprio-as-token: type embedding for [pixel, proprio] tokens
         self.type_embedding = nn.Parameter(torch.randn(1, 2, input_dim))
         self.dropout = nn.Dropout(emb_dropout)
         self.transformer = Transformer(

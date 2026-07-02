@@ -46,8 +46,7 @@ def run(cfg: DictConfig):
     episodes, starts = gip.sample_eval_episodes(cfg, dataset)
 
     # -- model + policy (mode is the single switch)
-    # mode=gcidm is planning-free with its OWN frozen-LeWM + GCIDMHead (loaded inside
-    # build_policy via load_gcidm_model); it does NOT use the JEPA-checkpoint loader.
+    # mode=gcidm loads its own frozen-LeWM + GCIDMHead, not the JEPA-checkpoint loader
     if mode == "gcidm":
         policy = gip.build_policy(cfg, None, None, process, transform)
     else:
@@ -55,8 +54,7 @@ def run(cfg: DictConfig):
         model = model.to("cuda").eval()
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
-        # multi-task ckpt (no-op for single-task): select this task's conditioning vector and
-        # install the env<->trained action pad/unpad boundary; the policy/planner stays in env dims.
+        # multi-task ckpt: select this task's conditioning vector + set the env<->trained action pad boundary
         if getattr(model, "task_proj", None) is not None:
             d_raw = int(dataset.get_dim("action"))
             f = int(cfg.plan_config.action_block)

@@ -162,8 +162,7 @@ def load_episode(ds, ep_id):
 
 
 def main():
-    # Runtime PATH args stay on the CLI (per-run). Everything else (the decoder
-    # build + training hyperparameters) comes from config/decode/cnn.yaml.
+    # runtime PATH args on the CLI; decoder build + training knobs from config/decode/cnn.yaml
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=DEFAULT_DECODE_CFG,
                     help="decode yaml (decoder build + training knobs)")
@@ -185,7 +184,7 @@ def main():
     ap.add_argument("--n-recon", dest="n_recon", type=int, default=6)
     args = ap.parse_args()
 
-    # ---- decoder-training knobs from yaml (the `decode.*` group) ----
+    # decoder-training knobs from yaml (decode.* group)
     yc = OmegaConf.load(args.config)
     dc = yc.decode
     enabled = bool(dc.enabled)
@@ -252,7 +251,7 @@ def main():
     log(f"decoder params={n_params:,} kind={kind} image_shape={(dec_c, dec_h, dec_h)}")
 
     if enabled:
-        # ---- gather training frames (uint8) from train episodes ----
+        # gather training frames (uint8) from train episodes
         frame_filter = "episode_idx IN ({})".format(
             ",".join(str(int(e)) for e in train_eps)
         )
@@ -271,7 +270,7 @@ def main():
         z_all = encode_cls(model, unit, device, bs=256)  # (N,D)
         tgt_all = dec_target(unit, dec_h)  # (N,3,128,128) [0,1] on cpu
 
-        # ---- held-out eval set (frames from held-out episodes) ----
+        # held-out eval set (frames from held-out episodes)
         val_filter = "episode_idx IN ({})".format(
             ",".join(str(int(e)) for e in hold_eps)
         )
@@ -303,8 +302,7 @@ def main():
         BS = 64
         N = z_all.shape[0]
         steps_per_epoch = (N + BS - 1) // BS
-        # convergence: train up to max_epochs, plateau-stop on held-out recon.
-        # cosine horizon = max_epochs so LR doesn't hit 0 before we may stop.
+        # plateau-stop on held-out recon; cosine T_max=max_epochs so LR doesn't hit 0 before we may stop
         plan_epochs = max(min_epochs, max_epochs)
         total_steps = plan_epochs * steps_per_epoch
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps)
@@ -344,8 +342,7 @@ def main():
                     tag_best = " [BEST]"
                 log(f"== epoch {ep} train_mse={last_epoch_mse:.5f} "
                     f"heldout_mse={val_mse:.5f} best={best_val:.5f}@{best_epoch}{tag_best} ==")
-                # plateau: no held-out improvement over the last `plateau_patience`
-                # evals, only after the `min_epochs` minimum has elapsed.
+                # plateau: no held-out improvement over last plateau_patience evals, only after min_epochs
                 recent = [v for (_, v) in val_hist[-(plateau_patience + 1):]]
                 if (ep + 1) >= min_epochs and len(recent) > plateau_patience:
                     window_best = min(recent[:-1])
@@ -374,7 +371,7 @@ def main():
 
     decoder.eval()
 
-    # ---- (a) recon_grid.png on held-out frames ----
+    # (a) recon_grid.png on held-out frames
     rec_imgs, _ = load_episode(ds, int(hold_eps[0]))
     n_recon = int(args.n_recon)
     sel_idx = np.linspace(0, len(rec_imgs) - 1, n_recon).astype(int)
@@ -403,7 +400,7 @@ def main():
     plt.close(fig)
     log("saved " + str(out_dir / recon_name))
 
-    # ---- (b) predict_strip.png: rollout GT actions, decode predicted future ----
+    # (b) predict_strip.png: rollout GT actions, decode predicted future
     ep_imgs, acts = load_episode(ds, int(hold_eps[0]))
     H = HISTORY
     horizon = min(args.horizon, len(ep_imgs) - H - 1)

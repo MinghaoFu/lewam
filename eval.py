@@ -40,7 +40,7 @@ def get_episodes_length(dataset, episodes):
 
 def get_dataset(cfg, dataset_name):
     dataset_path = Path(cfg.cache_dir or swm.data.utils.get_cache_dir())
-    # lance-aware: training may use a .lance table (smaller, default format); the eval must match.
+    # use .lance table if present (must match the training format)
     _nm = str(dataset_name)[:-6] if str(dataset_name).endswith(".lance") else str(dataset_name)
     _lance = dataset_path / (_nm + ".lance")
     if _lance.exists():
@@ -59,11 +59,9 @@ def run(cfg: DictConfig):
         cfg.plan_config.horizon * cfg.plan_config.action_block <= cfg.eval.eval_budget
     ), "Planning horizon must be smaller than or equal to eval_budget"
 
-    # create world environment
     cfg.world.max_episode_steps = 2 * cfg.eval.eval_budget
     world = swm.World(**cfg.world, image_shape=(224, 224))
 
-    # create the transform
     transform = {
         "pixels": img_transform(cfg),
         "goal": img_transform(cfg),
@@ -121,7 +119,7 @@ def run(cfg: DictConfig):
         [max_start_idx_dict[ep_id] for ep_id in dataset.get_col_data(col_name)]
     )
 
-    # remove all the lines of dataset for which dataset['step_idx'] > max_start_per_row
+    # keep only rows with step_idx <= max_start_per_row
     valid_mask = dataset.get_col_data("step_idx") <= max_start_per_row
     valid_indices = np.nonzero(valid_mask)[0]
     print(valid_mask.sum(), "valid starting points found for evaluation.")

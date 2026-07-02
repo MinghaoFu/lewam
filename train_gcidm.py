@@ -1,10 +1,5 @@
-# ============================================================================
-# EXTERNAL BASELINE -- gcidm (arXiv 2605.08732) FROZEN-LATENT reproduction.
-# NOT part of the LeWAM infra. Our LeWAM training is config-gated in train.py
-# via action_pred.goal_conditioned + freeze_wm. This file precomputes frozen latents to a
-# cache and trains only a separate head, to faithfully reproduce gcidm's
-# published frozen-latent method (the Markovian GC-IDM head).
-# ============================================================================
+# External baseline: gcidm (arXiv 2605.08732) frozen-latent reproduction, not part of LeWAM infra.
+# Precomputes frozen latents to a cache, trains only a separate GC-IDM head.
 """Hindsight trainer for GC-IDM on FROZEN LeWM latents (faithful `gcidm` repro).
 
 Two phases (the encoder is frozen, so we PRECOMPUTE its latents once -- this is
@@ -58,9 +53,7 @@ from utils import get_img_preprocessor, get_column_normalizer
 import gcidm
 
 
-# --------------------------------------------------------------------------- #
-# frozen LeWM encoder                                                          #
-# --------------------------------------------------------------------------- #
+# frozen LeWM encoder
 def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224, action_block_dim=25):
     """Instantiate the LeWM JEPA (vit-tiny-192) and load the frozen weights.
     Mirrors train.py's init_from path so z = encode({pixels})['emb'][:,0] is the
@@ -106,9 +99,7 @@ def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224,
     return model
 
 
-# --------------------------------------------------------------------------- #
-# phase 1: precompute frozen latents (cached)                                  #
-# --------------------------------------------------------------------------- #
+# phase 1: precompute frozen latents (cached)
 def precompute_latents(lewm, base, img_t, act_mean, act_std, frameskip, device,
                        enc_bs=256, bf16=True, max_eps=None):
     """Encode every episode's subsampled frames -> latents; z-score action blocks.
@@ -131,10 +122,8 @@ def precompute_latents(lewm, base, img_t, act_mean, act_std, frameskip, device,
         else:
             pix = torch.as_tensor(np.asarray(pix))
         raw_act = raw_act if torch.is_tensor(raw_act) else torch.as_tensor(np.asarray(raw_act))
-        # preprocess each frame exactly like training (img_t expects a dict {'pixels':..})
-        # img_t is a Compose(ToImage(imagenet stats, source/target='pixels'), Resize).
+        # preprocess each frame exactly like training (img_t expects {'pixels':..})
         pp = img_t({"pixels": pix})["pixels"].float()   # (Fsub, C, H, W) normalized
-        # encode in chunks
         zs = []
         for i in range(0, pp.shape[0], enc_bs):
             chunk = pp[i:i + enc_bs].to(device)
@@ -164,9 +153,7 @@ def precompute_latents(lewm, base, img_t, act_mean, act_std, frameskip, device,
     return lat_list, act_list
 
 
-# --------------------------------------------------------------------------- #
-# phase 2: flat GPU tensors + vectorized hindsight sampling                     #
-# --------------------------------------------------------------------------- #
+# phase 2: flat GPU tensors + vectorized hindsight sampling
 def flatten_for_training(lat_list, act_list, device):
     """Stack per-episode latents/actions into flat GPU tensors + an index of
     valid (global_frame_t, max_h, action) tuples for vectorized hindsight sampling.
@@ -259,7 +246,7 @@ def main():
     cache = Path(swm.data.utils.get_cache_dir())
     weights = args.weights or str(cache / "decoders" / "cube_ours_lewm_weights.pt")
 
-    # ---- dataset (for latents / action stats / episode structure) ----
+    # dataset (for latents / action stats / episode structure)
     _ktl = [k.strip() for k in args.keys_to_load.split(",") if k.strip()]
     _ktc = [k for k in _ktl if k != "pixels"]  # action(+observation) cached for stats
     dataset_cfg = dict(
@@ -277,13 +264,13 @@ def main():
     _zn = act_norm.lambd
     act_mean = _zn.mean.squeeze(0).cpu().numpy().tolist()
     act_std = _zn.std.squeeze(0).cpu().numpy().tolist()
-    # image preprocessor (returns a transform callable taking a {'pixels':..} dict)
+    # image preprocessor
     img_t = get_img_preprocessor(source="pixels", target="pixels", img_size=args.img_size)
 
     lewm = build_frozen_lewm(weights, embed_dim=192, history_size=args.history_size,
                              img_size=args.img_size, action_block_dim=action_block_dim).to(device)
 
-    # ---- phase 1: precompute (cached on disk; shared across runs) ----
+    # phase 1: precompute (cached on disk; shared across runs)
     run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), args.cache_run)
@@ -315,7 +302,7 @@ def main():
           f"per-dim std(mean over dims)={allz.std(0).mean().item():.4f} "
           f"(0 => collapsed)", flush=True)
 
-    # ---- phase 2: hindsight training on flat GPU tensors (vectorized, num_workers=0) ----
+    # phase 2: hindsight training on flat GPU tensors (vectorized, num_workers=0)
     Z, A_flat, t_gidx, maxh, ep_base = flatten_for_training(lat_list, act_list, device)
     A_flat = A_flat.to(device)
     # index tensors live on device so device-side batch indices gather correctly

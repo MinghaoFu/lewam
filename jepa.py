@@ -5,9 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-# OURS goal-conditioned head: AdaLN-Zero horizon conditioning, REUSED from gcidm.py
-# (the SAME sinusoidal(64)->MLP->per-layer(scale,shift) machinery the GC-IDM arm uses,
-# so both arms are conditioned on the remaining horizon IDENTICALLY -> fair comparison).
+# AdaLN-Zero horizon conditioning, reused from gcidm.py (sinusoidal(64)->MLP->(scale,shift)).
 from gcidm import _sinusoidal_embedding
 
 
@@ -85,45 +83,32 @@ class JEPA(nn.Module):
         self.action_encoder = action_encoder
         self.projector = projector or nn.Identity()
         self.pred_proj = pred_proj or nn.Identity()
-        # GIP step 1 (optional, config-gated): Intention predictor.
-        # When None (default) behavior is byte-identical to vanilla LeWM.
+        # GIP step 1: intention predictor (None -> vanilla LeWM).
         self.action_predictor = action_predictor
         self.action_decoder = action_decoder
-        # Infra knob: state-only intention zeros the past-action stream
-        # to the action head (the WM state head stays action-conditioned).
+        # state-only intention zeros the past-action stream to the action head (WM state head stays action-conditioned).
         self.use_action_history = use_action_history
-        # proprio-as-token (config-gated): encode proprio into a state token + predict it.
+        # proprio-as-token: encode proprio into a state token + predict it.
         self.proprio_encoder = proprio_encoder
         self.proprio_pred_proj = proprio_pred_proj
         self.use_proprio = use_proprio
         # multi-task: ordered task list (row i of task_table = mt_task_names[i]).
-        # Travels to eval via the saved model config, like use_action_history.
         self.mt_task_names = list(mt_task_names) if mt_task_names else None
-        # action-head spec ({"type": mse|gmm|diffusion, ...}); None => mse (MLP).
-        # Saved in cfg.model -> config.json so eval rebuilds the matching decoder.
+        # action-head spec ({"type": mse|gmm|diffusion, ...}); None => mse (MLP). Saved in config.json so eval rebuilds it.
         self.action_head = action_head
-        # OURS GC head: optional AdaLN-Zero horizon conditioning on the intention
-        # embedding (REUSES gcidm's sinusoidal(64)+AdaLN-Zero machinery, see
-        # HorizonModulator). horizon_conditioned=False (default) => OFF => byte-identical
-        # to the horizon-agnostic policy. The flag rides in config.json (cfg.model) so
-        # load_gip_model rebuilds the SAME module before load_state_dict.
+        # optional AdaLN-Zero horizon conditioning on the intention embedding (see HorizonModulator).
+        # Flag rides in config.json so load_gip_model rebuilds the SAME module before load_state_dict.
         self.horizon_conditioned = bool(horizon_conditioned)
         self.horizon_modulator = None
         if self.horizon_conditioned:
-            # emb_dim from the predictor's pos_embedding (= ${embed_dim}); the action
-            # predictor mirrors the predictor's spec, so the intention dim matches.
+            # emb_dim from the predictor's pos_embedding; the action predictor mirrors it, so the intention dim matches.
             emb_dim = predictor.pos_embedding.shape[-1]
             self.horizon_modulator = HorizonModulator(emb_dim=emb_dim, n_freqs=64)
 
-        # SMWM (2606.20104) inverse-dynamics anti-collapse head (config-gated; default OFF).
-        # A small MLP h([z_tau ; z_{tau+1}]) -> a_hat_tau used ONLY at train time by the
-        # config-gated L_inv block in lejepa_forward (action_pred.w_inv>0). It does NOT
-        # touch the deployed policy (predict_intention / intention_rollout). When
-        # inverse_conditioned is False (default) the head is never built, so the module is
-        # byte-identical to the existing arms and load_state_dict has no inverse_model.* keys.
-        # The flag travels into config.json (cfg.model) so load_gip_model rebuilds the SAME
-        # head before load_state_dict (keeping the strict unexpected-keys audit meaningful).
-        # Shape mirrors SMWM: 2*D -> 256 -> Adim (D=192 vit-tiny, Adim = frameskip*action_dim).
+        # SMWM (2606.20104) inverse-dynamics anti-collapse head: MLP h([z_tau ; z_{tau+1}]) -> a_hat_tau,
+        # train-time only (L_inv in lejepa_forward, action_pred.w_inv>0); NOT in the deployed policy.
+        # Flag rides in config.json so load_gip_model rebuilds the SAME head before load_state_dict.
+        # Shape 2*D -> 256 -> Adim (D=192 vit-tiny, Adim = frameskip*action_dim).
         self.inverse_conditioned = bool(inverse_conditioned)
         self.inverse_model = None
         if self.inverse_conditioned:
@@ -167,10 +152,8 @@ class JEPA(nn.Module):
                 info["proprio"] = pr
             info["proprio_emb"] = self.proprio_encoder(pr)
 
-        # Multi-task (config-gated): frozen language-embedding table + learned projection
-        # (Newt-style). The vector conditions the predictors' AdaLN streams via the
-        # task_vec kwarg; it is NOT added to act_emb itself, so intention targets stay
-        # task-unshifted (one shared intention space, task identity only in conditioning).
+        # Multi-task: frozen language-embedding table + learned projection (Newt-style). Conditions the
+        # predictors' AdaLN streams via task_vec; NOT added to act_emb, so intention targets stay task-unshifted.
         if getattr(self, "task_proj", None) is not None and "task_id" in info:
             info["task_vec"] = self.task_proj(self.task_table[info["task_id"]])  # (B, D)
 
@@ -223,16 +206,13 @@ class JEPA(nn.Module):
         if goal_emb is not None:
             past_act_emb = past_act_emb + goal_emb[:, None, :]   # goal-conditioned policy (optional)
         out = self.action_predictor(emb, past_act_emb, proprio_emb)  # (B,T,D) or (pix,prop)
-        # read the proprio position (last token of the frame): with causal [pix_t, prop_t] order
-        # it is the only per-frame token that has attended to BOTH pix_t and prop_t (full state).
+        # proprio position (last token): with causal [pix_t, prop_t] order, the only per-frame token that attended to BOTH (full state).
         intention = out if proprio_emb is None else out[1]
-        # OURS GC head: AdaLN-Zero horizon conditioning on the intention embedding
-        # (BEFORE the decoder, so both intent_loss and the decoded action see it).
-        # Default OFF (no modulator / horizon=None) -> identity -> byte-identical.
+        # AdaLN-Zero horizon conditioning on the intention embedding, BEFORE the decoder,
+        # so both intent_loss and the decoded action see it.
         if self.horizon_modulator is not None and horizon is not None:
             intention = self.horizon_modulator(intention, horizon)
-        # train time for gmm/diffusion: skip sampling, the loss is computed from
-        # the intention directly by action_decoder.loss(...) (see lejepa_forward).
+        # gmm/diffusion train time: skip sampling; the loss is computed from the intention by action_decoder.loss (see lejepa_forward).
         if not decode:
             return intention, None
         dec_in = intention.detach() if detach_decoder else intention  # detached readout
@@ -319,7 +299,7 @@ class JEPA(nn.Module):
         D = emb.size(-1)
         act_hist = torch.zeros(b, 0, D, device=device)         # embeddings of committed actions
         tv = self._eval_task_vec(b, device)                    # (B, D) or None (multi-task)
-        # OURS GC head: remaining-horizon (normalized) for the AdaLN-Zero hook.
+        # remaining-horizon (normalized) for the AdaLN-Zero hook.
         h_norm = None
         if self.horizon_modulator is not None and horizon_norm is not None:
             if torch.is_tensor(horizon_norm):
@@ -345,12 +325,9 @@ class JEPA(nn.Module):
                 act_hist = torch.cat([act_hist, ae], dim=1)
                 emb = torch.cat([emb, advance(emb, act_hist)], dim=1)
 
-        # OURS GC head (eval): when the policy supplies BOTH the re-encoded HS-frame latent
-        # history (info["pixels"] with T0=HS) AND the committed past-action blocks a_{<t},
-        # fill act_hist directly from those raw blocks (embedded by the SAME action_encoder)
-        # WITHOUT advancing the state head (the frames already ARE the observed states). This
-        # reconstructs the EXACT training context (z_{t-HS+1..t} + a_{<t}), so the planning-free
-        # policy at eval matches training. None -> act_hist stays empty (the original behaviour).
+        # eval: given the HS-frame history + committed past-action blocks a_{<t}, fill act_hist from those
+        # raw blocks WITHOUT advancing the state head (the frames already ARE the observed states),
+        # rebuilding the training context (z_{t-HS+1..t} + a_{<t}). None -> act_hist stays empty.
         if past_action_blocks is not None and past_action_blocks.size(1) > 0:
             pab = self._pad_eval_action(past_action_blocks.to(device).float())
             act_hist = self.action_encoder(pab)  # (B, n_past, D)
@@ -370,7 +347,7 @@ class JEPA(nn.Module):
                 pa = pa + goal_emb[:, None, :]   # goal-conditioned policy (optional; same additive hook as tv)
             out = self.action_predictor(emb[:, -HS:], pa, None if prop is None else prop[:, -HS:])
             intention = out if prop is None else out[1]        # proprio position = full state
-            # OURS GC head: AdaLN-Zero horizon conditioning (same hook as predict_intention/GC-IDM)
+            # AdaLN-Zero horizon conditioning (same hook as predict_intention/GC-IDM)
             if h_norm is not None:
                 intention = self.horizon_modulator(intention, h_norm)
             a = self.action_decoder(intention[:, -1])          # (B, Adim)

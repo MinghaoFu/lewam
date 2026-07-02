@@ -51,10 +51,9 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         else:
             self.active = list(range(self.n_tasks))
 
-        # Task-sampling temperature (MMBench2-inspired): p_task ~ n_task^alpha.
-        # alpha=0 -> uniform across TASKS (the paper's coverage-aware default, ours);
-        # alpha=1 -> uniform across FRAMES (big datasets dominate); 0.3-0.5 boosts
-        # large tasks' effective epochs without drowning the small ones.
+        # Task-sampling temperature: p_task ~ n_task^alpha.
+        # alpha=0 -> uniform across TASKS (default); alpha=1 -> uniform across FRAMES
+        # (big datasets dominate); 0.3-0.5 boosts large tasks without drowning small ones.
         sizes = np.array([len(self.subsets[i]) for i in self.active], dtype=np.float64)
         w = sizes ** float(sampling_alpha)
         self.task_p = w / w.sum()
