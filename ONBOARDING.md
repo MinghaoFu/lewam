@@ -11,7 +11,7 @@ Get a fresh machine from **zero → running LeWAM training/eval**. Read top-to-b
 **The operative code is three things:**
 - `jepa.py` — the model, ONE class `JEPA` (`encode`→latent z; `predict`=forward dynamics/FDM; `predict_intention`=action head/IDM; `intention_rollout`=the actor).
 - `train.py` — the loss, `lejepa_forward` (pred + λ·SIGReg + intent + act + optional w_cyc / goal-cond / horizon / **w_inv**).
-- `config/train/lewm.yaml` — **every setting is a flag under `action_pred.*`** (defaults = vanilla LeWM, byte-identical).
+- `configs/train/lewm.yaml` — **every setting is a flag under `action_pred.*`** (defaults = vanilla LeWM, byte-identical).
 
 ⚠️ It is built on **LeWM, NOT DINO-WM and NOT the old "tcwm/MT-JEPA" method** — see `docs/CLAUDE.md`.
 
@@ -73,23 +73,23 @@ export STABLEWM_HOME=<DATA>/.stable-wm  XDG_CACHE_HOME=<DATA>/cache  TMPDIR=<DAT
 
 ```bash
 # tiny 1-epoch train on the fastest env; should print pred/sigreg losses + save a checkpoint:
-python train.py data=tworoom trainer.max_epochs=1 +trainer.limit_train_batches=20
+python scripts/train.py data=tworoom trainer.max_epochs=1 +trainer.limit_train_batches=20
 ```
 If it dies on `metrics.csv` → `SPT_CACHE_DIR` isn't set (§4). If on a missing dataset → §3/§4 path.
 
-## 7. Real runs — the settings ARE the config (`config/train/lewm.yaml` → `action_pred.*`)
+## 7. Real runs — the settings ARE the config (`configs/train/lewm.yaml` → `action_pred.*`)
 
 One model, three settings, all config-driven (defaults off → vanilla LeWM):
 ```bash
 # behavior-cloning / base (raw-direct: w_intent=0, detach_decoder=false):
-python train.py data=<task> action_pred.enabled=true
+python scripts/train.py data=<task> action_pred.enabled=true
 # planning-free goal-conditioned policy:
-python train.py data=<task> action_pred.enabled=true action_pred.goal_conditioned=true \
+python scripts/train.py data=<task> action_pred.enabled=true action_pred.goal_conditioned=true \
        action_pred.goal_dropout=0.5 action_pred.horizon_conditioned=true
 # eval any trained model in planning / GC / BC:
-python eval_gip.py --config-name <task> +gip_eval.mode=planning            # CEM
-python eval_gip.py --config-name <task> +gip_eval.mode=policy +gip_eval.goal_conditioned=true   # GC
-python eval_gip.py --config-name <task> +gip_eval.mode=policy +gip_eval.goal_conditioned=false  # BC
+python scripts/eval_gip.py --config-name <task> +gip_eval.mode=planning            # CEM
+python scripts/eval_gip.py --config-name <task> +gip_eval.mode=policy +gip_eval.goal_conditioned=true   # GC
+python scripts/eval_gip.py --config-name <task> +gip_eval.mode=policy +gip_eval.goal_conditioned=false  # BC
 ```
 Tasks: `pusht`, `tworoom`, `ogb`(cube), `dmc`(reacher). **Ablation flags** (all config-gated, default-off):
 `w_intent`/`detach_decoder` (predict-embedding vs raw-direct), `use_action_history` (drop past-action stream), `history_size` (Markovian=1), `loss.sigreg.weight` (anti-collapse on/off), `w_cyc` (FDM↔IDM consistency), **`w_inv`** (SMWM-style inverse-dynamics anti-collapse — can replace SIGReg via `loss.sigreg.weight=0`), `head` (mse|gmm|diffusion), encoder (vit-tiny scratch vs `model=lewm_dinov2`).
@@ -100,7 +100,7 @@ Tasks: `pusht`, `tworoom`, `ogb`(cube), `dmc`(reacher). **Ablation flags** (all 
 |---|---|
 | `jepa.py` | the model (`JEPA`): encode / predict (FDM) / predict_intention (action head) / intention_rollout / inverse head |
 | `train.py` | `lejepa_forward` — the full loss (pred+sigreg+intent+act+w_cyc+goal+horizon+w_inv) |
-| `config/train/lewm.yaml` | all settings via `action_pred.*`; `config/train/{model,data,launcher}/` |
+| `configs/train/lewm.yaml` | all settings via `action_pred.*`; `configs/train/{model,data,launcher}/` |
 | `eval_gip.py` | planning / GC / BC eval for the LeWM envs |
 | `eval_*_robomimic.py` | robomimic entrypoints (register the sim env) |
 | `gcidm.py` | the GC-IDM baseline (Markovian) |
@@ -149,7 +149,7 @@ Everything below was **stopped mid-flight** on L40S/174 (the OOM episode); train
 
 Base command (fill `<data>`/`<ep>`/`<batches>` from the table; arm sets `<sigw>`/extras):
 ```bash
-python train_sigreg.py data=<data> \
+python scripts/train_sigreg.py data=<data> \
   action_pred.enabled=true action_pred.w_act=1.0 action_pred.w_intent=1.0 \
   action_pred.detach_decoder=false action_pred.head=mse \
   model.use_action_history=true history_size=3 \
@@ -173,7 +173,7 @@ python train_sigreg.py data=<data> \
 | `idm_dense_A8` | `loss.sigreg.weight=0 action_pred.w_inv=0.5 action_pred.inv_mode=dense action_pred.inv_target=predicted` | cycle-consistent (inverse reads action off the FDM's own rollout ẑ) |
 
 ```bash
-python train_sigreg.py data=<data> \
+python scripts/train_sigreg.py data=<data> \
   action_pred.enabled=true action_pred.w_act=1.0 action_pred.w_intent=0.0 \
   action_pred.detach_decoder=false action_pred.head=mse \
   model.use_action_history=true history_size=3 \
@@ -206,7 +206,7 @@ Train with `train.py` (same base flags as §B minus w_inv) + the arm override; *
 ### D. Encoder capacity — DINOv2-large (§29)
 **Q: is the robomimic can-GC floor (~0.26) an encoder-capacity bottleneck?** DINOv2-large (1024-d, 5.3× wider than vit-tiny CLS), GC head, end-to-end finetune:
 ```bash
-python train.py data=robomimic_can model=lewm_dinov2 \
+python scripts/train.py data=robomimic_can model=lewm_dinov2 \
   model.encoder.pretrained=true model.encoder.model_name=facebook/dinov2-large \
   embed_dim=1024 loader.batch_size=24 freeze_wm=false \
   action_pred.enabled=true action_pred.goal_conditioned=true \

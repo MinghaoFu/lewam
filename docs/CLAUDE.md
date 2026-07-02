@@ -8,7 +8,7 @@
 
 1. **Edit docs here; code + experiments live on L40S `le-wm-repro`** (the workspace, user 2026-06-22). This worktree has no runnable code. Train/eval on L40S (`sudo -u minghao.fu`, venv `lewm`); datasets + checkpoints under `/mnt/minghao_data`, disk-safe redirects per rule 10.
 2. **The model is ONE class — `JEPA` in `le-wm-repro/jepa.py`**: CLS-token `encode`→latent z; `predict` = the FDM (z_≤t,a→ẑ_{t+1}); `predict_intention` = the action head / IDM (z_≤t,a_<t[,z_goal,horizon]→intention→`action_decoder`→raw action); `action_encoder`; `intention_rollout` = the actor (rolls FDM + head jointly). (The deleted local two-class `models/mt_world_model.py` was tcwm, a different lineage.)
-3. **The loss is `lejepa_forward` in `le-wm-repro/train.py`**: `pred_loss + λ·sigreg_loss` (the LeWM base) plus config-gated `intent_loss` (predict act_emb), `act_loss` (raw action), `w_cyc` (FDM↔IDM consistency), goal-conditioned + AdaLN horizon, `sigreg_act`, proprio, InfoNCE align. Config: `config/train/lewm.yaml`. (The deleted local `conf/method/mtjepa.yaml` was tcwm.)
+3. **The loss is `lejepa_forward` in `le-wm-repro/train.py`**: `pred_loss + λ·sigreg_loss` (the LeWM base) plus config-gated `intent_loss` (predict act_emb), `act_loss` (raw action), `w_cyc` (FDM↔IDM consistency), goal-conditioned + AdaLN horizon, `sigreg_act`, proprio, InfoNCE align. Config: `configs/train/lewm.yaml`. (The deleted local `conf/method/mtjepa.yaml` was tcwm.)
 4. **Task conditioning is frozen CLIP.** Embeddings live in `*_tasks.json`. If you change task names/order, re-run `create_task_embeddings.py` AND update the matching `_TASK_REGISTRY` in `datasets/multitask_robomimic_dset.py` if a new task type is added.
 5. **Action masks are auto-built from `action_dims` kwarg** passed by the trainer; padded action dims are zeroed before the action encoder and the consistency loss is per-sample-weighted by valid fraction.
 6. Don't commit `wandb/`, `logs/`, `*.pt`, `*.png` outputs back into this repo.
@@ -26,11 +26,11 @@ All on **L40S `le-wm-repro`** (`sudo -u minghao.fu`, venv `lewm`, disk-safe redi
 
 ```bash
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-# train (base or GIP/GC): config config/train/lewm.yaml
-python train.py data=<task> action_pred.enabled=true [action_pred.goal_conditioned=true ...]
+# train (base or GIP/GC): config configs/train/lewm.yaml
+python scripts/train.py data=<task> action_pred.enabled=true [action_pred.goal_conditioned=true ...]
 # eval: planning / guided / bc / goal-conditioned policy
-python eval_gip.py --config-name <task> +gip_eval.mode=policy|guided|planning [+gip_eval.goal_conditioned=true]
-python eval_histbc_robomimic.py ...   # robomimic-specific entrypoints register the robosuite env
+python scripts/eval_gip.py --config-name <task> +gip_eval.mode=policy|guided|planning [+gip_eval.goal_conditioned=true]
+python scripts/eval_histbc_robomimic.py ...   # robomimic-specific entrypoints register the robosuite env
 ```
 
-The action-pred setting is driven entirely by `config/train/lewm.yaml` `action_pred.*` flags (`enabled`, `w_intent`/`w_act`, `detach_decoder`, `goal_conditioned`, `horizon_conditioned`, `w_cyc`, `head`, …).
+The action-pred setting is driven entirely by `configs/train/lewm.yaml` `action_pred.*` flags (`enabled`, `w_intent`/`w_act`, `detach_decoder`, `goal_conditioned`, `horizon_conditioned`, `w_cyc`, `head`, …).

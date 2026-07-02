@@ -90,7 +90,7 @@ two-mechanism control gain (3-seed, both robomimic tasks)**.
 
 ### Exact training recipe (warm-start GIP)
 ```
-CUDA_VISIBLE_DEVICES=<g> .venv/bin/python train.py \
+CUDA_VISIBLE_DEVICES=<g> .venv/bin/python scripts/train.py \
   data=<robomimic_lift|robomimic_can|robomimic_square|pusht|tworoom|dmc> \
   action_pred.enabled=true \
   action_pred.detach_decoder=<true|false>   # TRUE = validated latent-only design (see §0 bug) \
@@ -602,7 +602,7 @@ CPU — NOT lowering N.
 old framing in the paper. What is actually VERIFIED vs still a HYPOTHESIS:
 
 **VERIFIED (read from configs/data on 174, 2026-06-14):**
-1. **Cube is a grasp task, not pushing.** `config/eval/cube.yaml`: `env_name: swm/OGBCube-v0`, `env_type: single`,
+1. **Cube is a grasp task, not pushing.** `configs/eval/cube.yaml`: `env_name: swm/OGBCube-v0`, `env_type: single`,
    `dataset_name: ogbench/cube_single_expert`; goal set via privileged **block target pose** (`set_target_pos`,
    `goal_privileged_block_0_pos` + `_quat`). The arm grasps and carries the cube to a target pose. (The rollout frames
    show the gripper closing on a red cube — manipulation like Lift, not a push.)
@@ -877,7 +877,7 @@ is a hypothesis, not a result.
         TRAINING GPU per the cross-GPU render gotcha; params from EXPERIMENTS.md line ~1398 `can = PickPlaceCan / budget 240 / offset 90`):
         ```
         CUDA_VISIBLE_DEVICES=1 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl \
-          python eval_histbc_robomimic.py --config-name robomimic policy=can_gc_hist \
+          python scripts/eval_histbc_robomimic.py --config-name robomimic policy=can_gc_hist \
           world.task=PickPlaceCan dataset.stats=can eval.dataset_name=can \
           eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90
         ```
@@ -983,7 +983,7 @@ is a hypothesis, not a result.
     `batch_var = topk_candidates.std(dim=1)` with NO floor → over n_steps=30 the elite std → 0 and CEM **collapses ONTO the
     seed** (replays the intuition, no deliberation). Fix = `gip.VarFloorCallback` (appended to `gip.py`, backup `gip.py.bak_varfloor`):
     a swm solver Callback that in-place `clamp_(min=min_var)` the var after each elite fit (the CEM loop reuses that tensor next
-    iter → propagates). Opt-in via new solver config `config/eval/solver/cem_floor.yaml` (= cem.yaml + the callback, min_var=0.1).
+    iter → propagates). Opt-in via new solver config `configs/eval/solver/cem_floor.yaml` (= cem.yaml + the callback, min_var=0.1).
     **Validated path byte-identical** (`solver=cem` has no callbacks). Smoke-tested: clamp works ([0.5,0.01,0.2,0.0]→[0.5,0.1,0.2,0.1]);
     `cem_floor` hydra-instantiates CEMSolver with 1 VarFloorCallback. Lets the good full-horizon seed be REFINED, not just replayed.
   - **⚠️ CAVEAT (post-gcidm-deep-read 2026-06-18): gcidm ALSO ran this budget sweep** (their Fig B, 500× CEM grid → NO CEM config
@@ -1136,7 +1136,7 @@ builder `stable_pretraining.backbone.utils.from_huggingface(model_name, pretrain
 `pretrained=True → AutoModel.from_pretrained("facebook/dinov2-small")` (real weights); `pretrained=False →
 AutoConfig.from_pretrained(...) + AutoModel.from_config(...)` (random init of the **identical** arch). Returns
 `model.base_model` = the Dinov2Model. **No new loader code was needed.**
-- New config `config/train/model/lewm_dinov2.yaml` = copy of `lewm.yaml` with only the encoder block swapped to
+- New config `configs/train/model/lewm_dinov2.yaml` = copy of `lewm.yaml` with only the encoder block swapped to
   `_target_: stable_pretraining.backbone.utils.from_huggingface`, `model_name: facebook/dinov2-small`, `pretrained: false`
   (flip per-arm on the CLI). Companion override **`embed_dim=384`** (lewm.yaml default 192) propagates to
   predictor/projector/pred_proj/action_encoder via `${embed_dim}`.
@@ -1149,11 +1149,11 @@ AutoConfig.from_pretrained(...) + AutoModel.from_config(...)` (random init of th
 `MPLCONFIGDIR=/mnt/minghao_data/mpl`, `HF_HUB_OFFLINE=0`; conda env `$HOME/lewm`):**
 ```
 # canonical (already running, GPU1, launched 2026-06-17 07:40) — vit-tiny-192 scratch:
-python train.py data=robomimic_tool_hang action_pred.enabled=false trainer.max_epochs=100 \
+python scripts/train.py data=robomimic_tool_hang action_pred.enabled=false trainer.max_epochs=100 \
   output_model_name=tool_hang_lewm_scratch +trainer.limit_train_batches=4000 \
   +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 wandb.enabled=false
 # dinov2 scratch (GPU2) — clean-ablation control:
-CUDA_VISIBLE_DEVICES=2 python train.py data=robomimic_tool_hang model=lewm_dinov2 embed_dim=384 \
+CUDA_VISIBLE_DEVICES=2 python scripts/train.py data=robomimic_tool_hang model=lewm_dinov2 embed_dim=384 \
   model.encoder.pretrained=false action_pred.enabled=false trainer.max_epochs=100 \
   output_model_name=tool_hang_lewm_dinov2_scratch +trainer.limit_train_batches=4000 \
   +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 wandb.enabled=false +ckpt_every=10
@@ -1223,9 +1223,9 @@ Output `output_model_name=<task>_gip_<arm>` → `$STABLEWM_HOME/checkpoints/<tas
 
 **Eval (validated path, per [[project_robomimic_eval_path_gotcha]]):** `eval_histbc_robomimic.py` for BC,
 `eval_histguided_robomimic.py` for guided/planning (the manipulation-contrast evaluator from task #43). **NOT**
-`eval_gip_robomimic.py` (its BCPolicy is single-frame, horizon-1 → bc≈0). Invocation (hydra, `config/eval/robomimic.yaml`):
+`eval_gip_robomimic.py` (its BCPolicy is single-frame, horizon-1 → bc≈0). Invocation (hydra, `configs/eval/robomimic.yaml`):
 ```
-python eval_histbc_robomimic.py --config-name robomimic policy=<task>_gip_<arm> \
+python scripts/eval_histbc_robomimic.py --config-name robomimic policy=<task>_gip_<arm> \
     world.task=<Env> dataset.stats=<task> eval.dataset_name=<task> \
     eval.num_eval=50 eval.eval_budget=<~2×median-demo> eval.goal_offset_steps=<task>
 ```
@@ -1396,7 +1396,7 @@ prior is inert.* Task- AND capacity-dependent, not a blanket win.
   not env-creation); the recurring [[project_robomimic_eval_path_gotcha]]-class CLIP-cache trap bit again — always pre-cache
   CLIP before a batch of evals.
 - **🐛 EVAL BLOCKER #4 + RESOLUTION — N=50 = 50 simultaneous mujoco/EGL envs is non-viable; BATCH over a 10-env pool
-  (2026-06-17).** `config/eval/robomimic.yaml` sets `world.num_envs = eval.num_eval`, so N=50 builds **50 TwoArmTransport
+  (2026-06-17).** `configs/eval/robomimic.yaml` sets `world.num_envs = eval.num_eval`, so N=50 builds **50 TwoArmTransport
   sims at once** → ~20-min single-core mujoco compile that never reached GIP-load (`num_envs=8` reached it instantly). Two
   things cost a lot of time: (a) `OMP_NUM_THREADS=1` thread caps (real improvement — 50 envs otherwise spawn a 227-thread
   storm — KEEP, but not the full fix); (b) **I repeatedly killed working evals because `pgrep | head -1` matched the idle
@@ -1609,7 +1609,7 @@ measurable. Same clean ablation: same `dinov2-small-384` arch, flip only `model.
   Running cube on 174 while robomimic ran on L40S was the wrong call. Fix: the user's HF dataset **`mh-hf/exp-bucket`** is a
   public, consolidated **`.lance`** store of every family (robomimic/ogbench/mimicgen/libero/robocasa/dexmimicgen). Pulled
   `ogbench/ogb_cube_single.lance` from HF → **20 GB in ~90 s** (vs the 95 GB `.h5` rsync's ~2h, which I killed) — lance is
-  ~5× smaller (JPEG frames) + HF CDN is fast. Wired a lance data config `config/train/data/ogb_lance.yaml` (name=
+  ~5× smaller (JPEG frames) + HF CDN is fast. Wired a lance data config `configs/train/data/ogb_lance.yaml` (name=
   `ogbench/ogb_cube_single.lance`, keys `pixels/action/observation`; smoke-tested loads+trains clean), **relaunched both
   cube arms on L40S** (`data=ogb_lance`, GPU3/4, same 60ep×4000 recipe), **killed the 174 runs**. **exp-bucket is now the
   canonical data path — any machine pulls the same lance, no rsync** ([[project_dinov2_init_ablation]]). Infra fix: the swm
@@ -1632,7 +1632,7 @@ measurable. Same clean ablation: same `dinov2-small-384` arch, flip only `model.
   index-squeeze) are harmless on the h5 path (no `.lance` for `cube_single_expert` → HDF5Dataset; squeeze is a noop on 1-D).
   **Durable lesson: training-format ≠ eval-format here — the swm eval pipeline assumes HDF5Dataset semantics.**
 - **✅ PRE-FLIGHT VERIFIED (2026-06-18, hour ~2 of cube training):** confirmed the guided eval will actually fire at ep60 —
-  `eval_gip.py` + `config/eval/cube.yaml` (the `--config-name cube` target) + the cube **h5** (`ogbench/cube_single_expert.h5`,
+  `eval_gip.py` + `configs/eval/cube.yaml` (the `--config-name cube` target) + the cube **h5** (`ogbench/cube_single_expert.h5`,
   eval needs it for goal sampling) all present; `cube_eval_watcher.sh` waits for both `weights_epoch_60.pt` (ckpts save at
   multiples of 10 → ep60 triggers) then fires guided N=50 s42 on **GPU3/4 = the cube TRAINING GPUs** (train+eval same GPU →
   cross-GPU-render constraint [[project_l40s_cross_gpu_rendering]] satisfied). Watcher does s42 only; I add s0/s1 manually after
@@ -1757,7 +1757,7 @@ concern on the latent axis; combined with the §10 bc batching-bug fix, both axe
 
 ### §10 🔴🐛 GUIDED EVAL CONFOUND — goal_offset(280) >> plan-horizon(25) [found by code audit 2026-06-17, user-prompted]
 **MY BUG, caught before trusting the "fundamental" story (user: "deeply find possible bugs first").** The intuition-guided
-CEM plan reaches only **horizon×frameskip = 5×5 = 25 env-steps** (`config/eval/robomimic.yaml plan_config horizon=5,
+CEM plan reaches only **horizon×frameskip = 5×5 = 25 env-steps** (`configs/eval/robomimic.yaml plan_config horizon=5,
 action_block=5`; data frameskip=5). But I set **`goal_offset_steps=280` (tool_hang) / 270 (transport)** to match the long
 episodes. So the CEM cost (`jepa.py criterion`, scores the +25-step predicted latent vs the +280-step goal latent) compares
 a state the plan CANNOT reach to the goal → cost ~flat across candidates → CEM (no variance floor, `cem.py:245`) returns
@@ -1845,16 +1845,16 @@ DataLoader with persistent_workers=True over the in-memory cache → deadlocked 
 ```
 # train (horizon ON), GPU 0:
 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=1 MPLCONFIGDIR=/tmp/mpl_x TMPDIR=/tmp \
-  CUDA_VISIBLE_DEVICES=0 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 \
+  CUDA_VISIBLE_DEVICES=0 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 \
   --run_name cube_gcidm --cache_run cube_gcidm
 # horizon ablation (identical except --ablate_horizon), GPU 1, reuses the SAME latents cache:
-  CUDA_VISIBLE_DEVICES=1 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 --ablate_horizon \
+  CUDA_VISIBLE_DEVICES=1 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 --ablate_horizon \
   --run_name cube_gcidm_noh --cache_run cube_gcidm
 # eval N=50 (horizon ON), GPU 2:
 STABLEWM_HOME=... MUJOCO_GL=egl HF_HUB_OFFLINE=1 MPLCONFIGDIR=/tmp/mpl_x TMPDIR=/tmp CUDA_VISIBLE_DEVICES=2 \
-  python eval_gip.py --config-name cube policy=cube_gcidm +gip_eval.mode=gcidm eval.num_eval=50
+  python scripts/eval_gip.py --config-name cube policy=cube_gcidm +gip_eval.mode=gcidm eval.num_eval=50
 # eval N=50 (horizon OFF ablation), GPU 3:
-  CUDA_VISIBLE_DEVICES=3 python eval_gip.py --config-name cube policy=cube_gcidm_noh +gip_eval.mode=gcidm \
+  CUDA_VISIBLE_DEVICES=3 python scripts/eval_gip.py --config-name cube policy=cube_gcidm_noh +gip_eval.mode=gcidm \
   +gip_eval.gcidm_run=cube_gcidm_noh +gip_eval.ablate_horizon=true eval.num_eval=50
 ```
 Eval config (cube.yaml, unchanged): num_eval=50, goal_offset_steps=25 (raw frames=5 obs-steps), eval_budget=50,
@@ -1906,7 +1906,7 @@ is autoregressive over the latent history z_{t-HS+1..t} + past actions a_{<t}, P
 horizon as gcidm, run PLANNING-FREE at eval (intention_rollout horizon=1, one forward pass, NO CEM). Arm 3 = same-box CEM +
 guided (the 174 CEM≈67 / guided≈88 are cross-box; re-run on L40S so all arms share the box → kills the cross-GPU rendering
 confound, see memory `project_l40s_cross_gpu_rendering`). All on the SAME frozen base (`cube_ours_lewm_weights.pt`, vit-tiny-192),
-SAME data (`ogbench/ogb_cube_single.lance`), SAME eval (`config/eval/cube.yaml`: N=50, goal_offset_steps=25, eval_budget=50,
+SAME data (`ogbench/ogb_cube_single.lance`), SAME eval (`configs/eval/cube.yaml`: N=50, goal_offset_steps=25, eval_budget=50,
 terminate_at_goal), SAME H_max=50.
 
 ### Code added to make OURS a fair drop-in (additive, config-gated, default OFF → existing bc/guided/planning/gcidm byte-identical)
@@ -1938,7 +1938,7 @@ terminate_at_goal), SAME H_max=50.
 ### Exact train command (OURS, L40S GPU 1)
 ```
 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=1 MPLCONFIGDIR=/tmp/mpl_x TMPDIR=/tmp CUDA_VISIBLE_DEVICES=1 \
-  python train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 --history_size 3 --seed 3072 --run_name cube_ours_gc
+  python scripts/train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 --history_size 3 --seed 3072 --run_name cube_ours_gc
 ```
 Warm-started from the SAME frozen base (`/mnt/minghao_data/.stable-wm/decoders/cube_ours_lewm_weights.pt`), hindsight goals
 (Uniform[1,50] obs-steps), w_act=1 w_intent=1 detach_target=1, cosine LR T_max=40. **Convergence:** val_act minimum at **epoch 15
@@ -1960,12 +1960,12 @@ OURS head) so plain bc stays single-frame/byte-identical. After the fix: N=8 50%
 ### Exact eval commands (N=50, L40S)
 ```
 # OURS (planning-free, mode=policy, goal+horizon), seeds 42 (GPU2) and 7 (GPU3):
-... python eval_gip.py --config-name cube policy=cube_ours_gc +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
+... python scripts/eval_gip.py --config-name cube policy=cube_ours_gc +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
       +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 # Same-box CEM (planning, frozen base via a built run-dir cube_lewm_base = config.json[vit-tiny-192] + the frozen weights):
-... python eval_gip.py --config-name cube policy=cube_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name cube policy=cube_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
 # Same-box guided (CEM warm-started by the OURS intention prior, goal+horizon-aware):
-... python eval_gip.py --config-name cube policy=cube_ours_gc +gip_eval.mode=guided +gip_eval.goal_conditioned=true \
+... python scripts/eval_gip.py --config-name cube policy=cube_ours_gc +gip_eval.mode=guided +gip_eval.goal_conditioned=true \
       +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 ```
 
@@ -1996,7 +1996,7 @@ MUST be fed its training-length frame+action history at eval (the harness only g
 - `gip.py` (`BCPolicy` horizon countdown + HS-frame/action buffering; `build_policy`/`attach_intention_actor` horizon hooks; backup `gip.py.bak_ours`)
 - `train.py` (horizon_conditioned wiring; backup `train.py.bak_ours`)
 - `train_ours_gc.py` (NEW — cached latent trainer, reuses `cube_gcidm/latents_cache.pt`)
-- `config/train/lewm.yaml` (added `action_pred.horizon_conditioned` / `horizon_H_max`; backup `ogb_lance.yaml.bak_ours` is unrelated, the lewm.yaml change is in-place)
+- `configs/train/lewm.yaml` (added `action_pred.horizon_conditioned` / `horizon_H_max`; backup `ogb_lance.yaml.bak_ours` is unrelated, the lewm.yaml change is in-place)
 - Checkpoints: `$STABLEWM_HOME/checkpoints/cube_ours_gc/{weights_epoch_1.pt=BEST, weights_epoch_0.pt=latest, config.json}` and
   `cube_lewm_base/` (the frozen-base run-dir for same-box CEM). Eval results under `$STABLEWM_HOME/gip_eval/{policy,guided,planning}/`.
 
@@ -2024,7 +2024,7 @@ action-MSE yet WORSENS closed-loop SR under covariate shift on contact). Honest,
   (min/median/max raw frames = ~10/24/49 obs-steps). h5 has `state`(7) / `proprio`(4) / `action`(2) / `pixels` / `episode_idx`
   / `step_idx`. `_load_slice` returns the SAME (pixels (Fsub,3,224,224) uint8, action (L,2)) interface as the cube lance, so the
   precompute loop is unchanged.
-- **Eval config `config/eval/pusht.yaml` (unchanged):** `env_name swm/PushT-v1`, N=50, `goal_offset_steps=25`, `eval_budget=50`,
+- **Eval config `configs/eval/pusht.yaml` (unchanged):** `env_name swm/PushT-v1`, N=50, `goal_offset_steps=25`, `eval_budget=50`,
   `plan_config horizon=5 action_block=5` (→ horizon×block=25 ≤ budget 50 ✓), dataset `pusht_expert_train`, success = 95% T-block
   coverage of the goal pose; callables `_set_state`/`_set_goal_state` (vs cube's `set_target_pos`). Eval horizon0 = goal_offset /
   action_block = 25/5 = **5 obs-steps** (normalized 5/50=0.1) — IDENTICAL to cube. So H_max=50 covers the full pusht episode.
@@ -2059,16 +2059,16 @@ three arms. Phase-2 head training: gcidm ~1.3 s/epoch (200 ep ≈ 5 min), OURS ~
 ### Exact train commands (L40S, `$B=…/le-wm-repro`, py `…/lewm/bin/python`)
 ```
 # GC-IDM horizon ON (also builds the shared cache), GPU0:
-... CUDA_VISIBLE_DEVICES=0 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 \
+... CUDA_VISIBLE_DEVICES=0 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 \
     --dataset_name pusht_expert_train.h5 --keys_to_load pixels,action \
     --weights /mnt/minghao_data/.stable-wm/decoders/pusht_ours_lewm_weights.pt \
     --run_name pusht_gcidm --cache_run pusht_gcidm
 # GC-IDM horizon OFF (AdaLN ablation), reuses the cache, GPU1:
-... CUDA_VISIBLE_DEVICES=1 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 --ablate_horizon \
+... CUDA_VISIBLE_DEVICES=1 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 --ablate_horizon \
     --dataset_name pusht_expert_train.h5 --keys_to_load pixels,action \
     --weights .../pusht_ours_lewm_weights.pt --run_name pusht_gcidm_noh --cache_run pusht_gcidm
 # OURS history-conditioned forward GC policy, reuses the cache, GPU2:
-... CUDA_VISIBLE_DEVICES=2 python train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 \
+... CUDA_VISIBLE_DEVICES=2 python scripts/train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 \
     --history_size 3 --seed 3072 --weights .../pusht_ours_lewm_weights.pt \
     --run_name pusht_ours_gc --cache_run pusht_gcidm
 ```
@@ -2086,17 +2086,17 @@ three arms. Phase-2 head training: gcidm ~1.3 s/epoch (200 ep ≈ 5 min), OURS ~
 ### Exact eval commands (N=50, L40S, same box)
 ```
 # GC-IDM (mode=gcidm), seeds 42(GPU0) / 7(GPU1):
-... python eval_gip.py --config-name pusht policy=pusht_gcidm +gip_eval.mode=gcidm eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name pusht policy=pusht_gcidm +gip_eval.mode=gcidm eval.num_eval=50 seed=<42|7>
 # GC-IDM horizon-OFF ablation, seed 42(GPU3):
-... python eval_gip.py --config-name pusht policy=pusht_gcidm_noh +gip_eval.mode=gcidm \
+... python scripts/eval_gip.py --config-name pusht policy=pusht_gcidm_noh +gip_eval.mode=gcidm \
     +gip_eval.gcidm_run=pusht_gcidm_noh +gip_eval.ablate_horizon=true eval.num_eval=50 seed=42
 # OURS planning-free (mode=policy, goal+horizon), seeds 42(GPU0)/7(GPU1):
-... python eval_gip.py --config-name pusht policy=pusht_ours_gc +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
+... python scripts/eval_gip.py --config-name pusht policy=pusht_ours_gc +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
     +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 # Same-box CEM (mode=planning, frozen base), seeds 42(GPU4)/7(GPU5):
-... python eval_gip.py --config-name pusht policy=pusht_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name pusht policy=pusht_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
 # Same-box guided (CEM warm-started by OURS goal+horizon prior), seeds 42(GPU3)/7(GPU4):
-... python eval_gip.py --config-name pusht policy=pusht_ours_gc +gip_eval.mode=guided +gip_eval.goal_conditioned=true \
+... python scripts/eval_gip.py --config-name pusht policy=pusht_ours_gc +gip_eval.mode=guided +gip_eval.goal_conditioned=true \
     +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 ```
 (BCPolicy `use_horizon`/`use_history` BOTH auto-engage here: verified the loaded model has `horizon_modulator=True`,
@@ -2193,7 +2193,7 @@ removing it recovers ~⅓ of the gap to GC-IDM, but 42 still ≪ 90, so a second
   adim=10` — byte-identical frozen features to the §13 OURS arm.
 - **Hindsight windows:** `n=418443 train=376599 val=41844 HS=3 H_max=50` — EXACTLY §13's OURS counts (418443 / 376599 / 41844).
   Same seed 3072 shuffle, same 0.9 train split. Trainable params **11.29 M** — byte-identical to §13's OURS. Everything matches.
-- **Eval config `config/eval/pusht.yaml` (unchanged):** `env_name swm/PushT-v1`, N=50, `goal_offset_steps=25`, `eval_budget=50`,
+- **Eval config `configs/eval/pusht.yaml` (unchanged):** `env_name swm/PushT-v1`, N=50, `goal_offset_steps=25`, `eval_budget=50`,
   `plan_config horizon=5 action_block=5`, success = 95% T-block coverage. Eval horizon0 = 5 obs-steps (0.1 normalized). IDENTICAL to §13.
 - **The ONE change:** `use_action_history=False`. In `jepa.JEPA.predict_intention` (line 192-193) this zeros `past_act_emb`
   (`past_act_emb = torch.zeros_like(past_act_emb)  # state-only intention`) at TRAIN, and in `JEPA.intention_rollout` (line 338-339)
@@ -2224,7 +2224,7 @@ render OOD (cf. [[project_l40s_cross_gpu_rendering]]). Train ~46 s/epoch (vs §1
 ### EXACT train command (L40S)
 ```
 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=1 MPLCONFIGDIR=/tmp/mpl_abl TMPDIR=/tmp \
-CUDA_VISIBLE_DEVICES=1 python train_ours_gc_noact.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 \
+CUDA_VISIBLE_DEVICES=1 python scripts/train_ours_gc_noact.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 \
   --history_size 3 --seed 3072 --use_action_history 0 \
   --weights /mnt/minghao_data/.stable-wm/decoders/pusht_ours_lewm_weights.pt \
   --run_name pusht_ours_noact --cache_run pusht_gcidm
@@ -2236,7 +2236,7 @@ weight_decay 1e-4, detach_target=1, cosine LR — all at the file defaults, same
 ### EXACT eval commands (N=50, L40S, same box)
 ```
 # seed 42 (GPU4), seed 7 (GPU7), staggered 7s:
-STABLEWM_HOME=... MPLCONFIGDIR=/tmp/mpl_abl ... CUDA_VISIBLE_DEVICES=<4|7> python eval_gip.py --config-name pusht \
+STABLEWM_HOME=... MPLCONFIGDIR=/tmp/mpl_abl ... CUDA_VISIBLE_DEVICES=<4|7> python scripts/eval_gip.py --config-name pusht \
   policy=pusht_ours_noact +gip_eval.mode=policy +gip_eval.goal_conditioned=true +gip_eval.horizon_H_max=50 \
   eval.num_eval=50 seed=<42|7>
 ```
@@ -2445,10 +2445,10 @@ h~Uniform[1,H_max] clamped to the episode end). Exact launch (L40S, `$B=…/le-w
 lift→4/can→5/square→7):
 ```
 # GC-IDM (Markovian):
-CUDA_VISIBLE_DEVICES=$G python train_gcidm.py --dataset_name <task>.h5 --keys_to_load pixels,action \
+CUDA_VISIBLE_DEVICES=$G python scripts/train_gcidm.py --dataset_name <task>.h5 --keys_to_load pixels,action \
   --weights .../decoders/<task>_lewm_weights.pt --run_name <task>_gcidm --cache_run <task>_gcidm --epochs 200 --H_max 50
 # OURS (history), reuses the gcidm cache:
-CUDA_VISIBLE_DEVICES=$G python train_ours_gc.py --weights .../decoders/<task>_lewm_weights.pt \
+CUDA_VISIBLE_DEVICES=$G python scripts/train_ours_gc.py --weights .../decoders/<task>_lewm_weights.pt \
   --run_name <task>_gc_ours --cache_run <task>_gcidm --epochs 200 --H_max 50
 ```
 **Train val losses (converged, 200 ep).** GC-IDM hindsight MSE (best_val): lift 0.437 / can 0.226 / square 0.324. OURS val_act
@@ -2561,7 +2561,7 @@ collapse) because tworoom's success is coarse goal-reaching with no contact dyna
   precompute loop is unchanged. Episode key = `ep_idx` (gip.episode_col auto-picks `ep_idx` over `episode_idx`).
 - **H_max = 25** (covers the full 20-obs-step episode; cube/pusht used 50 for their 40/49-step episodes). Eval horizon0 = goal_offset/action_block
   = 25/5 = **5 obs-steps**.
-- **Eval config `config/eval/tworoom.yaml` — UNCHANGED** (`dataset_name: tworoom` already resolves to `tworoom.h5`; verified by diff =
+- **Eval config `configs/eval/tworoom.yaml` — UNCHANGED** (`dataset_name: tworoom` already resolves to `tworoom.h5`; verified by diff =
   TWOROOM_CONFIG_UNCHANGED). `env_name swm/TwoRoom-v1`, N=50, `goal_offset_steps=25`, `eval_budget=50`, `plan_config horizon=5 action_block=5`
   (→ 25 ≤ budget 50 ✓), callables `_set_state(state=proprio)` / `_set_goal_state(goal_state=goal_proprio)` (proprio-based, like pusht's
   state-based). Success = env's own `terminated` (agent reaches target).
@@ -2587,15 +2587,15 @@ completed). FIX = set **`OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREAD
 ### Exact train commands (L40S)
 ```
 # GC-IDM ON (builds shared cache), GPU1:
-... CUDA_VISIBLE_DEVICES=1 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 25 \
+... CUDA_VISIBLE_DEVICES=1 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 25 \
     --dataset_name tworoom.h5 --keys_to_load pixels,action \
     --weights .../decoders/tworoom_ours_lewm_weights.pt --run_name tworoom_gcidm --cache_run tworoom_gcidm
 # GC-IDM noh (AdaLN ablation), GPU3:
-... CUDA_VISIBLE_DEVICES=3 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 25 --ablate_horizon \
+... CUDA_VISIBLE_DEVICES=3 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 25 --ablate_horizon \
     --dataset_name tworoom.h5 --keys_to_load pixels,action --weights .../tworoom_ours_lewm_weights.pt \
     --run_name tworoom_gcidm_noh --cache_run tworoom_gcidm
 # OURS history GC policy, GPU2:
-... CUDA_VISIBLE_DEVICES=2 python train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 25 \
+... CUDA_VISIBLE_DEVICES=2 python scripts/train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 25 \
     --history_size 3 --seed 3072 --weights .../tworoom_ours_lewm_weights.pt --run_name tworoom_ours_gc --cache_run tworoom_gcidm
 ```
 
@@ -2613,17 +2613,17 @@ uninformative given (z_t,z_goal); offline MSE does NOT predict SR here — the n
 ```
 # (prefix EVERY eval) OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4
 # GC-IDM (mode=gcidm), seeds 42/7:
-... python eval_gip.py --config-name tworoom policy=tworoom_gcidm +gip_eval.mode=gcidm eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name tworoom policy=tworoom_gcidm +gip_eval.mode=gcidm eval.num_eval=50 seed=<42|7>
 # GC-IDM horizon-OFF ablation, seed 42:
-... python eval_gip.py --config-name tworoom policy=tworoom_gcidm_noh +gip_eval.mode=gcidm \
+... python scripts/eval_gip.py --config-name tworoom policy=tworoom_gcidm_noh +gip_eval.mode=gcidm \
     +gip_eval.gcidm_run=tworoom_gcidm_noh +gip_eval.ablate_horizon=true eval.num_eval=50 seed=42
 # OURS planning-free (mode=policy, goal+horizon), seeds 42/7:
-... python eval_gip.py --config-name tworoom policy=tworoom_ours_gc +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
+... python scripts/eval_gip.py --config-name tworoom policy=tworoom_ours_gc +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
     +gip_eval.horizon_H_max=25 eval.num_eval=50 seed=<42|7>
 # Same-box CEM (mode=planning, frozen base), seeds 42/7:
-... python eval_gip.py --config-name tworoom policy=tworoom_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name tworoom policy=tworoom_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
 # Same-box guided (CEM + OURS goal+horizon prior), seeds 42/7:
-... python eval_gip.py --config-name tworoom policy=tworoom_ours_gc +gip_eval.mode=guided +gip_eval.goal_conditioned=true \
+... python scripts/eval_gip.py --config-name tworoom policy=tworoom_ours_gc +gip_eval.mode=guided +gip_eval.goal_conditioned=true \
     +gip_eval.horizon_H_max=25 eval.num_eval=50 seed=<42|7>
 ```
 (OURS eval-context fix VERIFIED: `load_gip_model(tworoom_ours_gc)` → `Adim=10 missing=0 unexpected=0`, `use_action_history=True`,
@@ -2667,7 +2667,7 @@ OURS 100 · reacher = §15.** Combined with the in-flight robomimic §-block abo
 cell; the wedge's last stand remains can/square (grasp+place partial-observability).
 
 ### Files added / changed (all `$B=le-wm-repro` on L40S; backups `*.bak_tworoom`)
-- **NO repo edits.** `train_gcidm.py` / `train_ours_gc.py` byte-identical to `*.bak_tworoom` (pusht-era args reused). `config/eval/tworoom.yaml`
+- **NO repo edits.** `train_gcidm.py` / `train_ours_gc.py` byte-identical to `*.bak_tworoom` (pusht-era args reused). `configs/eval/tworoom.yaml`
   UNCHANGED (`dataset_name: tworoom` already correct; backup `tworoom.yaml.bak_tworoom`). `gip.py`/`jepa.py`/`eval_gip.py`/`gcidm.py` untouched.
 - Checkpoints (`$STABLEWM_HOME/checkpoints/`): `tworoom_gcidm/{gcidm_head_best.pt, gcidm_config.json, latents_cache.pt(82M)}`,
   `tworoom_gcidm_noh/`, `tworoom_ours_gc/{weights_epoch_1.pt=BEST@ep8, weights_epoch_0.pt, config.json}`, `tworoom_lewm_base/`. Eval results
@@ -2693,9 +2693,9 @@ early-stopping number").**
    edit to the installed package, no-op for non-dm_control envs (cube/pusht/tworoom). Verified: env makes + resets + renders (224×224) + callables
    `set_state`/`set_target_qpos` present; N=2 GC-IDM smoke = 2/2; N=2 CEM smoke = 2/2. **Training does NOT need the shim** (precompute reads only the
    h5, builds no env) — only eval does.
-2. **Reacher eval config dataset_name was wrong.** `config/eval/reacher.yaml` had `dataset_name: dmc/reacher_random` → resolves to
+2. **Reacher eval config dataset_name was wrong.** `configs/eval/reacher.yaml` had `dataset_name: dmc/reacher_random` → resolves to
    `datasets/dmc/reacher_random.h5` which DOES NOT EXIST; the actual file is `datasets/reacher.h5`. FIX = one-line edit `dataset_name: reacher`
-   (the ONLY repo edit this entire session). Backup `config/eval/reacher.yaml.bak_reacher`; diff = exactly that one line.
+   (the ONLY repo edit this entire session). Backup `configs/eval/reacher.yaml.bak_reacher`; diff = exactly that one line.
 
 ### What changed vs pusht/tworoom (env / base / data)
 - **Frozen base:** `decoders/reacher_ours_lewm_weights.pt` (vit-tiny-192, SIGReg; 303 keys; `missing=1 unexpected=0`, the 1 = mask_token).
@@ -2745,15 +2745,15 @@ makes its evals ~2-4× slower than tworoom's gridworld.
 ### Exact train commands (L40S)
 ```
 # GC-IDM ON (builds shared cache), GPU7:
-... CUDA_VISIBLE_DEVICES=7 python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 \
+... CUDA_VISIBLE_DEVICES=7 python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 \
     --dataset_name reacher.h5 --keys_to_load pixels,action \
     --weights .../decoders/reacher_ours_lewm_weights.pt --run_name reacher_gcidm --cache_run reacher_gcidm
 # GC-IDM noh (AdaLN ablation), GPU4:
-... python train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 --ablate_horizon \
+... python scripts/train_gcidm.py --epochs 200 --batch_size 1024 --H_max 50 --ablate_horizon \
     --dataset_name reacher.h5 --keys_to_load pixels,action --weights .../reacher_ours_lewm_weights.pt \
     --run_name reacher_gcidm_noh --cache_run reacher_gcidm
 # OURS history GC policy, GPU3:
-... python train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 --history_size 3 --seed 3072 \
+... python scripts/train_ours_gc.py --epochs 40 --batch_size 512 --lr 3e-4 --H_max 50 --history_size 3 --seed 3072 \
     --weights .../reacher_ours_lewm_weights.pt --run_name reacher_ours_gc --cache_run reacher_gcidm
 ```
 
@@ -2770,21 +2770,21 @@ makes its evals ~2-4× slower than tworoom's gridworld.
 ```
 # (prefix EVERY eval) PYTHONPATH=/tmp/reacher_compat:$B OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4
 # GC-IDM CONVERGED (the latest/ep200 head, copied into reacher_gcidm_latest/ as gcidm_head_best.pt), seeds 42/7:
-... python eval_gip.py --config-name reacher policy=reacher_gcidm_latest +gip_eval.mode=gcidm \
+... python scripts/eval_gip.py --config-name reacher policy=reacher_gcidm_latest +gip_eval.mode=gcidm \
     +gip_eval.gcidm_run=reacher_gcidm_latest eval.num_eval=50 seed=<42|7>
 # GC-IDM best-val (diagnostic, the trap), seeds 42/7:
-... python eval_gip.py --config-name reacher policy=reacher_gcidm +gip_eval.mode=gcidm eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name reacher policy=reacher_gcidm +gip_eval.mode=gcidm eval.num_eval=50 seed=<42|7>
 # GC-IDM horizon-OFF ablation (converged), seed 42:
-... python eval_gip.py --config-name reacher policy=reacher_gcidm_noh_latest +gip_eval.mode=gcidm \
+... python scripts/eval_gip.py --config-name reacher policy=reacher_gcidm_noh_latest +gip_eval.mode=gcidm \
     +gip_eval.gcidm_run=reacher_gcidm_noh_latest +gip_eval.ablate_horizon=true eval.num_eval=50 seed=42
 # OURS planning-free CONVERGED (ckpt_epoch=0 = ep40 latest), seeds 42/7:
-... python eval_gip.py --config-name reacher policy=reacher_ours_gc +ckpt_epoch=0 +gip_eval.mode=policy \
+... python scripts/eval_gip.py --config-name reacher policy=reacher_ours_gc +ckpt_epoch=0 +gip_eval.mode=policy \
     +gip_eval.goal_conditioned=true +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 # OURS best-val (ckpt_epoch=1, diagnostic, the trap), seeds 42/7:  (same, +ckpt_epoch=1)
 # Same-box CEM (frozen base), seeds 42/7:
-... python eval_gip.py --config-name reacher policy=reacher_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
+... python scripts/eval_gip.py --config-name reacher policy=reacher_lewm_base +gip_eval.mode=planning eval.num_eval=50 seed=<42|7>
 # Same-box guided (CEM + OURS CONVERGED goal+horizon prior), seeds 42/7:
-... python eval_gip.py --config-name reacher policy=reacher_ours_gc +ckpt_epoch=0 +gip_eval.mode=guided \
+... python scripts/eval_gip.py --config-name reacher policy=reacher_ours_gc +ckpt_epoch=0 +gip_eval.mode=guided \
     +gip_eval.goal_conditioned=true +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 ```
 (OURS converged eval-context VERIFIED: `load_gip_model(reacher_ours_gc, epoch=0)` → `weights_epoch_0.pt Adim=10 missing=0 unexpected=0`,
@@ -2823,7 +2823,7 @@ none of the 4 gcidm envs provide. Methodological takeaway for the paper: **repor
 (the reacher trap would have under-reported BOTH GC-IDM and OURS by ~25-35 points).
 
 ### Files added / changed (all `$B=le-wm-repro` on L40S; backups `*.bak_reacher`)
-- **ONE repo edit:** `config/eval/reacher.yaml` `dataset_name: dmc/reacher_random → reacher` (backup `reacher.yaml.bak_reacher`; diff = that one
+- **ONE repo edit:** `configs/eval/reacher.yaml` `dataset_name: dmc/reacher_random → reacher` (backup `reacher.yaml.bak_reacher`; diff = that one
   line). `train_gcidm.py`/`train_ours_gc.py` byte-identical to `*.bak_reacher`. `gip.py`/`jepa.py`/`eval_gip.py`/`gcidm.py` UNTOUCHED.
 - **External (non-repo) shim:** `/tmp/reacher_compat/sitecustomize.py` (dm_control flex_bandwidth fix; loaded via PYTHONPATH for reacher eval only).
 - Checkpoints (`$STABLEWM_HOME/checkpoints/`): `reacher_gcidm/{gcidm_head_best.pt(=ep5 best-val, the trap), gcidm_head_latest.pt(=ep200 converged,
@@ -2879,13 +2879,13 @@ wrote my own result/log files under `/mnt/minghao_data/logs_revalconv/` + the ev
 ### EXACT eval commands (only the checkpoint swapped vs the original cells)
 ```
 # CUBE/PUSHT OURS converged (vs §12/§13 which omitted ckpt_epoch → default best-val):
-python eval_gip.py --config-name <cube|pusht> policy=<task>_ours_gc +ckpt_epoch=0 \
+python scripts/eval_gip.py --config-name <cube|pusht> policy=<task>_ours_gc +ckpt_epoch=0 \
   +gip_eval.mode=policy +gip_eval.goal_conditioned=true +gip_eval.horizon_H_max=50 eval.num_eval=50 seed=<42|7>
 # CUBE/PUSHT GC-IDM converged (latest head copied into <task>_gcidm_latest):
-python eval_gip.py --config-name <cube|pusht> policy=<task>_gcidm_latest +gip_eval.mode=gcidm \
+python scripts/eval_gip.py --config-name <cube|pusht> policy=<task>_gcidm_latest +gip_eval.mode=gcidm \
   +gip_eval.gcidm_run=<task>_gcidm_latest eval.num_eval=50 seed=<42|7>
 # ROBOMIMIC OURS converged (vs §16 which omitted ckpt_epoch → default best-val); per-task budget/goal_offset from §1c/§16:
-python eval_histbc_robomimic.py --config-name robomimic policy=<task>_gc_ours +ckpt_epoch=0 \
+python scripts/eval_histbc_robomimic.py --config-name robomimic policy=<task>_gc_ours +ckpt_epoch=0 \
   +gip_eval.mode=policy +gip_eval.goal_conditioned=true eval.num_eval=50 world.num_envs=10 \
   world.task=<Lift|PickPlaceCan|NutAssemblySquare> dataset.stats=<task> eval.dataset_name=<task> \
   eval.eval_budget=<100|240|320> eval.goal_offset_steps=<30|90|120> seed=<42|7>
@@ -3003,13 +3003,13 @@ free/GPU; never touched fan's procs, pkill never used). 18 runs (3 tasks × 2 ar
 ### EXACT eval commands (only the head checkpoint + mode/goal_conditioned differ between arms)
 ```
 # gcidm CONVERGED (Markovian single-frame; latest head copied into <task>_gcidm_latest):
-CUDA_VISIBLE_DEVICES=<G> python eval_histbc_robomimic.py --config-name robomimic \
+CUDA_VISIBLE_DEVICES=<G> python scripts/eval_histbc_robomimic.py --config-name robomimic \
   world.task=<Lift|PickPlaceCan|NutAssemblySquare> world.num_envs=10 dataset.stats=<task> eval.dataset_name=<task> \
   eval.num_eval=50 eval.eval_budget=<100|240|320> eval.goal_offset_steps=<30|90|120> seed=<42|0|1> \
   policy=<task>_gcidm_latest +gip_eval.mode=gcidm +gip_eval.gcidm_run=<task>_gcidm_latest \
   hydra.run.dir=/mnt/minghao_data/logs_gcidm_rerun/<task>_gcidm_s<seed>
 # OURS CONVERGED (history GC; weights_epoch_0 via +ckpt_epoch=0):
-CUDA_VISIBLE_DEVICES=<G> python eval_histbc_robomimic.py --config-name robomimic \
+CUDA_VISIBLE_DEVICES=<G> python scripts/eval_histbc_robomimic.py --config-name robomimic \
   world.task=<...> world.num_envs=10 dataset.stats=<task> eval.dataset_name=<task> \
   eval.num_eval=50 eval.eval_budget=<...> eval.goal_offset_steps=<...> seed=<42|0|1> \
   policy=<task>_gc_ours +ckpt_epoch=0 +gip_eval.mode=policy +gip_eval.goal_conditioned=true \
@@ -3084,7 +3084,7 @@ The plan `resilient-twirling-moon.md` listed the goal-sampling wrapper, the `lej
   `z_goal = self.model.encode({"pixels": batch["goal"].unsqueeze(1)})["emb"][:,0]` (**line 74 — the goal frame goes through the SAME `self.model.encode`, i.e. the LEARNABLE encoder, NOT a cached latent**), apply `goal_dropout` (zero `z_goal` per-sample w.p. `p` → the SAME head also learns the goal-AGNOSTIC policy = BESO/CFG two-setting WAM), then `goal_emb=z_goal` + the normalized horizon are threaded into `predict_intention(...)` (line 92-95). The existing `act_loss` (predict `a_t`) becomes goal-conditioned via hindsight automatically; `intent_loss` predicts the detached `act_emb`.
 - **Horizon AdaLN-Zero** (`jepa.py:HorizonModulator`, built in `JEPA.__init__` when `horizon_conditioned=true`; `train.py:256-259` sets `cfg.model.horizon_conditioned=True` BEFORE instantiation so the module rides into `config.json` → eval rebuilds it). `predict_intention` applies it to the intention embedding BEFORE the decoder (`jepa.py:205-206`). AdaLN-Zero (cond_proj zero-init) ⇒ identity at init ⇒ byte-identical until learned.
 - **Encoder LEARNABLE (the END-TO-END property, vs frozen `train_ours_gc.py`):** the optimizer is a SINGLE `model_opt` group covering `'model'` (`train.py:399-406`); there is NO `freeze_wm` (default false, `train.py:350`). The encoder receives gradients from BOTH the WM `pred_loss` AND the goal/action objective (z_goal flows through `encoder`). The frozen-latent arms (`train_gcidm.py`/`train_ours_gc.py`) instead set `encoder.requires_grad=False` and precompute a latent cache — that is the version that floored.
-- **Config flags** (`config/train/lewm.yaml:47-65`): `action_pred.{goal_conditioned, hindsight_max_k, goal_dropout, horizon_conditioned, horizon_H_max}`, ALL default OFF.
+- **Config flags** (`configs/train/lewm.yaml:47-65`): `action_pred.{goal_conditioned, hindsight_max_k, goal_dropout, horizon_conditioned, horizon_H_max}`, ALL default OFF.
 - **Eval path** (`eval_histbc_robomimic.py`, mode=`policy` + `+gip_eval.goal_conditioned=true`): `HistoryBCPolicy` loads via `gip.load_gip_model` (rebuilds the `horizon_modulator` from `config.json`), encodes each env's `info_dict["goal"]` → z_goal through the SAME (now end-to-end-trained) encoder, threads goal_emb + the per-env AdaLN-Zero horizon countdown into `predict_intention`. The chunk-reset fix (§16) is in `_eval_loop`. Already built; no edit.
 
 **GATE VERIFICATION (empirical, the STEP-1 requirement).** Ran a standalone gradient-flow smoke test (`gate_check.py`, built the model exactly as `train.py` does with `goal_conditioned=true horizon_conditioned=true goal_dropout=0.5`, fabricated a batch, called `lejepa_forward`):
@@ -3098,7 +3098,7 @@ With the flags OFF (config defaults) the goal/horizon code is skipped (`goal_emb
 ### STEP 2 — the EXACT end-to-end can training (warm-start the WM, finetune the WHOLE thing; encoder learnable)
 Driver `/mnt/minghao_data/e2e_can_train.sh` (host-local, NOT in repo). Infra: L40S `stratus-lookout`, `$B=/var/lib/docker/data/minghao_home/workspace/le-wm-repro`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`, run as `sudo -u minghao.fu`. Env (root `/` is 99% full ⇒ ALL writes redirected to /mnt/minghao_data): `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 TMPDIR=/mnt/minghao_data/tmp MPLCONFIGDIR=/mnt/minghao_data/mpl_e2e HF_HOME=/home/minghao.fu/.cache/huggingface XDG_CACHE_HOME=/mnt/minghao_data/.cache_e2e WANDB_MODE=disabled (no /home/minghao.fu/.netrc on L40S) CUDA_VISIBLE_DEVICES=2`. EXACT launch command:
 ```
-python train.py \
+python scripts/train.py \
   data=robomimic_can \
   action_pred.enabled=true \
   action_pred.detach_decoder=false \
@@ -3128,7 +3128,7 @@ Plan: `eval_histbc_robomimic.py --config-name robomimic policy=can_gc_e2e +gip_e
 
 The prior CLIP death (the `HF_HUB_OFFLINE=1` §0 gotcha) was the env loading **`openai/clip-vit-large-patch14`** (6.4 GB, pulled by `swm.World`/the robomimic env wrapper as a CLIP-based reward/goal check; NOT the single-task model, whose encoder is `vit_hf pretrained=false` and needs no download, and NOT the `create_task_embeddings.py` text-CLIP which is multi-task-only). Pre-downloaded both CLIPs with `HF_HUB_OFFLINE=0` (box has internet); now cached at `/var/lib/docker/data/minghao_home/.cache/huggingface/{hub,clip}/models--openai--clip-vit-large-patch14`. Eval then ran clean.
 
-EXACT eval command (per seed): `CUDA_VISIBLE_DEVICES=1 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 OMP_NUM_THREADS=4 python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 policy=can_gc_e2e +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>`. Driver `/tmp/step0_e2e_eval2.sh`, log `/mnt/minghao_data/step0_e2e_eval_b240.log`. `[HISTBC] policy ready adim=35 action_block=5 HS=3 goal_cond=True use_horizon=True horizon0=18.00` (horizon0 = offset/block = 90/5 = 18; the AdaLN-Zero horizon modulator is active → confirms the e2e ckpt carries `horizon_modulator`).
+EXACT eval command (per seed): `CUDA_VISIBLE_DEVICES=1 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 OMP_NUM_THREADS=4 python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 policy=can_gc_e2e +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>`. Driver `/tmp/step0_e2e_eval2.sh`, log `/mnt/minghao_data/step0_e2e_eval_b240.log`. `[HISTBC] policy ready adim=35 action_block=5 HS=3 goal_cond=True use_horizon=True horizon0=18.00` (horizon0 = offset/block = 90/5 = 18; the AdaLN-Zero horizon modulator is active → confirms the e2e ckpt carries `horizon_modulator`).
 
 **Per-seed (N=50, b240/o90, same-box GPU 1):** seed42 **0.06** (3/50, chunk scatter [0,0,1,3,3]), seed0 **0.30** (15/50, real scatter not chunk-1-artifact), seed1 **0.26** (13/50). **3-seed mean = 0.207 (SD 0.13).** No chunk-1-then-zeros artifact in any seed (successes spread across chunks → the §16 chunk-reset fix holds). **This FIRST end-to-end LeWAM GC number for can (0.207) already sits AT the GC-IDM Markovian floor (0.240) and ABOVE the OURS-GC frozen-latent floor (0.133)** — even stalled at epoch 10 with the goal signal diluted by dropout 0.5. Signal: training end-to-end (encoder learnable) does NOT keep GC pinned at the 0.13 ours-floor.
 
@@ -3140,14 +3140,14 @@ EXACT eval command (per seed): `CUDA_VISIBLE_DEVICES=1 STABLEWM_HOME=/mnt/mingha
 
 **Motivation (why).** §21 STEP 3 (the e2e dropout-0.5 epoch-10 ckpt) hinted GC lifts off the frozen floor, but it is confounded (under-trained + dropout 0.5 + a prior agent's stalled run). This is the user's intended DECISIVE ablation: train **two arms on `can` that are byte-identical except `freeze_wm`**, with `goal_dropout=0` (full goal signal every sample) and **both trained to 100 epochs** (rule 8 convergence). `freeze_wm=false` = the real end-to-end LeWAM (encoder + WM trunk + head all learnable, the user's method); `freeze_wm=true` = the frozen control (encoder/projector/predictor/pred_proj/action_encoder frozen at the warm-start `can_lewm_weights.pt`, only the intention head + decoder + horizon_modulator learn — the §16/§19/§20-style regime that floored). **This isolates ONE variable** (does the encoder learn?) and answers: is "LeWAM loses on robomimic GC" a real ceiling or a frozen-regime artifact?
 
-**Config-gating verified.** `train.py:350` consumes `cfg.freeze_wm`; `config/train/lewm.yaml:freeze_wm` is a first-class flag (override as `freeze_wm=true`, NOT `+freeze_wm`). `freeze_wm=true` froze **18.0M params** (encoder/projector/predictor/pred_proj/action_encoder) per the frozen-arm log; `init_from=can_lewm_weights.pt` loads `missing=95 unexpected=0` on both arms (the 95 missing = the GIP head + action_decoder + horizon_modulator, trained from scratch — correct).
+**Config-gating verified.** `train.py:350` consumes `cfg.freeze_wm`; `configs/train/lewm.yaml:freeze_wm` is a first-class flag (override as `freeze_wm=true`, NOT `+freeze_wm`). `freeze_wm=true` froze **18.0M params** (encoder/projector/predictor/pred_proj/action_encoder) per the frozen-arm log; `init_from=can_lewm_weights.pt` loads `missing=95 unexpected=0` on both arms (the 95 missing = the GIP head + action_decoder + horizon_modulator, trained from scratch — correct).
 
 ### EXACT train commands (host-local drivers `/tmp/train_abl_{learn,frozen}.sh`; `$B=/var/lib/docker/data/minghao_home/workspace/le-wm-repro`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`, run as `sudo -u minghao.fu`)
 Shared env: `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 TMPDIR=/tmp OMP_NUM_THREADS=4 MPLCONFIGDIR=/tmp/mpl_{learn,frozen}`. Data = re-rendered-on-L40S `can.h5` (the §16 image_224 robomimic data; frameskip 5 ⇒ action_block 5, adim 35). Full dataset per epoch = **136 train steps/epoch** (NO `limit_train_batches` cap — unlike the e2e run's 4000-batch cap; this is the §1c/§20 full-dataset recipe). `+ckpt_every=10`, per-arm prune loop keeps newest-3 `weights_epoch_*.pt` (`/tmp/prune_abl.sh`).
 
 - **LEARNABLE arm (`freeze_wm=false`, headline, GPU 3):**
   ```
-  python train.py data=robomimic_can output_model_name=can_gc_abl_learn \
+  python scripts/train.py data=robomimic_can output_model_name=can_gc_abl_learn \
     action_pred.enabled=true action_pred.goal_conditioned=true action_pred.horizon_conditioned=true action_pred.goal_dropout=0 \
     freeze_wm=false init_from=/mnt/minghao_data/.stable-wm/decoders/can_lewm_weights.pt \
     trainer.max_epochs=100 +ckpt_every=10
@@ -3198,9 +3198,9 @@ The decisive comparison is the top two rows, which differ in EXACTLY ONE flag (`
 **Anchors (cube, N=50, same-box L40S unless noted):** frozen-latent OURS = **72.7** (§12, the arm being rescued); GC-IDM reproduced = **100.0** (§11, L40S same-box); gcidm PUBLISHED = **98.7** (n=200). Same-box CEM 67 / guided 80 (§12).
 
 ### STEP 1 — SETUP VERIFIED (all present on L40S)
-- **Data config**: `data=ogb_lance` → `config/train/data/ogb_lance.yaml` → `ogbench/ogb_cube_single.lance` (20G, the fast lance the §10b cube DINOv2 base+GIP arm trained on; resolves under `$STABLEWM_HOME/datasets/ogbench/ogb_cube_single.lance`). frameskip 5 ⇒ action_block 5, **Adim=25** (5 action-dim × 5). NOTE: the §12 frozen-latent path used the in-memory `latents_cache.pt` with num_workers=0 (the lance DataLoader fork-deadlocked under workers>0 ON THE CACHE path); the **image DataLoader** over the lance works fine under num_workers=10 (smoke + timing below confirm; the deadlock was cache-path-specific).
+- **Data config**: `data=ogb_lance` → `configs/train/data/ogb_lance.yaml` → `ogbench/ogb_cube_single.lance` (20G, the fast lance the §10b cube DINOv2 base+GIP arm trained on; resolves under `$STABLEWM_HOME/datasets/ogbench/ogb_cube_single.lance`). frameskip 5 ⇒ action_block 5, **Adim=25** (5 action-dim × 5). NOTE: the §12 frozen-latent path used the in-memory `latents_cache.pt` with num_workers=0 (the lance DataLoader fork-deadlocked under workers>0 ON THE CACHE path); the **image DataLoader** over the lance works fine under num_workers=10 (smoke + timing below confirm; the deadlock was cache-path-specific).
 - **Warm-start base**: `/mnt/minghao_data/.stable-wm/decoders/cube_ours_lewm_weights.pt` (72,289,084 bytes, vit-tiny-192 SIGReg LeWM — the SAME frozen base §11/§12 used). `init_from` loads `missing=95 unexpected=0` (95 missing = GIP head + action_decoder + horizon_modulator, trained from scratch — correct).
-- **Eval entry**: `eval_gip.py --config-name cube` + `config/eval/cube.yaml` (N=50, goal_offset_steps=25, eval_budget=50, action_block=5, env `swm/OGBCube-v0` single, `terminate_at_goal`, `set_target_pos` privileged block goal) — the SAME eval §11/§12 used. `mode=policy goal_conditioned=true` routes to `BCPolicy` (planning-free forward GC policy, the §12 OURS path). `load_gip_model` rebuilds the `horizon_modulator` from `config.json` (train.py sets `cfg.model.horizon_conditioned=True` before instantiation), and the §12 history-context fix is in place (`BCPolicy` buffers HS=3 frames + HS−1 past-action blocks + AdaLN-Zero horizon countdown). VERIFIED by code read of `gip.py:115 load_gip_model`, `gip.py:216 BCPolicy`, `gip.py:486 build_policy`.
+- **Eval entry**: `eval_gip.py --config-name cube` + `configs/eval/cube.yaml` (N=50, goal_offset_steps=25, eval_budget=50, action_block=5, env `swm/OGBCube-v0` single, `terminate_at_goal`, `set_target_pos` privileged block goal) — the SAME eval §11/§12 used. `mode=policy goal_conditioned=true` routes to `BCPolicy` (planning-free forward GC policy, the §12 OURS path). `load_gip_model` rebuilds the `horizon_modulator` from `config.json` (train.py sets `cfg.model.horizon_conditioned=True` before instantiation), and the §12 history-context fix is in place (`BCPolicy` buffers HS=3 frames + HS−1 past-action blocks + AdaLN-Zero horizon countdown). VERIFIED by code read of `gip.py:115 load_gip_model`, `gip.py:216 BCPolicy`, `gip.py:486 build_policy`.
 
 ### Config-gating (the first-class flags this run exercises)
 `train.py:350` consumes `cfg.freeze_wm` (first-class, override `freeze_wm=false`, NOT `+freeze_wm`); `train.py:236-239` wraps the dataset in `GoalSamplingDataset` when `action_pred.goal_conditioned=true`; `train.py:256-259` sets `cfg.model.horizon_conditioned=True` (rides into config.json) when `action_pred.horizon_conditioned=true`; `train.py:73-95 lejepa_forward` encodes the hindsight goal through the **LEARNABLE** `self.model.encode` (NOT a cached latent) and applies `goal_dropout`. `goal_dropout=0` ⇒ full goal signal every sample. Startup log confirms: `[GIP] Intention predictor ON Adim=25 head=mse`, `[GIP] OURS horizon conditioning ON AdaLN-Zero H_max=50`, `[GIP] init_from=...cube_ours_lewm_weights.pt: missing=95 unexpected=0`, and NO `freeze_wm=true` line (⇒ encoder learnable).
@@ -3208,7 +3208,7 @@ The decisive comparison is the top two rows, which differ in EXACTLY ONE flag (`
 ### STEP 2 — EXACT TRAIN COMMAND (host `L40S`, run as `sudo -u minghao.fu`; `$B=/var/lib/docker/data/minghao_home/workspace/le-wm-repro`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`)
 Env: `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 MPLCONFIGDIR=/tmp/mpl_cube TMPDIR=/tmp OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7`.
 ```
-python train.py \
+python scripts/train.py \
   data=ogb_lance model=lewm embed_dim=192 \
   action_pred.enabled=true action_pred.goal_conditioned=true action_pred.horizon_conditioned=true action_pred.goal_dropout=0 \
   action_pred.hindsight_max_k=50 freeze_wm=false \
@@ -3224,7 +3224,7 @@ python train.py \
 
 ### STEP 3 — EVAL COMMAND (cube GC, N=50, 3 seeds {42,0,1}, same-box L40S, fires at convergence)
 ```
-python eval_gip.py --config-name cube policy=cube_gc_e2e \
+python scripts/eval_gip.py --config-name cube policy=cube_gc_e2e \
   +gip_eval.mode=policy +gip_eval.goal_conditioned=true +gip_eval.horizon_H_max=50 \
   eval.num_eval=50 seed=<42|0|1>
 ```
@@ -3249,10 +3249,10 @@ Did end-to-end training (learnable encoder) RESCUE OURS on cube — lift it off 
 **Anchors (reacher, N=50, same-box L40S unless noted):** frozen-latent OURS = **97** (§15, the arm being confirmed); GC-IDM reproduced = **97** (§15, L40S same-box converged); gcidm PUBLISHED = **99.7**. Same-box CEM 81 / guided 84 (§15).
 
 ### STEP 1 — SETUP VERIFIED (all present on L40S, this session)
-- **Data config**: `data=dmc` → `config/train/data/dmc.yaml` → `name: reacher.h5` (frameskip 5, keys pixels/action/observation; resolves to `$STABLEWM_HOME/datasets/reacher.h5`, **98 GB**, 10000 episodes, 40 obs-steps/ep, raw action dim 2 ⇒ **action_block_dim = 10**). VERIFIED `cat config/train/data/dmc.yaml` + `ls -la .../datasets/reacher.h5` (98905882624 bytes).
+- **Data config**: `data=dmc` → `configs/train/data/dmc.yaml` → `name: reacher.h5` (frameskip 5, keys pixels/action/observation; resolves to `$STABLEWM_HOME/datasets/reacher.h5`, **98 GB**, 10000 episodes, 40 obs-steps/ep, raw action dim 2 ⇒ **action_block_dim = 10**). VERIFIED `cat configs/train/data/dmc.yaml` + `ls -la .../datasets/reacher.h5` (98905882624 bytes).
 - **Warm-start base**: `/mnt/minghao_data/.stable-wm/decoders/reacher_ours_lewm_weights.pt` (72,271,643 bytes, vit-tiny-192 SIGReg LeWM — the SAME frozen base §15 used). VERIFIED present.
-- **Eval entry**: `eval_gip.py --config-name reacher` + `config/eval/reacher.yaml` (N=50, goal_offset_steps=25 ⇒ horizon0 = 25/5 = 5 obs-steps, action_block 5, env `swm/ReacherDMControl-v0` task `qpos_match`, callables `set_state(qpos,qvel)` + `set_target_qpos(goal_qpos)`, `dataset_name: reacher` — the §15 one-line fix already in place). VERIFIED `cat config/eval/reacher.yaml`. `mode=policy goal_conditioned=true` routes to the planning-free forward GC policy (the §15 OURS path). Eval needs the dm_control compat shim `/tmp/reacher_compat/sitecustomize.py` (the §15 `flex_bandwidth` fix; VERIFIED present, 926 bytes) on PYTHONPATH.
-- **Config-gating** (the first-class flags this run exercises): `config/train/lewm.yaml` carries `action_pred.{enabled,goal_conditioned,horizon_conditioned,goal_dropout,hindsight_max_k,horizon_H_max}` (all default OFF) and the first-class `freeze_wm: false` (lewm.yaml:85, consumed `train.py:350`, override `freeze_wm=false` NOT `+freeze_wm`). VERIFIED. CLIP is only loaded for multi-task (config-gated `train.py:282`), NOT for single-task reacher GC ⇒ `HF_HUB_OFFLINE` is irrelevant here.
+- **Eval entry**: `eval_gip.py --config-name reacher` + `configs/eval/reacher.yaml` (N=50, goal_offset_steps=25 ⇒ horizon0 = 25/5 = 5 obs-steps, action_block 5, env `swm/ReacherDMControl-v0` task `qpos_match`, callables `set_state(qpos,qvel)` + `set_target_qpos(goal_qpos)`, `dataset_name: reacher` — the §15 one-line fix already in place). VERIFIED `cat configs/eval/reacher.yaml`. `mode=policy goal_conditioned=true` routes to the planning-free forward GC policy (the §15 OURS path). Eval needs the dm_control compat shim `/tmp/reacher_compat/sitecustomize.py` (the §15 `flex_bandwidth` fix; VERIFIED present, 926 bytes) on PYTHONPATH.
+- **Config-gating** (the first-class flags this run exercises): `configs/train/lewm.yaml` carries `action_pred.{enabled,goal_conditioned,horizon_conditioned,goal_dropout,hindsight_max_k,horizon_H_max}` (all default OFF) and the first-class `freeze_wm: false` (lewm.yaml:85, consumed `train.py:350`, override `freeze_wm=false` NOT `+freeze_wm`). VERIFIED. CLIP is only loaded for multi-task (config-gated `train.py:282`), NOT for single-task reacher GC ⇒ `HF_HUB_OFFLINE` is irrelevant here.
 
 ### Gate verification (smoke, this session)
 1-epoch real-data smoke (GPU6, `data=dmc action_pred.enabled=true action_pred.detach_decoder=false action_pred.goal_conditioned=true action_pred.horizon_conditioned=true action_pred.goal_dropout=0 action_pred.hindsight_max_k=50 action_pred.horizon_H_max=50 init_from=reacher_ours_lewm_weights.pt`, limit_train_batches=20): GC losses present and fall — sanity-val `act_loss=1.042 intent_loss=1.416 pred_loss=0.022` → epoch-0 `validate/act_loss=1.042 intent=1.416 pred=0.022`; `fit/act_loss=1.028 intent=1.417`; ckpt saved `checkpoints/reacher_gc_e2e_smoke/weights_epoch_1.pt`; no crash. Confirms GoalSamplingDataset (built only when goal_conditioned=true) + horizon AdaLN + warm-start run end-to-end on the reacher data. Smoke ckpt deleted.
@@ -3260,7 +3260,7 @@ Did end-to-end training (learnable encoder) RESCUE OURS on cube — lift it off 
 ### STEP 2 — EXACT TRAIN COMMAND (host `L40S` `stratus-lookout`, run as `sudo -u minghao.fu`; `$B=/var/lib/docker/data/minghao_home/workspace/le-wm-repro`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`; driver `/mnt/minghao_data/reacher_e2e_train3.sh`)
 Env (root `/` is 99% full ⇒ ALL writes redirected to /mnt/minghao_data, 2.6T free): `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 TMPDIR=/mnt/minghao_data/tmp MPLCONFIGDIR=/mnt/minghao_data/mpl_reacher XDG_CACHE_HOME=/mnt/minghao_data/.cache_e2e HF_HOME=/home/minghao.fu/.cache/huggingface WANDB_MODE=disabled CUDA_VISIBLE_DEVICES=6`.
 ```
-python train.py \
+python scripts/train.py \
   data=dmc \
   action_pred.enabled=true \
   action_pred.detach_decoder=false \
@@ -3293,7 +3293,7 @@ python train.py \
 ### STEP 3 — EVAL COMMAND (reacher GC, N=50, 3 seeds {42,0,1}, same-box L40S, fires at convergence; driver `/mnt/minghao_data/reacher_e2e_eval.sh`)
 ```
 PYTHONPATH=/tmp/reacher_compat:$B OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4 \
-python eval_gip.py --config-name reacher policy=reacher_gc_e2e \
+python scripts/eval_gip.py --config-name reacher policy=reacher_gc_e2e \
   +gip_eval.mode=policy +gip_eval.goal_conditioned=true +gip_eval.horizon_H_max=50 \
   eval.num_eval=50 seed=<42|0|1>
 ```
@@ -3316,7 +3316,7 @@ Did end-to-end training (learnable encoder) hold the reacher tie — confirm ≈
 **Motivation (why).** §21 ran the decisive freeze-ablation on can with `goal_dropout=0` and both arms converged to 100 ep: LEARNABLE (`freeze_wm=false`) = **0.007**, FROZEN control (`freeze_wm=true`) = **0.027** — the learnable encoder did NOT lift off the frozen floor, and §21's headline was "LeWAM loses on robomimic GC is NOT a frozen-regime artifact; the floor survives a fully learnable encoder." BUT §21's own STEP-3 diagnostic (the stalled-at-epoch-10 `can_gc_e2e`, `goal_dropout=0.5`) scored **0.207** at the SAME canonical b240/o90 — ABOVE both converged dropout-0 arms and at the GC-IDM Markovian floor (0.240). §21 flagged this as confounded (under-trained epoch-10 + dropout 0.5 + a prior agent's stalled run) and gave two non-exclusive reads: (i) `goal_dropout=0.5` makes the head goal-AGNOSTIC on half the samples → it partially behaves like the 0.71 histbc-bc policy that wins on can by IGNORING the distant goal; (ii) high seed variance. This §24 is the **CORRECTED ablation that removes the confound**: train the LEARNABLE arm (`freeze_wm=false`, the user's real end-to-end LeWAM) with `goal_dropout=0.5`, CONVERGED to 100 ep (not stalled at 10). It is the byte-identical twin of §21's learn arm EXCEPT `goal_dropout` (0.5 vs 0). The question: **with the encoder learnable, does converged dropout-0.5 reproduce the 0.207 lift (→ the §21-(i) read: the apparent GC lift is really the goal-agnostic histbc-bc mode leaking through dropout), or does it collapse to the ~0.007–0.027 dropout-0 floor once it is properly converged (→ §21-(ii): the 0.207 was just under-trained seed noise)?** Either outcome sharpens the §21 headline: it isolates whether `goal_dropout` (CFG-style two-setting training), NOT the encoder being learnable, is what moves can GC.
 
 ### STEP 1 — SETUP + GATE VERIFIED (all present on L40S, this session)
-- **Flags all first-class and HONORED** (`config/train/lewm.yaml`, consumed `train.py`): `freeze_wm` (lewm.yaml:85 default false, consumed `train.py:350`, override `freeze_wm=false` NOT `+freeze_wm`); `action_pred.{enabled,goal_conditioned,horizon_conditioned,goal_dropout,hindsight_max_k}` (default OFF). `train.py:73-79` applies `goal_dropout` per-sample (zero z_goal w.p. p) on the GoalSamplingDataset goal; `train.py:237-239` wraps the dataset in `GoalSamplingDataset` when `goal_conditioned=true`; `train.py:257-259` sets `cfg.model.horizon_conditioned=True` (rides config.json) when `horizon_conditioned=true`. NO new script — pure config-gating of the existing `train.py`/`eval_histbc_robomimic.py`.
+- **Flags all first-class and HONORED** (`configs/train/lewm.yaml`, consumed `train.py`): `freeze_wm` (lewm.yaml:85 default false, consumed `train.py:350`, override `freeze_wm=false` NOT `+freeze_wm`); `action_pred.{enabled,goal_conditioned,horizon_conditioned,goal_dropout,hindsight_max_k}` (default OFF). `train.py:73-79` applies `goal_dropout` per-sample (zero z_goal w.p. p) on the GoalSamplingDataset goal; `train.py:237-239` wraps the dataset in `GoalSamplingDataset` when `goal_conditioned=true`; `train.py:257-259` sets `cfg.model.horizon_conditioned=True` (rides config.json) when `horizon_conditioned=true`. NO new script — pure config-gating of the existing `train.py`/`eval_histbc_robomimic.py`.
 - **Warm-start base**: `$DEC/can_lewm_weights.pt` = `/mnt/minghao_data/.stable-wm/decoders/can_lewm_weights.pt` (vit-tiny-192 SIGReg LeWM, the SAME base §16/§20/§21 used). `init_from` loads `missing=95 unexpected=0` (95 missing = GIP head action_predictor/action_decoder + horizon_modulator, trained from scratch — correct).
 - **Data**: `data=robomimic_can` → re-rendered-on-L40S `can.h5` (image_224 robomimic; frameskip 5 ⇒ action_block 5, **Adim=35** = 7-DoF × 5). Model-size note N/A (this is the freeze arm; encoder stays vit-tiny-192, `embed_dim=192` unchanged — no size/embed_dim ablation here, so no companion-embed_dim shape-crash risk).
 - **Gate (1-epoch real-data smoke, GPU 2, `limit_train_batches=3`, deleted after):** startup `[GIP] Intention predictor ON Adim=35 head=mse`, `[GIP] OURS horizon conditioning ON AdaLN-Zero H_max=50`, `init_from=...can_lewm_weights.pt: missing=95 unexpected=0`, horizon_modulator 82,560 params built, **NO `freeze_wm=true` line ⇒ encoder LEARNABLE**, GC losses present and finite (`validate/act_loss 1.18 intent_loss 1.94 pred_loss 0.011` — confirms GoalSamplingDataset + goal_dropout=0.5 path runs end-to-end), `weights_epoch_1.pt` (117 MB) + config.json + full_config.yaml saved cleanly, **exit 0, no shape crash, no NaN.** First gate attempt OOM'd because Lightning `trainer.devices=auto` ignored `CUDA_VISIBLE_DEVICES` and grabbed the busiest physical GPU; fixed by running on GPU 2 (most headroom) + `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
@@ -3326,7 +3326,7 @@ Did end-to-end training (learnable encoder) hold the reacher tie — confirm ≈
 env STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 \
   OMP_NUM_THREADS=4 MPLCONFIGDIR=/tmp/mpl_freeze_false_gc_d05 TMPDIR=/tmp \
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=2 \
-  python train.py data=robomimic_can \
+  python scripts/train.py data=robomimic_can \
   output_model_name=can_gc_d05 subdir=can_gc_d05 \
   freeze_wm=false \
   action_pred.enabled=true action_pred.goal_conditioned=true \
@@ -3342,7 +3342,7 @@ Full dataset per epoch (NO `limit_train_batches` cap — matches the §21 full-d
 
 ### STEP 3 — EVAL COMMAND (can GC, N=50, 3 seeds {42,0,1}, canonical b240/o90, same-box GPU 2 = train GPU per the cross-GPU render gotcha [[project_l40s_cross_gpu_rendering]]; driver `/mnt/minghao_data/eval_freeze_false_gc_d05.sh`)
 ```
-python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan \
+python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan \
   world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 \
   eval.eval_budget=240 eval.goal_offset_steps=90 policy=can_gc_d05 \
   +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>
@@ -3385,7 +3385,7 @@ Does CONVERGED learnable + dropout-0.5 reproduce the stalled-epoch-10 0.207 (⇒
 STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 \
 OMP_NUM_THREADS=4 MPLCONFIGDIR=/tmp/mpl_size_base_768_bc TMPDIR=/tmp \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=3 \
-/var/lib/docker/data/minghao_home/lewm/bin/python train.py \
+/var/lib/docker/data/minghao_home/lewm/bin/python scripts/train.py \
   data=robomimic_can model.encoder.size=base embed_dim=768 \
   action_pred.enabled=true action_pred.goal_conditioned=false \
   output_model_name=size_base_768_bc_can \
@@ -3413,7 +3413,7 @@ TMPDIR=/mnt/minghao_data/tmp_size_base_768_bc \
 MPLCONFIGDIR=/mnt/minghao_data/mpl_size_base_768_bc \
 HF_HOME=/mnt/minghao_data/hf HF_HUB_OFFLINE=1 MUJOCO_GL=egl OMP_NUM_THREADS=4 \
 PYTHONPATH=$HOME/workspace/le-wm-repro CUDA_VISIBLE_DEVICES=1 \
-$HOME/lewm/bin/python train.py \
+$HOME/lewm/bin/python scripts/train.py \
   data=robomimic_can model.encoder.size=base embed_dim=768 \
   action_pred.enabled=true action_pred.goal_conditioned=false \
   init_from=/mnt/minghao_data/.stable-wm/checkpoints/size_base_768_bc_can/weights_epoch_40.pt \
@@ -3433,7 +3433,7 @@ A watcher (`size_base_768_watcher.sh`) prunes snapshots to newest-3 during train
 HOME=/var/lib/docker/data/minghao_home STABLEWM_HOME=/mnt/minghao_data/.stable-wm \
 TMPDIR=/mnt/minghao_data/tmp HF_HOME=$HOME/.cache/huggingface HF_HUB_OFFLINE=1 \
 MPLCONFIGDIR=/mnt/minghao_data/mpl MUJOCO_GL=egl ROBOMIMIC_RAW=$HOME/robomimic \
-CUDA_VISIBLE_DEVICES=<g> $HOME/lewm/bin/python eval_histbc_robomimic.py --config-name robomimic \
+CUDA_VISIBLE_DEVICES=<g> $HOME/lewm/bin/python scripts/eval_histbc_robomimic.py --config-name robomimic \
   policy=size_base_768_bc_can_resume world.task=PickPlaceCan dataset.stats=can eval.dataset_name=can \
   world.num_envs=10 eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 seed=$s
 # default gip_eval.mode=policy, goal_conditioned=false  => pure goal-AGNOSTIC BC
@@ -3459,7 +3459,7 @@ Only the **tiny/192** point is converged and evaluated: 3-seed N=50 = **0.60** (
 **What is measured (per ACTION decision, mean ± std, warmup 20, ≥100 timed reps with CUDA syncs, fp32, batch=1):**
 1. **LeWAM-GC (ours, planning-free)** — one forward pass mirroring `eval_histbc_robomimic.py::HistoryBCPolicy.get_action`: encode the **1 NEW** 224² frame → append its latent to the maxlen-`HS=3` deque (the older `HS−1` latents are cached, encoded once) → `action_predictor` (6-layer `ARPredictor`) over the HS-frame latent history → `horizon_modulator` (AdaLN-Zero, this ckpt is `horizon_conditioned=true`) → `action_decoder` (MLP) → one frameskip-stacked action block. = one step of `jepa.JEPA.intention_rollout`.
 2. **gcidm (Markovian, planning-free)** — `eval_histbc_robomimic.py::GCIDMRobomimicPolicy`: encode `z_t` (current frame) + encode `z_goal` (goal frame, re-encoded every decision, faithful to the code) → `GCIDMHead(z_t, z_goal, h_norm)` → action block. NO history, NO CEM.
-3. **CEM planning (le-wm / our solver, the SLOW baseline)** — the full `stable_worldmodel.solver.CEMSolver.solve()` per action, timed end-to-end on the real `model.get_cost` → `rollout` → `predict` path: `n_steps=30` CEM iterations, each sampling `num_samples=300` candidate plans, each plan rolled over `horizon=5` through the WM `predictor` (`ARPredictor` + `pred_proj` + an `action_encoder` per rolled step). Settings verbatim from `config/eval/solver/cem.yaml` (`num_samples=300, n_steps=30, topk=30, var_scale=1.0, batch_size=1`) + `config/eval/robomimic.yaml` (`horizon=5, action_block=5`).
+3. **CEM planning (le-wm / our solver, the SLOW baseline)** — the full `stable_worldmodel.solver.CEMSolver.solve()` per action, timed end-to-end on the real `model.get_cost` → `rollout` → `predict` path: `n_steps=30` CEM iterations, each sampling `num_samples=300` candidate plans, each plan rolled over `horizon=5` through the WM `predictor` (`ARPredictor` + `pred_proj` + an `action_encoder` per rolled step). Settings verbatim from `configs/eval/solver/cem.yaml` (`num_samples=300, n_steps=30, topk=30, var_scale=1.0, batch_size=1`) + `configs/eval/robomimic.yaml` (`horizon=5, action_block=5`).
 4. **Diffusion Policy / LDP (diffusion head)** — `module.DiffusionHead` with the real default `n_steps=50` reverse-diffusion steps (DP/LDP use ~50–100), conditioned on OUR intention embedding (the same encode + `action_predictor` + `horizon_modulator` front-end that produces the GC conditioning), each denoising step a forward through the eps-MLP. **NOTE (framing flag):** the codebase's `DiffusionHead` is a 3-layer **MLP** eps-predictor (NOT a `ConditionalUnet1D`); the `K × forward` denoising-loop structure and `K=50` are real/measured, but a true DP/LDP would use a heavier U-Net per step, so the DP **wall-clock here is a lower bound** on a real DP and the per-step FLOPs would be larger. The `K`-step multiplier itself is the load-bearing point and is exact.
 
 **Exact reproduction command (run from the le-wm-repro dir so `jepa`/`module`/`gip`/`gcidm` import; fvcore pip-installed into the env):**
@@ -3563,7 +3563,7 @@ NOTE the deliberate difference vs the `pusht_wcyc_sm` sibling: `limit_train_batc
 
 **STEP 2 — TRAIN (EXACT launch, IN FLIGHT).** Host L40S, lewm venv `/var/lib/docker/data/minghao_home/lewm/bin/python`, `sudo -u minghao.fu`, cwd `/var/lib/docker/data/minghao_home/workspace/le-wm-repro`. Disk-safety env (the spec's literal vars; `/var` 97% full, `/mnt/minghao_data` 2.4 T free): `SPT_CACHE_DIR=/mnt/minghao_data/spt_pusht_wcyc0 XDG_CACHE_HOME=/mnt/minghao_data/xdg_pusht_wcyc0 TMPDIR=/mnt/minghao_data/tmp_pusht_wcyc0 MPLCONFIGDIR=/mnt/minghao_data/mpl_pusht_wcyc0 HF_HOME=/mnt/minghao_data/hf STABLEWM_HOME=/mnt/minghao_data/.stable-wm HF_HUB_OFFLINE=1 MUJOCO_GL=egl OMP_NUM_THREADS=4 WANDB_MODE=disabled`. GPU6 (lowest-occupied at launch, ~7.5 GB used / 38 GB free — accepted shared-dataloader per rule 10). PID 2176892. Log `/mnt/minghao_data/tmp_pusht_wcyc0/train_pusht_wcyc0.log`. Ckpts `/mnt/minghao_data/.stable-wm/checkpoints/pusht_wcyc0/` (`+ckpt_every=10`; background pruner keeps newest-3). EXACT command:
 ```
-CUDA_VISIBLE_DEVICES=6 python train.py data=pusht \
+CUDA_VISIBLE_DEVICES=6 python scripts/train.py data=pusht \
   action_pred.enabled=true action_pred.detach_decoder=false \
   action_pred.goal_conditioned=true action_pred.horizon_conditioned=true \
   action_pred.goal_dropout=0.5 action_pred.hindsight_max_k=50 action_pred.horizon_H_max=50 \
@@ -3586,7 +3586,7 @@ Train log at launch: `[GIP] Intention predictor ON Adim=10 head=mse w_act=1.0 w_
 
 **Why this re-run (the confound).** The three arms above (`pusht_wcyc0` / `pusht_wcyc_sm` / `pusht_wcyc_lg`) were each launched at a DIFFERENT `limit_train_batches` — **2000 / 4000 / 1000** respectively — at `max_epochs=100`, because each was relaunched independently to dodge the box-contention wall (the sm arm at 4000 hit ~67 min/ep, so lg dropped to 1000, and wcyc0 split the difference at 2000). That confounds the w_cyc ablation with **training compute**: an SR delta between arms could be the cycle loss OR just more/fewer gradient steps. Per CLAUDE.md rule 12 (within a dataset every ablation arm shares the SAME epoch + batch budget) those three arms are **INVALID for the w_cyc comparison** and are SUPERSEDED here. Worse, the configs were not otherwise identical either: the `wcyc0` arm additionally passed `detach_decoder=false hindsight_max_k=50 horizon_H_max=50` (all defaults, so no math change) and the `lg` arm passed `embed_dim=192` (the default) — cosmetic, but a second reason to not trust a cross-arm read. **Action taken 2026-06-22 ~04:50:** killed the 3 confounded training procs (`pkill -f "train[.]py.*pusht_wcyc"` then `kill -9` the one surviving leader 2176892; killed the two stale pruners 2164092 / 2176052; verified 0 remaining; left their checkpoints on disk, just unused; did NOT touch any other user's / fan-test's procs). The 3 matched arms below OWN the w_cyc sweep.
 
-**The matched recipe (the ONLY difference across the 3 arms is `+action_pred.w_cyc`).** pusht, end-to-end GC (warm-WM init, `freeze_wm=false`), **`max_epochs=15` (pusht fast iteration budget, rule 12), `limit_train_batches=2000` (SAME for all 3), `batch_size=64`**, `init_from=pusht_ours_lewm_weights.pt`, `action_pred.enabled=true head=mse w_act=1.0 w_intent=1.0 detach_target=true goal_conditioned=true horizon_conditioned=true goal_dropout=0.5 horizon_H_max=50 hindsight_max_k=50` (all at config/train/lewm.yaml defaults except the four GC flags), seed `3072` (config default, identical), `+ckpt_every=5` (⇒ ckpts at ep5/ep10/ep15; eval auto-picks `pts[-1]`=ep15). The arms:
+**The matched recipe (the ONLY difference across the 3 arms is `+action_pred.w_cyc`).** pusht, end-to-end GC (warm-WM init, `freeze_wm=false`), **`max_epochs=15` (pusht fast iteration budget, rule 12), `limit_train_batches=2000` (SAME for all 3), `batch_size=64`**, `init_from=pusht_ours_lewm_weights.pt`, `action_pred.enabled=true head=mse w_act=1.0 w_intent=1.0 detach_target=true goal_conditioned=true horizon_conditioned=true goal_dropout=0.5 horizon_H_max=50 hindsight_max_k=50` (all at configs/train/lewm.yaml defaults except the four GC flags), seed `3072` (config default, identical), `+ckpt_every=5` (⇒ ckpts at ep5/ep10/ep15; eval auto-picks `pts[-1]`=ep15). The arms:
 
 | arm | output_model_name | w_cyc | w_anorm | GPU | PID |
 |---|---|---|---|---|---|
@@ -3596,7 +3596,7 @@ Train log at launch: `[GIP] Intention predictor ON Adim=10 head=mse w_act=1.0 w_
 
 `+action_pred.w_anorm=0.01` is passed on ALL three (so the launch strings are byte-identical except the w_cyc value); at w_cyc=0 the `anorm` term is unreachable (it sits inside the `if _w_cyc > 0.0` block, train.py:139-151), so it is a true no-op for the baseline — the command-identity requirement is met without altering the baseline's math. EXACT launch (per-arm via `/mnt/minghao_data/matched/launch_arm.sh <arm> <w_cyc> <gpu>`, `sudo -u minghao.fu`, lewm venv, cwd `/var/lib/docker/data/minghao_home/workspace/le-wm-repro`):
 ```
-CUDA_VISIBLE_DEVICES=<gpu> python train.py data=pusht \
+CUDA_VISIBLE_DEVICES=<gpu> python scripts/train.py data=pusht \
   init_from=$STABLEWM_HOME/decoders/pusht_ours_lewm_weights.pt \
   action_pred.enabled=true action_pred.head=mse action_pred.w_act=1.0 action_pred.w_intent=1.0 \
   action_pred.detach_target=true action_pred.goal_conditioned=true action_pred.horizon_conditioned=true \
@@ -3651,8 +3651,8 @@ VERDICT (fill): is the cycle loss POSITIVE (w_cyc>0 BEATS the matched w_cyc=0, �
 **Infra context (fleet relocation).** L40S was reported occupied by fan-test's 8-GPU DDP job, but at launch time I verified directly that **all 8 L40S GPUs were idle** (`nvidia-smi`: 0% util, ≤689 MiB each — fan-test's job had finished/stopped). 174 was surveyed as the fallback but is the WRONG box for this eval: the `can_gc_*` checkpoints were TRAINED on L40S, and per [[project_l40s_cross_gpu_rendering]] eval'ing them on 174 would render-OOD-floor them to ~0 (a SECOND artifact confounding the §27 test). So this re-eval ran **same-box on L40S** — the only correct option. Disk: `/var/lib/docker` 100% full and root `/` 97% (3.3 GB), but `/mnt/minghao_data` had 2.5 TB free, so all scratch (`TMPDIR`/`MPLCONFIGDIR`/`hydra.run.dir`/logs) was redirected there. Eval-only (no retrain), writes only small JSON → disk was a non-issue.
 
 **EXACT commands** (drivers `/mnt/minghao_data/s27_scratch/s27_{e2e,gcidm}_eval.sh`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`, run as `sudo -u minghao.fu`; shared env `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 OMP_NUM_THREADS=4`, scratch on `/mnt/minghao_data/s27_scratch`):
-- **OURS (e2e), per seed:** `CUDA_VISIBLE_DEVICES=<1|2|3> python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=90 eval.goal_offset_steps=90 policy=can_gc_e2e +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>`. Load log: `[GIP] load can_gc_e2e <- weights_epoch_100.pt: Adim=35 missing=0 unexpected=0` (NOTE: this `can_gc_e2e` is now the **CONVERGED ep100** ckpt — the §22 STEP-3 number used the stalled ep10 ckpt; the run finished training since), `[HISTBC] policy ready adim=35 action_block=5 HS=3 goal_cond=True use_horizon=True horizon0=18.00` (horizon0 = offset/block = 90/5 = 18, AdaLN-Zero horizon active).
-- **gcidm (Markovian), per seed:** `CUDA_VISIBLE_DEVICES=<4|5|6> python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=90 eval.goal_offset_steps=90 policy=can_gcidm_latest +gip_eval.mode=gcidm +gip_eval.gcidm_run=can_gcidm_latest seed=<42|0|1>`.
+- **OURS (e2e), per seed:** `CUDA_VISIBLE_DEVICES=<1|2|3> python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=90 eval.goal_offset_steps=90 policy=can_gc_e2e +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>`. Load log: `[GIP] load can_gc_e2e <- weights_epoch_100.pt: Adim=35 missing=0 unexpected=0` (NOTE: this `can_gc_e2e` is now the **CONVERGED ep100** ckpt — the §22 STEP-3 number used the stalled ep10 ckpt; the run finished training since), `[HISTBC] policy ready adim=35 action_block=5 HS=3 goal_cond=True use_horizon=True horizon0=18.00` (horizon0 = offset/block = 90/5 = 18, AdaLN-Zero horizon active).
+- **gcidm (Markovian), per seed:** `CUDA_VISIBLE_DEVICES=<4|5|6> python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=90 eval.goal_offset_steps=90 policy=can_gcidm_latest +gip_eval.mode=gcidm +gip_eval.gcidm_run=can_gcidm_latest seed=<42|0|1>`.
 - The ONLY change vs the §22 canonical can protocol is `eval.eval_budget 240 → 90` (= goal_offset_steps). Everything else (N=50, offset=90, seeds, same-box) identical.
 
 **RESULT (can, N=50, 3-seed {42,0,1}, ALL per-seed, no errors, no chunk-1 artifact — successes scatter across chunks):**
@@ -3676,8 +3676,8 @@ VERDICT (fill): is the cycle loss POSITIVE (w_cyc>0 BEATS the matched w_cyc=0, �
 **Code change (config-gated, backward-compatible — backups in `/mnt/minghao_data/s27_clean_backup/`).** No retrain; this is an eval-side change. Added `eval.goal_mode` (default `'mid'` = byte-identical to original; `'terminal'` = new). Threaded through `World.evaluate` → `_evaluate_from_dataset` → `_extract_init_goal` in the swm package `stable_worldmodel/world/world.py` (installed at `/var/lib/docker/data/minghao_home/lewm/lib/python3.10/site-packages/stable_worldmodel/world/world.py`), plus a one-line read+pass in `le-wm-repro/eval_histbc_robomimic.py`. The terminal branch in `_extract_init_goal` (marked `S27_GOAL_MODE_PATCH`): when `goal_mode=='terminal'`, it loads a separate 1-frame chunk at `dataset.lengths[ep]-1` (the episode's TRUE last frame) for the goal, keeping init from the `start..start+offset` chunk unchanged. **WHY a code change was needed, not config-only:** the original eval has NO end-clamp — `_extract_init_goal` takes goal = `load_chunk(ep, start, start+offset+1)[-1]`, and `_load_slice` (`stable_worldmodel/data/formats/hdf5.py`) reads `h5[offset[ep]+start : offset[ep]+end]` with no clamp, so a large `goal_offset` would (a) read into the NEXT episode's frames (HDF5 stores episodes concatenated by `ep_offset`) AND (b) crash `sample_eval_episodes` (`gip.py`), which requires `start+goal_offset+1 ≤ ep_len` to pick valid starts. So a large-offset config-only route does NOT clamp to terminal — it corrupts. Confirmed by reading `_load_slice` + `sample_eval_episodes`. **Smoke-verified (1-env, `/tmp/smoke_s27_goal.py`):** for eps {0,5,17}, `goal_mode=terminal` goal == the episode's literal last frame (`demo[L-1]`, `np.array_equal` True for all 3), differs from the mid goal, and differs from the init frame. Median can demo L≈113-118 → b240 ≫ demo, no starvation.
 
 **EXACT commands** (drivers `/mnt/minghao_data/s27_clean/s27clean_{e2e,gcidm}.sh`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`, run as `sudo -u minghao.fu`; shared env `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 OMP_NUM_THREADS=4`, scratch on `/mnt/minghao_data/s27_clean`; cwd `/var/lib/docker/data/minghao_home/workspace/le-wm-repro`):
-- **OURS (e2e, ep100), per seed:** `CUDA_VISIBLE_DEVICES=<0|1|2> python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 +eval.goal_mode=terminal policy=can_gc_e2e +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>`. Load log: `[GIP] load can_gc_e2e <- weights_epoch_100.pt: Adim=35 missing=0 unexpected=0` (CONVERGED ep100 ckpt), `[HISTBC] policy ready adim=35 action_block=5 HS=3 goal_cond=True use_horizon=True horizon0=18.00`.
-- **gcidm (Markovian), per seed:** `CUDA_VISIBLE_DEVICES=<3|4|5> python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 +eval.goal_mode=terminal policy=can_gcidm_latest +gip_eval.mode=gcidm +gip_eval.gcidm_run=can_gcidm_latest seed=<42|0|1>`. Load log: `[GCIDM] load can_gcidm_latest <- gcidm_head_best.pt  H_max=50  action_dim=35  ablate_horizon=False`, `[GCIDM] policy ready action_block=5 adim=35 H_max=50 horizon0=18.00`.
+- **OURS (e2e, ep100), per seed:** `CUDA_VISIBLE_DEVICES=<0|1|2> python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 +eval.goal_mode=terminal policy=can_gc_e2e +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>`. Load log: `[GIP] load can_gc_e2e <- weights_epoch_100.pt: Adim=35 missing=0 unexpected=0` (CONVERGED ep100 ckpt), `[HISTBC] policy ready adim=35 action_block=5 HS=3 goal_cond=True use_horizon=True horizon0=18.00`.
+- **gcidm (Markovian), per seed:** `CUDA_VISIBLE_DEVICES=<3|4|5> python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 +eval.goal_mode=terminal policy=can_gcidm_latest +gip_eval.mode=gcidm +gip_eval.gcidm_run=can_gcidm_latest seed=<42|0|1>`. Load log: `[GCIDM] load can_gcidm_latest <- gcidm_head_best.pt  H_max=50  action_dim=35  ablate_horizon=False`, `[GCIDM] policy ready action_block=5 adim=35 H_max=50 horizon0=18.00`.
 - The ONLY change vs the §22 canonical can protocol is `+eval.goal_mode=terminal` (and the §22 b240 budget is restored vs the quick test's b90). N=50, offset=90, seeds {42,0,1}, same-box L40S — all identical to §22.
 
 **RESULT (can, N=50, 3-seed {42,0,1}, ALL per-seed, no errors, successes scatter across all 5 chunks — no chunk-1 artifact):**
@@ -3742,7 +3742,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm \
        XDG_CACHE_HOME=/mnt/minghao_data/xdg_cube_bc TMPDIR=/mnt/minghao_data/tmp_cube_bc \
        MPLCONFIGDIR=/mnt/minghao_data/mpl_cube_bc HF_HOME=/mnt/minghao_data/hf \
        HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline
-CUDA_VISIBLE_DEVICES=<gpu> /var/lib/docker/data/minghao_home/lewm/bin/python eval_gip.py \
+CUDA_VISIBLE_DEVICES=<gpu> /var/lib/docker/data/minghao_home/lewm/bin/python scripts/eval_gip.py \
   --config-name cube policy=cube_lewm_base +gip_eval.mode=bc eval.num_eval=50 seed=<seed> \
   hydra.run.dir=/mnt/minghao_data/hydra_cube_bc_s<seed> hydra.output_subdir=null
 ```
@@ -3794,7 +3794,7 @@ export XDG_CACHE_HOME=/mnt/minghao_data/xdg_probe_pusht TMPDIR=/mnt/minghao_data
 **Distinct from §24-SIZE.** §24-SIZE = `vit_hf size=base` **random init** (`pretrained=false`), **goal-AGNOSTIC bc only** (`goal_conditioned=false`). THIS §29 arm = **`from_huggingface facebook/dinov2-base pretrained=true`** (REAL DINOv2-base ImageNet weights, init+finetune) and a **UNIFIED bc+GC model** (`goal_conditioned=true horizon_conditioned=true goal_dropout=0.5` → ONE model serves both the goal-AGNOSTIC bc eval and the goal-conditioned clean-GC eval, exactly the §21-CLEAN/§24 two-setting WAM recipe). So §29 adds the **pretrained-prior** axis AND the **clean-GC** readout that §24-SIZE (bc-only, scratch) does not cover.
 
 ### STEP 1 — flag verification + 1-step forward (DONE, all honored)
-- **New model config** written: `config/train/model/lewm_dinov2_base.yaml` = a copy of the existing `lewm_dinov2.yaml` (which used `facebook/dinov2-small`/384) with `model_name: facebook/dinov2-base` and `pretrained: true`. Encoder `_target_ = stable_pretraining.backbone.utils.from_huggingface`; the rest of the trunk (ARPredictor/projector/pred_proj/action_encoder) keys off `${embed_dim}`, so the **companion override `embed_dim=768` is REQUIRED** (the same audit flag the `lewm_dinov2` 384 case documents). `jepa.JEPA.encode` reads `encoder(pixels, interpolate_pos_encoding=True).last_hidden_state[:,0]` (the CLS token), so DINOv2-base (768-d CLS) is a drop-in at this interface — CONFIRMED in `jepa.py:124-125`.
+- **New model config** written: `configs/train/model/lewm_dinov2_base.yaml` = a copy of the existing `lewm_dinov2.yaml` (which used `facebook/dinov2-small`/384) with `model_name: facebook/dinov2-base` and `pretrained: true`. Encoder `_target_ = stable_pretraining.backbone.utils.from_huggingface`; the rest of the trunk (ARPredictor/projector/pred_proj/action_encoder) keys off `${embed_dim}`, so the **companion override `embed_dim=768` is REQUIRED** (the same audit flag the `lewm_dinov2` 384 case documents). `jepa.JEPA.encode` reads `encoder(pixels, interpolate_pos_encoding=True).last_hidden_state[:,0]` (the CLS token), so DINOv2-base (768-d CLS) is a drop-in at this interface — CONFIRMED in `jepa.py:124-125`.
 - **Encoder forward smoke** (standalone, GPU): `from_huggingface("facebook/dinov2-base", pretrained=True)` downloaded the real DINOv2-base weights to `/mnt/minghao_data/hf` (223 safetensor shards, HTTP 200), `enc(randn(2,3,224,224), interpolate_pos_encoding=True).last_hidden_state[:,0].shape == (2, 768)`, **86.58 M encoder params** (≈ 4× the vit-tiny 22.1 M and the dinov2-small 22.1 M). CLS width = 768 confirmed.
 - **1-step training forward** (the full JEPA model with the GC head): `train.py --config-name lewm data=robomimic_can model=lewm_dinov2_base embed_dim=768 action_pred.enabled=true action_pred.goal_conditioned=true action_pred.horizon_conditioned=true action_pred.goal_dropout=0.5 trainer.max_epochs=1 +trainer.limit_train_batches=6 loader.batch_size=8` → `[GIP] Intention predictor ON Adim=35 head=mse` (35 = frameskip 5 × can action-dim 7), GC + AdaLN-Zero horizon head built, full fwd+bwd ran, all losses finite (`fit/pred_loss≈0.20 fit/act_loss≈0.80 fit/intent_loss≈1.02 validate/act_loss 1.27→1.15`, `act_emb_std≈0.12` → no collapse), **NO shape crash**, swm ckpt saved to `/mnt/minghao_data/.stable-wm/checkpoints/<run>/weights_epoch_1.pt`. The only failure was at `+trainer.limit_train_batches=1` (a `ZeroDivisionError` in the cosine LR scheduler — total-steps=1 edge case, NOT a model-shape bug); cleared at ≥6 batches. **STEP 1 PASSES.**
 - **`load_gip_model` (eval rebuild) is dinov2-aware**: it reads `config.json`, sets `embed_dim=int(config.predictor.input_dim)` (=768 here, auto), rebuilds the action_predictor/decoder, and `load_state_dict(strict=False)` with an unexpected-keys assert. So the hydra-`train.py`-trained 768-wide ckpt is loadable by `eval_histbc_robomimic.py policy=<run_name>` with NO eval-side code change — confirmed in `gip.py:115-160`.
@@ -3813,7 +3813,7 @@ export HF_HOME=/mnt/minghao_data/hf HF_HUB_OFFLINE=0 \
        SPT_CACHE_DIR=/mnt/minghao_data/spt_dinov2_base_768 \
        STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl OMP_NUM_THREADS=4 \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-CUDA_VISIBLE_DEVICES=4 /var/lib/docker/data/minghao_home/lewm/bin/python train.py --config-name lewm \
+CUDA_VISIBLE_DEVICES=4 /var/lib/docker/data/minghao_home/lewm/bin/python scripts/train.py --config-name lewm \
   data=robomimic_can model=lewm_dinov2_base embed_dim=768 \
   output_model_name=dinov2_base_768 \
   action_pred.enabled=true action_pred.goal_conditioned=true \
@@ -3836,7 +3836,7 @@ Per-epoch `validate/act_loss` (the action-prediction MSE = the bc/GC-relevant he
 The §27 `eval.goal_mode` patch is already installed in this box's swm `world.py` + `eval_histbc_robomimic.py` (read `cfg.eval.get("goal_mode","mid")`, `S27_GOAL_MODE_PATCH`), so the clean terminal-goal GC needs NO further code change. `load_gip_model` auto-detects embed_dim=768 from config.json. Env: `STABLEWM_HOME=/mnt/minghao_data/.stable-wm MUJOCO_GL=egl HF_HUB_OFFLINE=0 OMP_NUM_THREADS=4` + the /mnt scratch redirects; cwd `/var/lib/docker/data/minghao_home/workspace/le-wm-repro`; py `/var/lib/docker/data/minghao_home/lewm/bin/python`; **same-box GPU 4** (the training GPU — per [[project_l40s_cross_gpu_rendering]] eval MUST be on the training box or the render goes OOD→0).
 - **(a) bc (goal-AGNOSTIC, canonical b240/o90), per seed ∈ {42,0,1}:**
   ```
-  CUDA_VISIBLE_DEVICES=4 python eval_histbc_robomimic.py --config-name robomimic \
+  CUDA_VISIBLE_DEVICES=4 python scripts/eval_histbc_robomimic.py --config-name robomimic \
     world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can \
     eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 \
     policy=dinov2_base_768 +gip_eval.mode=policy +gip_eval.goal_conditioned=false seed=<seed>
@@ -3844,7 +3844,7 @@ The §27 `eval.goal_mode` patch is already installed in this box's swm `world.py
   (the goal-AGNOSTIC histbc-bc: `goal_conditioned=false` → the dropout-0.5 head's bc setting; compare to vit-tiny bc 0.71 and DP ~1.0.)
 - **(b) clean GC (terminal goal, the §27 fix, b240/o90), per seed ∈ {42,0,1}:**
   ```
-  CUDA_VISIBLE_DEVICES=4 python eval_histbc_robomimic.py --config-name robomimic \
+  CUDA_VISIBLE_DEVICES=4 python scripts/eval_histbc_robomimic.py --config-name robomimic \
     world.task=PickPlaceCan world.num_envs=10 dataset.stats=can eval.dataset_name=can \
     eval.num_eval=50 eval.eval_budget=240 eval.goal_offset_steps=90 +eval.goal_mode=terminal \
     policy=dinov2_base_768 +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<seed>
@@ -3982,10 +3982,10 @@ sudo -u minghao.fu env STABLEWM_HOME=/mnt/minghao_data/.stable-wm <disk-safe env
 ### STEP 4 — EVAL SR (cube, N=50, 3 seeds {42,0,1}, same-box L40S, CONVERGED ckpt; planning + bc)
 ```
 sudo -u minghao.fu env <disk-safe env> CUDA_VISIBLE_DEVICES=<train-region GPU> \
-  /var/lib/docker/data/minghao_home/lewm/bin/python eval_gip.py --config-name cube \
+  /var/lib/docker/data/minghao_home/lewm/bin/python scripts/eval_gip.py --config-name cube \
   policy=sigreg_A_cube_scratch +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
-`--config-name cube` = `config/eval/cube.yaml` (env `swm/OGBCube-v0` single, N=50, goal_offset_steps=25, eval_budget=50, action_block=5, `terminate_at_goal`, privileged `set_target_pos` block goal — the §11/§12 cube eval). `mode=planning` = pure WM CEM; `mode=bc` = the reactive intention head. Same-box (train+eval same L40S) per [[project_l40s_cross_gpu_rendering]].
+`--config-name cube` = `configs/eval/cube.yaml` (env `swm/OGBCube-v0` single, N=50, goal_offset_steps=25, eval_budget=50, action_block=5, `terminate_at_goal`, privileged `set_target_pos` block goal — the §11/§12 cube eval). `mode=planning` = pure WM CEM; `mode=bc` = the reactive intention head. Same-box (train+eval same L40S) per [[project_l40s_cross_gpu_rendering]].
 
 ### RESULTS (to fill at convergence — ALL per-seed)
 | arm | final z_std | act_emb_std | erank_pr/192 | SR planning (s42/s0/s1, mean) | SR bc (s42/s0/s1, mean) | reading |
@@ -4012,7 +4012,7 @@ sudo -u minghao.fu env <disk-safe env> CUDA_VISIBLE_DEVICES=<train-region GPU> \
 **Theory mechanism under test.** In `train.py` (`lejepa_forward`) the latent loss is `output["loss"] = pred_loss + lambd*sigreg_loss` with `lambd = cfg.loss.sigreg.weight` (default 0.09). SIGReg (`module.SIGReg`, knots=17 num_proj=1024) is the LeJEPA isotropic-Gaussian regularizer = the explicit anti-collapse. With `action_pred.enabled=true` the total also gets `+ w_intent·intent_loss + w_act·act_loss` (the GIP intention head: `intent_loss=(intention−act_emb.detach())²`, `act_loss=(decoder(intention)−raw_action)²`). The conjecture: `act_loss` (raw-action regression, head=mse) supplies an independent anti-collapse pressure on the shared latent `emb`, so SIGReg→0 should be harmless.
 
 ### Design — 2 arms, FROM SCRATCH, action_pred ON throughout, ONLY `loss.sigreg.weight` differs
-- **Env:** PushT (fastest wired single-task env; `data=pusht`, the committed `config/train/data/pusht.yaml`, frameskip 5 ⇒ action_block 5, adim=10, full `pusht_expert_train.h5`). State-driven 2-D contact task.
+- **Env:** PushT (fastest wired single-task env; `data=pusht`, the committed `configs/train/data/pusht.yaml`, frameskip 5 ⇒ action_block 5, adim=10, full `pusht_expert_train.h5`). State-driven 2-D contact task.
 - **Arm A (baseline, SIGReg ON):** `loss.sigreg.weight=0.09` (the current default λ). GPU 6 (relaunched there after a transient GPU-3 OOM from a co-located other-user 36 GB proc; first GPU-3 attempt died at CUDA-init, NO partial ckpt written). PID 1752531.
 - **Arm B (conjecture, SIGReg OFF):** `loss.sigreg.weight=0` — the `lambd*sigreg_loss` term is exactly zeroed (SIGReg module still RUNS and `sigreg_loss` is still logged for monitoring, but contributes 0 to `loss`). GPU 5. PID 1752039.
 - **From scratch** (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random init, CLS-192). This is the load-bearing choice: warm-starting from a converged base would pre-establish a non-collapsed latent (via the WM pred_loss during base pretrain) and HIDE any collapse. From scratch, the only anti-collapse forces during joint training are SIGReg (Arm A) vs `act_loss`/`intent_loss`/`pred_loss` alone (Arm B).
@@ -4041,7 +4041,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_da
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
 # ARM A (SIGReg ON, GPU6):  loss.sigreg.weight=0.09
 # ARM B (SIGReg OFF, GPU5): loss.sigreg.weight=0
-CUDA_VISIBLE_DEVICES=<6|5> python train_sigreg.py data=pusht \
+CUDA_VISIBLE_DEVICES=<6|5> python scripts/train_sigreg.py data=pusht \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 action_pred.sigreg_act=false \
   loss.sigreg.weight=<0.09|0> init_from=null \
@@ -4106,7 +4106,7 @@ The per-step/per-epoch `validate/z_std` line was NOT reliably captured anywhere 
 - **Arm C mech2 (`sigreg_act=true`):** `sigreg_act_loss` present=True value=24.967 (adds `λ·=2.247` to total); absent (not in output) when `sigreg_act=false`. ✓ the act-emb VICReg term is added only when sigreg_act=true — confirmed.
 
 ### Design — Arm B, FROM SCRATCH, action_pred ON, head=mse, latent-SIGReg OFF
-- **Env:** reacher (`data=dmc`, the committed `config/train/data/dmc.yaml` → `reacher.h5`, frameskip 5 ⇒ action_block 5, adim=10). STATE-DRIVEN 2-link reaching (qpos_match), the clean (non-history-copyable) test vs §30 pusht.
+- **Env:** reacher (`data=dmc`, the committed `configs/train/data/dmc.yaml` → `reacher.h5`, frameskip 5 ⇒ action_block 5, adim=10). STATE-DRIVEN 2-link reaching (qpos_match), the clean (non-history-copyable) test vs §30 pusht.
 - **Arm B (this subagent):** `loss.sigreg.weight=0` (the `lambd·sigreg_loss` term exactly zeroed; SIGReg module still RUNS + `sigreg_loss` still logged for monitoring, contributes 0 to `loss`). FROM SCRATCH (`init_from=null`, vit-tiny-192, `pretrained=false`, random CLS-192 init — the load-bearing choice: a warm start would pre-establish a non-collapsed latent and HIDE collapse). `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`.
 - **Budget — MATCHES the sibling reacher A/C arms:** `trainer.max_epochs=100 +trainer.limit_train_batches=1000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4`, seed 3072 (lewm.yaml default), `+ckpt_every=10`. **NOTE the cap is 1000 (not §30-pusht's 4000):** the sibling A/C subagents capped reacher to 1000 for turnaround under the L40S oversubscription; "same cap for all arms of this env" ⇒ Arm B uses 1000 too (an initial Arm-B launch at 4000 was killed by a DataLoader-worker SIGTERM under load-avg 146 / 3 concurrent reacher arms hammering the 98 GB reacher.h5; relaunched at 1000 to match siblings — see Infra).
 - **Monitor:** trained with `train_sigreg.py` (= `train.py` + the single `output["z_std"]=emb.std(...)` line; diff = 4 lines, shared `train.py` UNTOUCHED). The robust collapse signal is measured DIRECTLY from the converged checkpoint (the in-log z_std monitor was unreliable in §30) via `/mnt/minghao_data/measure_collapse_reacher.py`: rebuilds the model via `gip.load_gip_model` (the SAME path `eval_gip.py` uses), runs ONE shared deterministic reacher val batch through `model.encode`, computes `z_std=emb.reshape(-1,D).std(dim=0).mean()` + effective rank (participation ratio = `exp(entropy)` of the singular-value spectrum) + `act_emb_std` + per-dim std spread.
@@ -4121,7 +4121,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm SPT_CACHE_DIR=/mnt/minghao_dat
        MPLCONFIGDIR=/mnt/minghao_data/mpl_reacher_B HF_HOME=/mnt/minghao_data/hf \
        HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=7 python train_sigreg.py data=dmc \
+CUDA_VISIBLE_DEVICES=7 python scripts/train_sigreg.py data=dmc \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 \
   action_pred.detach_target=true action_pred.sigreg_act=false \
@@ -4135,7 +4135,7 @@ CUDA_VISIBLE_DEVICES=7 python train_sigreg.py data=dmc \
 ### EVAL plan (when converged — rule 8/9; AUTOMATED via `/mnt/minghao_data/reacher_B_orchestrator.sh`)
 Arm B, same-box GPU 7, **N=50 × 3 seeds {42,0,1}**, modes **planning + bc** (reacher has a val-best checkpoint trap §15/§19 → use the CONVERGED ckpt via `+ckpt_epoch=<final>`, NOT val-best):
 ```
-PYTHONPATH=/tmp/reacher_compat:$B python eval_gip.py --config-name reacher \
+PYTHONPATH=/tmp/reacher_compat:$B python scripts/eval_gip.py --config-name reacher \
   policy=sigreg_B_reacher_scratch +ckpt_epoch=<conv> \
   +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
@@ -4165,7 +4165,7 @@ PYTHONPATH=/tmp/reacher_compat:$B python eval_gip.py --config-name reacher \
 **Motivation (why).** Every prior can result is bottlenecked by the **vit-tiny-192** CLS encoder (5.5M params, 192-d, DINOv2-arch but trained-from-SIGReg or DINOv2-small-init). The §22/§24/§27 verdict is that the can-GC floor is "PREDOMINANTLY REAL — the frozen/learnable vit-tiny-192 latent can't localize the can well enough for goal-reaching" (clean terminal-goal GC tops out ~0.26 = 37% of the 0.71 goal-agnostic bc ceiling), and the §6 latent→full-state probe is only R²≈0.554 on a TRAINED vit-tiny (3-D occluded can pose + velocities are hard for a 192-d CLS). The open question this arm answers: **is the can ceiling an ENCODER-CAPACITY bottleneck, or a formulation/data bottleneck?** If a 4×-deeper, 5.3×-wider **DINOv2-large** encoder (1024-d, 24 layers, ~304M backbone params, ImageNet/LVD-142M-pretrained) lifts (a) can goal-agnostic **bc** toward the DP ceiling (~1.0) and/or (b) clean terminal-goal **GC** off the vit-tiny 0.26 floor, then the floor is (partly) the tiny encoder; if both stay flat (~0.71 bc, ~0.26 GC), the bottleneck is the GC formulation / robomimic occluded-state difficulty, NOT encoder size, and the §22/§27 "floor is real" verdict hardens against the strongest pretrained-encoder counter-test. This is the **encoder axis** of the size sweep (cf. §24-SIZE which scales the trunk WIDTH at vit tiny/small/base 192/384/768 from scratch — this arm jumps to a large PRETRAINED foundation encoder).
 
 ### STEP 1 — FLAGS VERIFIED + 1-STEP FORWARD (L40S, this session) ✅
-- **Encoder swap mechanics.** The framework already ships `config/train/model/lewm_dinov2.yaml` (`encoder._target_=stable_pretraining.backbone.utils.from_huggingface`, default `model_name=facebook/dinov2-small pretrained=false`). `jepa.JEPA.encode` reads ONLY `encoder(pixels, interpolate_pos_encoding=True).last_hidden_state[:,0]` (the CLS token), so any DINOv2 size is a drop-in at this interface. The dinov2-large swap = three overrides: **`model=lewm_dinov2 model.encoder.pretrained=true model.encoder.model_name=facebook/dinov2-large embed_dim=1024`**. The `embed_dim=1024` (vs the lewm.yaml default 192) is the REQUIRED companion: `embed_dim` keys the predictor/projector/pred_proj/action_encoder/horizon_modulator widths, so it MUST equal the encoder hidden_size (dinov2-large = 1024) or the trunk mismatches the CLS token (the same audit flag §24-SIZE documents for any non-tiny encoder). NO `init_from` (the vit-tiny `can_lewm_weights.pt` is shape-incompatible at 1024-d — the encoder comes PRETRAINED from HF, the GIP head + predictor + projector train from scratch).
+- **Encoder swap mechanics.** The framework already ships `configs/train/model/lewm_dinov2.yaml` (`encoder._target_=stable_pretraining.backbone.utils.from_huggingface`, default `model_name=facebook/dinov2-small pretrained=false`). `jepa.JEPA.encode` reads ONLY `encoder(pixels, interpolate_pos_encoding=True).last_hidden_state[:,0]` (the CLS token), so any DINOv2 size is a drop-in at this interface. The dinov2-large swap = three overrides: **`model=lewm_dinov2 model.encoder.pretrained=true model.encoder.model_name=facebook/dinov2-large embed_dim=1024`**. The `embed_dim=1024` (vs the lewm.yaml default 192) is the REQUIRED companion: `embed_dim` keys the predictor/projector/pred_proj/action_encoder/horizon_modulator widths, so it MUST equal the encoder hidden_size (dinov2-large = 1024) or the trunk mismatches the CLS token (the same audit flag §24-SIZE documents for any non-tiny encoder). NO `init_from` (the vit-tiny `can_lewm_weights.pt` is shape-incompatible at 1024-d — the encoder comes PRETRAINED from HF, the GIP head + predictor + projector train from scratch).
 - **1-step forward (gate).** Real-data smoke (`data=robomimic_can`, `limit_train_batches=3`, GPU 3, deleted after): DINOv2-large downloaded to `/mnt/minghao_data/hf` (439 weight shards loaded, `HF_HUB_OFFLINE=0`), startup `[GIP] Intention predictor ON Adim=35 head=mse`, `[GIP] OURS horizon conditioning ON AdaLN-Zero H_max=50`, **horizon_modulator built with 297,216 params** (cond_proj 264,192 = 1024×258 → confirms `embed_dim=1024` propagated, vs vit-tiny's 82,560), **NO `freeze_wm=true` line ⇒ encoder LEARNABLE (end-to-end finetune)**, GC losses finite (`validate/act_loss` path runs → GoalSamplingDataset + goal_dropout=0.5 OK), `weights_epoch_1.pt` (1.98 GB) + config.json saved cleanly to `/mnt`, **exit 0, no shape crash, no NaN.**
 - **GPU-FIT.** DINOv2-large end-to-end needs much more activation memory than vit-tiny: **batch_size=128 and 32 BOTH OOM'd a 44 GB L40S** (43.8 GB allocated in a single fwd at the 24-layer/1024-d encoder backprop). **batch_size=8 fit (5.8 s/3-batch), batch_size=16 fit (1.89 it/s), batch_size=24 fit (1.35 it/s, peak ~40 GB / 44 GB).** Chose **batch_size=24** (the largest that fits with headroom). First OOM was also the §24 `trainer.devices=auto`-ignores-`CUDA_VISIBLE_DEVICES` gotcha — fixed by `trainer.devices=[0]` (logical-0 = the pinned physical GPU 3) + `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 
@@ -4183,7 +4183,7 @@ env STABLEWM_HOME=/mnt/minghao_data/.stable-wm SPT_CACHE_DIR=/mnt/minghao_data/s
   MPLCONFIGDIR=/mnt/minghao_data/mpl_dinov2_large_1024 \
   OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   CUDA_VISIBLE_DEVICES=3 \
-  python train.py data=robomimic_can model=lewm_dinov2 \
+  python scripts/train.py data=robomimic_can model=lewm_dinov2 \
   model.encoder.pretrained=true model.encoder.model_name=facebook/dinov2-large \
   embed_dim=1024 loader.batch_size=24 \
   output_model_name=can_gc_dinov2L subdir=can_gc_dinov2L \
@@ -4206,14 +4206,14 @@ env STABLEWM_HOME=/mnt/minghao_data/.stable-wm SPT_CACHE_DIR=/mnt/minghao_data/s
 ### STEP 3 — EVAL COMMANDS (can, same-box GPU 3 = train GPU per the cross-GPU render gotcha [[project_l40s_cross_gpu_rendering]], N=50, 3-seed {42,0,1})
 - **(a) bc = goal-AGNOSTIC (canonical b240/o90):**
 ```
-python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan \
+python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan \
   world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 \
   eval.eval_budget=240 eval.goal_offset_steps=90 policy=can_gc_dinov2L \
   +gip_eval.mode=policy +gip_eval.goal_conditioned=false seed=<42|0|1>
 ```
 - **(b) clean GC = terminal-goal (the §27 fix, b240/o90):**
 ```
-python eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan \
+python scripts/eval_histbc_robomimic.py --config-name robomimic world.task=PickPlaceCan \
   world.num_envs=10 dataset.stats=can eval.dataset_name=can eval.num_eval=50 \
   eval.eval_budget=240 eval.goal_offset_steps=90 +eval.goal_mode=terminal \
   policy=can_gc_dinov2L +gip_eval.mode=policy +gip_eval.goal_conditioned=true seed=<42|0|1>
@@ -4244,7 +4244,7 @@ Ran `/mnt/minghao_data/verify_sigreg_tworoom.py` (built the gated tworoom model 
 All three flags exist and are honored. NOT blocked.
 
 ### Design — tworoom_B = §30 Arm B recipe, ONLY env changed pusht→tworoom
-FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192 — the load-bearing choice: warm-start would pre-establish a non-collapsed latent and HIDE collapse), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0`** (the arm-B knob: SIGReg module still RUNS + `sigreg_loss` still logged, contributes 0 to `loss`). Budget MATCHED to §30 pusht for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=4000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). Data = committed `config/train/data/tworoom.yaml` (frameskip 5 ⇒ action_block 5, adim=2 ⇒ action_block adim=10, full `tworoom.h5` 13 GB on `/mnt/minghao_data/.stable-wm/datasets/`). The SAME 4000-batch cap is to be used for tworoom arms A/B/C (this arm = B).
+FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192 — the load-bearing choice: warm-start would pre-establish a non-collapsed latent and HIDE collapse), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0`** (the arm-B knob: SIGReg module still RUNS + `sigreg_loss` still logged, contributes 0 to `loss`). Budget MATCHED to §30 pusht for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=4000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). Data = committed `configs/train/data/tworoom.yaml` (frameskip 5 ⇒ action_block 5, adim=2 ⇒ action_block adim=10, full `tworoom.h5` 13 GB on `/mnt/minghao_data/.stable-wm/datasets/`). The SAME 4000-batch cap is to be used for tworoom arms A/B/C (this arm = B).
 
 ### Infra (DISK-SAFE, L40S shared box — the killer is SPT_CACHE_DIR)
 L40S `stratus-lookout`, run `sudo -u minghao.fu`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`, cwd `/var/lib/docker/data/minghao_home/workspace/le-wm-repro`. **Disk at launch:** `/var/lib/docker` 99%, `/` 97%, `/mnt/minghao_data` 22% (2.4 TB free) → ALL writes redirected to `/mnt`: `STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_data/xdg_tworoom_B TMPDIR=/mnt/minghao_data/tmp_tworoom_B MPLCONFIGDIR=/mnt/minghao_data/mpl_tworoom_B HF_HOME=/mnt/minghao_data/hf **SPT_CACHE_DIR=/mnt/minghao_data/spt_tworoom_B** HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, plus `hydra.run.dir=/mnt/minghao_data/hydra_tworoom_B hydra.output_subdir=null`. Ckpts → `STABLEWM_HOME/checkpoints/sigreg_B_tworoom_scratch/`. `+ckpt_every=10` (ep 10,20,…,100) + `/mnt/minghao_data/prune_tworoom_B.sh` keep-newest-3 loop (PID 2125271). GPU **7** (lowest-occupied at launch, 5.3 GB; co-located per rule 10, never touched other users' procs). Same box train+eval → no cross-GPU render OOD ([[project_l40s_cross_gpu_rendering]]).
@@ -4257,7 +4257,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_da
        HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=7 python train_sigreg.py data=tworoom \
+CUDA_VISIBLE_DEVICES=7 python scripts/train_sigreg.py data=tworoom \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 action_pred.detach_target=true action_pred.sigreg_act=false \
   loss.sigreg.weight=0 init_from=null \
@@ -4308,7 +4308,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_da
   HF_HOME=/mnt/minghao_data/hf HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 \
   SPT_CACHE_DIR=/mnt/minghao_data/spt_reacher_<ARM> PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=<GPU> python train_sigreg.py data=dmc \
+CUDA_VISIBLE_DEVICES=<GPU> python scripts/train_sigreg.py data=dmc \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 \
   action_pred.detach_target=<true|true|false> action_pred.sigreg_act=<false|false|true> \
@@ -4326,7 +4326,7 @@ For each arm's converged checkpoint: `gip.load_gip_model(run, epoch)` (the SAME 
 
 ### STEP 4 — EVAL SR (reacher, `eval_gip.py --config-name reacher`, N=50, 3 seeds {42,0,1}, same-box, planning + bc; use the CONVERGED ckpt — reacher has the §15 val-best CHECKPOINT TRAP, headline the converged ckpt NOT val-best) [PENDING convergence]
 ```
-python eval_gip.py --config-name reacher policy=sigreg_<A|B|C>_reacher_scratch \
+python scripts/eval_gip.py --config-name reacher policy=sigreg_<A|B|C>_reacher_scratch \
   +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
 (planning = pure WM CEM; bc = intention head reactive. Reacher needs the dm_control↔mujoco compat shim `/tmp/reacher_compat/sitecustomize.py` on PYTHONPATH, §15 blocker 1; eval same-box as train per the cross-GPU render gotcha [[project_l40s_cross_gpu_rendering]].)
@@ -4374,7 +4374,7 @@ Launch-log confirms: `[GIP] Intention predictor ON  Adim=25  head=mse  w_act=1.0
 
 ### STEP 4 — EVAL SR (cube, `eval_gip.py --config-name cube`, N=50, 3 seeds {42,0,1}, same-box, planning + bc; CONVERGED ckpt) [PENDING convergence]
 ```
-python eval_gip.py --config-name cube policy=sigreg_C_cube_scratch \
+python scripts/eval_gip.py --config-name cube policy=sigreg_C_cube_scratch \
   +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
 
@@ -4423,7 +4423,7 @@ Launch-log confirms both A and B: `[GIP] Intention predictor ON  Adim=25  head=m
 
 ### STEP 4 — EVAL SR (cube, `eval_gip.py --config-name cube`, N=50, 3 seeds {42,0,1}, same-box, planning + bc; CONVERGED ep100 ckpt via `+ckpt_epoch=100`) [PENDING convergence]. Driver `/mnt/minghao_data/eval_cube_sigreg.sh <gpu>`:
 ```
-python eval_gip.py --config-name cube policy=sigreg_<A|B>_cube_scratch \
+python scripts/eval_gip.py --config-name cube policy=sigreg_<A|B>_cube_scratch \
   +ckpt_epoch=100 +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
 
@@ -4461,7 +4461,7 @@ Ran `/mnt/minghao_data/verify_sigreg_tworoom.py` (gated tworoom model + one real
 All three mechanisms honored. The arm-C combination (`detach_target=false sigreg_act=true loss.sigreg.weight=0.09`) is wired correctly. NOT blocked.
 
 ### Design — tworoom_C = §31 tworoom_B recipe, ONLY the two arm-C flags flipped
-FROM SCRATCH (`init_from=null`, encoder `vit_hf` tiny patch=14 image=224 **pretrained=false** → random CLS-192, the load-bearing choice that lets collapse show), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0`, **arm-C flags: `detach_target=false sigreg_act=true`**, **`loss.sigreg.weight=0.09`** (latent SIGReg kept ON; arm C contrasts the stop-grad vs the act-emb VICReg, NOT the latent SIGReg, and the caveat requires a nonzero `lambd` for `sigreg_act` to contribute). Budget MATCHED to §30 pusht / §31 tworoom_B for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=4000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). Data = committed `config/train/data/tworoom.yaml` (frameskip 5 ⇒ action_block 5, adim=2 ⇒ block adim=10, full `tworoom.h5` 13 GB). SAME 4000-batch cap as tworoom A/B.
+FROM SCRATCH (`init_from=null`, encoder `vit_hf` tiny patch=14 image=224 **pretrained=false** → random CLS-192, the load-bearing choice that lets collapse show), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0`, **arm-C flags: `detach_target=false sigreg_act=true`**, **`loss.sigreg.weight=0.09`** (latent SIGReg kept ON; arm C contrasts the stop-grad vs the act-emb VICReg, NOT the latent SIGReg, and the caveat requires a nonzero `lambd` for `sigreg_act` to contribute). Budget MATCHED to §30 pusht / §31 tworoom_B for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=4000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). Data = committed `configs/train/data/tworoom.yaml` (frameskip 5 ⇒ action_block 5, adim=2 ⇒ block adim=10, full `tworoom.h5` 13 GB). SAME 4000-batch cap as tworoom A/B.
 
 ### Infra (DISK-SAFE, L40S shared box — the killer is SPT_CACHE_DIR)
 L40S `stratus-lookout`, run `sudo -u minghao.fu`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`, cwd `/var/lib/docker/data/minghao_home/workspace/le-wm-repro`. **Disk at launch:** `/` 97% (3.5 G free), `/mnt/minghao_data` 22% (2.4 TB free) → ALL writes redirected to `/mnt`: `STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_data/xdg_tworoom_C TMPDIR=/mnt/minghao_data/tmp_tworoom_C MPLCONFIGDIR=/mnt/minghao_data/mpl_tworoom_C HF_HOME=/mnt/minghao_data/hf **SPT_CACHE_DIR=/mnt/minghao_data/spt_tworoom_C** HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, plus `hydra.run.dir=/mnt/minghao_data/hydra_tworoom_C hydra.output_subdir=null`. Verified the SPT_CACHE redirect active in-log (`log_dir: /mnt/minghao_data/spt_tworoom_C`, summary.json + hf_exports redirected there). Ckpts → `STABLEWM_HOME/checkpoints/sigreg_C_tworoom_scratch/`. `+ckpt_every=10` (ep 10,20,…,100) + `/mnt/minghao_data/prune_tworoom_C.sh` keep-newest-3 loop (PID 2129615). GPU **5** (lowest-occupied at launch, 8.8 GB; co-located per rule 10, never touched other users' procs). Same box train+eval → no cross-GPU render OOD ([[project_l40s_cross_gpu_rendering]]).
@@ -4473,7 +4473,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm SPT_CACHE_DIR=/mnt/minghao_dat
        MPLCONFIGDIR=/mnt/minghao_data/mpl_tworoom_C HF_HOME=/mnt/minghao_data/hf \
        HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=5 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train_sigreg.py data=tworoom \
+CUDA_VISIBLE_DEVICES=5 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/train_sigreg.py data=tworoom \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 action_pred.detach_target=false action_pred.sigreg_act=true \
   loss.sigreg.weight=0.09 init_from=null \
@@ -4504,7 +4504,7 @@ z_std / act_emb_std / erank / collapsed / sr_planning / sr_bc / per_seed — to 
 2. **The action-emb stop-grad can be replaced by act-emb VICReg/SIGReg** (Arm A vs Arm C). Default design stop-grads the `intent_loss` target (`tgt_act_emb = ctx_act.detach()`, `detach_target=true`) to keep the action encoder from collapsing onto a trivial target. Arm C instead lets the gradient FLOW (`detach_target=false`) and adds an explicit SIGReg on the action embeddings (`sigreg_act=true`) to hold them apart. Question: is `detach_target=false + sigreg_act=true` a viable (or better) anti-collapse for the act embeddings than the stop-grad?
 
 ### Design — 3 arms, FROM SCRATCH, action_pred ON throughout, MATCHED §30/PushT budget for comparability
-- **Env:** TwoRoom (`data=tworoom`, committed `config/train/data/tworoom.yaml`, frameskip 5 ⇒ action_block 5, action_dim=2 ⇒ Adim=10, full `tworoom.h5` = 12.7 GB). STATE-DRIVEN 2-D navigation — the CLEAN test (no PushT history-copyability confound, §18 caveat resolved).
+- **Env:** TwoRoom (`data=tworoom`, committed `configs/train/data/tworoom.yaml`, frameskip 5 ⇒ action_block 5, action_dim=2 ⇒ Adim=10, full `tworoom.h5` = 12.7 GB). STATE-DRIVEN 2-D navigation — the CLEAN test (no PushT history-copyability confound, §18 caveat resolved).
 - **Arm A (baseline = default design, this agent's arm):** `loss.sigreg.weight=0.09 action_pred.detach_target=true action_pred.sigreg_act=false`. Latent SIGReg ON, act-emb stop-grad ON, no act-emb SIGReg. Run `sigreg_A_tworoom_scratch`, GPU 1, PID 2148194.
 - **Arm B (conjecture-1, latent SIGReg OFF):** `loss.sigreg.weight=0` (the `lambd*sigreg_loss` term EXACTLY zeroed; SIGReg module still RUNS + logs `sigreg_loss` for monitoring but contributes 0). `detach_target=true sigreg_act=false`. Run `sigreg_B_tworoom_scratch` (sibling agent), GPU 5, PID 2125270.
 - **Arm C (conjecture-2, act-emb VICReg instead of stop-grad):** `action_pred.detach_target=false action_pred.sigreg_act=true loss.sigreg.weight=0.09`. The `intent_loss` gradient FLOWS to the action encoder (no stop-grad) AND a `sigreg_act_loss = SIGReg(act_emb)` term is added (weighted by the SAME `lambd=0.09`). Run `sigreg_C_tworoom_scratch` (sibling agent), GPU 7, PID 2129671.
@@ -4521,7 +4521,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm SPT_CACHE_DIR=/mnt/minghao_dat
 # ARM A (GPU1): detach_target=true  sigreg_act=false loss.sigreg.weight=0.09
 # ARM B (GPU5): detach_target=true  sigreg_act=false loss.sigreg.weight=0
 # ARM C (GPU7): detach_target=false sigreg_act=true  loss.sigreg.weight=0.09
-CUDA_VISIBLE_DEVICES=<1|5|7> PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train_sigreg.py data=tworoom \
+CUDA_VISIBLE_DEVICES=<1|5|7> PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/train_sigreg.py data=tworoom \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 \
   action_pred.detach_target=<true|true|false> action_pred.sigreg_act=<false|false|true> \
@@ -4583,7 +4583,7 @@ Results → `gip_eval/<mode>/sigreg_<A|B|C>_tworoom_scratch/<mode>_<...>_results
 **Motivation (why).** §30 (pusht) and §31 (reacher/tworoom/cube arms A/B/C) test the user's SIGReg-redundancy conjecture: with the action-prediction head active (`action_pred.enabled=true`, `act_loss=(decoder(intention)−raw_action)²`), the explicit latent anti-collapse (SIGReg, `loss.sigreg.weight`) should be REDUNDANT, because `act_loss` (raw-action regression) supplies an independent anti-collapse pressure on the shared latent `emb`. §30/§31 arm B (latent-SIGReg OFF) found a SCALE-SHRINK not a SCAR-collapse on pusht (z_std ~5× lower than arm A but erank STAYS HIGH, all per-dim std > 0). BUT arm B on these envs still runs with **`use_action_history=true`** — so the §18 history-copyability confound applies: when the past-action stream `a_<t` is available to the action head, a chunk of `act_loss` can be satisfied by COPYING/extrapolating the action history rather than by reading the latent `emb`. That WEAKENS `act_loss`'s anti-collapse pressure on the latent and makes a healthy arm B only a CONSERVATIVE positive (the latent might be partly held up by something OTHER than act_loss reading it). **This arm removes that confound entirely:** with `model.use_action_history=FALSE` (`jepa.py:192,338` zero `past_act_emb` in BOTH the train `predict_intention` and the rollout/eval path), the action head has NO action-history shortcut — it MUST read the latent to predict the action. So if sigreg-OFF STILL keeps the latent full-rank AND holds SR HERE, the conjecture (act_loss anchors the latent → SIGReg redundant) is CLEANLY confirmed, not just conservatively. If instead the latent collapses here where the history-ON arm B did not, the §30/§31 positives were a history-copyability artifact and SIGReg IS load-bearing once the shortcut is removed.
 
 ### Design — the §31 reacher arm-B recipe with ONE change: `model.use_action_history=false`
-FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192, the load-bearing choice that lets collapse show), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0`** (sigreg OFF — the SIGReg module still RUNS + `sigreg_loss` is logged for monitoring but contributes 0 to `loss`), **`model.use_action_history=false`** (THE clean-test knob — past-action stream zeroed, action head must read the latent). Budget MATCHED to the §31 reacher A/B/C arms for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=1000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). **`limit_train_batches=1000` matches the RELAUNCHED reacher A/B/C cap** (the original 4000 was killed under box contention and relaunched at 1000 across all arms, EXPERIMENTS.md §31 reacher STATUS line) — same cap = comparable. Data = committed `config/train/data/dmc.yaml` (`name: reacher.h5`, frameskip 5 ⇒ action_block 10, adim=2, the same reacher data the §15/§31 reacher arms use). reacher has the §15 val-best CHECKPOINT TRAP → headline the CONVERGED `weights_epoch_100.pt`, NOT val-best.
+FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192, the load-bearing choice that lets collapse show), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0`** (sigreg OFF — the SIGReg module still RUNS + `sigreg_loss` is logged for monitoring but contributes 0 to `loss`), **`model.use_action_history=false`** (THE clean-test knob — past-action stream zeroed, action head must read the latent). Budget MATCHED to the §31 reacher A/B/C arms for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=1000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). **`limit_train_batches=1000` matches the RELAUNCHED reacher A/B/C cap** (the original 4000 was killed under box contention and relaunched at 1000 across all arms, EXPERIMENTS.md §31 reacher STATUS line) — same cap = comparable. Data = committed `configs/train/data/dmc.yaml` (`name: reacher.h5`, frameskip 5 ⇒ action_block 10, adim=2, the same reacher data the §15/§31 reacher arms use). reacher has the §15 val-best CHECKPOINT TRAP → headline the CONVERGED `weights_epoch_100.pt`, NOT val-best.
 
 ### STEP 1 — flag verified (smoke, 2 batches, GPU 0)
 `model.use_action_history=false` accepted by `train_sigreg.py`; built model logs `[GIP] Intention predictor ON Adim=10 head=mse w_act=1.0 w_intent=1.0 detach_target=True sigreg_act=False`; 2-batch train+val ran with no crash. **`loss.sigreg.weight=0` verified:** `sigreg_loss` still COMPUTED+logged (3.4375) but `loss_epoch=2.312 = pred 0.0725 + intent 1.011 + act 1.228` (NO sigreg term in the total — the `lambd*sigreg` contribution is exactly 0). `z_std`/`act_emb_std`/`act_loss` all log. The `use_action_history=false` zeroing is read directly from `jepa.py` (lines 192 + 338: `if not self.use_action_history: past_act_emb = torch.zeros_like(past_act_emb)`) and rides into `config.json` via `cfg.model` (the same mechanism §18 used), so eval rebuilds with the flag. (A "did NOT receive gradients" warning fires on the now-dead past-action path — EXPECTED, that stream is zeroed.)
@@ -4596,7 +4596,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_da
   HF_HOME=/mnt/minghao_data/hf HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 \
   SPT_CACHE_DIR=/mnt/minghao_data/spt_reacher_noah PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=7 python train_sigreg.py data=dmc \
+CUDA_VISIBLE_DEVICES=7 python scripts/train_sigreg.py data=dmc \
   model.use_action_history=false \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 \
@@ -4615,7 +4615,7 @@ CUDA_VISIBLE_DEVICES=7 python train_sigreg.py data=dmc \
 
 ### STEP 4 — EVAL SR (reacher, `eval_gip.py --config-name reacher`, N=50, seeds {42,0,1}, same-box, planning + bc) [PENDING convergence; auto-run by finalizer]
 ```
-PYTHONPATH=/tmp/reacher_compat:$B python eval_gip.py --config-name reacher \
+PYTHONPATH=/tmp/reacher_compat:$B python scripts/eval_gip.py --config-name reacher \
   policy=sigreg_noah_reacher_scratch +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
 (planning = pure WM CEM; bc = intention head reactive. Reacher needs the dm_control↔mujoco compat shim `/tmp/reacher_compat/sitecustomize.py` on PYTHONPATH, §15 blocker 1; eval same-box GPU 7 = the train GPU per the cross-GPU render gotcha [[project_l40s_cross_gpu_rendering]].)
@@ -4652,7 +4652,7 @@ Does sigreg-OFF stay FULL-RANK + hold SR even WITHOUT the action-history shortcu
 - **Everything else IDENTICAL to §30 for comparability:** `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, `trainer.max_epochs=100 +trainer.limit_train_batches=4000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4` (4000-batch cap held consistently ACROSS both sigreg arms of this env, per the brief), seed 3072, `+ckpt_every=10`. (reacher has a val-best-underfits ckpt trap [[project_gcidm_vs_ours_verdict]]; cube does not, but the rule still holds → use the CONVERGED ep≈100 ckpt.)
 
 ### STEP 1 — flag found + 1-STEP FORWARD VERIFICATION (DONE, before the real run) — past-action stream provably zeroed
-- **Flag:** `model.use_action_history` (top-level `jepa.JEPA` kwarg; `config/train/model/lewm.yaml` documents the override `model.use_action_history=false`). Zeroing at `jepa.py:191-192` (`if not self.use_action_history: past_act_emb = torch.zeros_like(past_act_emb)`) in `predict_intention`, mirrored at `jepa.py:337-338` in `intention_rollout`. UNCONDITIONAL zero, BEFORE the task/goal additive hooks.
+- **Flag:** `model.use_action_history` (top-level `jepa.JEPA` kwarg; `configs/train/model/lewm.yaml` documents the override `model.use_action_history=false`). Zeroing at `jepa.py:191-192` (`if not self.use_action_history: past_act_emb = torch.zeros_like(past_act_emb)`) in `predict_intention`, mirrored at `jepa.py:337-338` in `intention_rollout`. UNCONDITIONAL zero, BEFORE the task/goal additive hooks.
 - **`verify_noah.py` (`/mnt/minghao_data/`, CPU):** built the gated cube model (`use_action_history=false action_pred.enabled=true head=mse`, action_encoder input_dim=25), attached `action_predictor`+`action_decoder`, called `predict_intention(emb, pa1)` vs `predict_intention(emb, pa2)` with TWO totally different past-action streams (`pa2 = 7.3·N+5`). **Result: `max|intention(pa1)−intention(pa2)| = 0.000e+00`, `max|action(pa1)−action(pa2)| = 0.000e+00`** → output EXACTLY invariant to the past-action stream ⇒ stream hard-zeroed ⇒ the action head MUST read the latent. Printed `use_action_history = False` + `PAST-ACTION STREAM ZEROED`.
 - **Smoke (2-batch, GPU5, deleted after):** `[GIP] Intention predictor ON Adim=25 head=mse w_act=1.0 w_intent=1.0 detach_target=True sigreg_act=False`, `validate/z_std` LOGS (0.005 at random init — from-scratch ViT CLS near-constant across a batch ⇒ z_std STARTS tiny; `fit/z_std=0.32` once gradients flow, matching §30), `validate/sigreg_loss_epoch=3.48` computed (sigreg ON), `weights_epoch_1.pt`+config.json saved to `/mnt`, **exit 0, no shape crash, no NaN, /var held at 88 GB free.**
 
@@ -4661,7 +4661,7 @@ Run `sudo -u minghao.fu`, py `/var/lib/docker/data/minghao_home/lewm/bin/python`
 
 ### EXACT train command (driver `/mnt/minghao_data/train_cube_sigon_noah.sh`, GPU 5, PID 2178675)
 ```
-CUDA_VISIBLE_DEVICES=5 python train_sigreg.py data=ogb_lance \
+CUDA_VISIBLE_DEVICES=5 python scripts/train_sigreg.py data=ogb_lance \
   model.use_action_history=false \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 action_pred.sigreg_act=false \
@@ -4705,7 +4705,7 @@ CUDA_VISIBLE_DEVICES=5 python train_sigreg.py data=ogb_lance \
 **Motivation (why).** This is the **sigreg-ON reference** that completes the CLEAN A/B at the no-history (`use_action_history=false`) setting begun by the sibling `reacher_sigoff_noah` arm (§31-clean above). The user's SIGReg-redundancy conjecture (§30/§31): with the action-prediction head active (`action_pred.enabled=true`, `act_loss=(decoder(intention)−raw_action)²`), the explicit latent anti-collapse (SIGReg, `loss.sigreg.weight`) should be REDUNDANT because `act_loss` reading the latent supplies its own anti-collapse pressure. §30/§31 arm B (latent-SIGReg OFF) showed a SCALE-SHRINK not a SCAR-collapse — BUT all those arms ran with `use_action_history=true`, so the §18 history-copyability confound applies: a chunk of `act_loss` can be satisfied by COPYING the past-action stream `a_<t` rather than reading the latent, which WEAKENS act_loss's anti-collapse pressure → a healthy arm B was only a CONSERVATIVE positive. The clean test removes the shortcut: `model.use_action_history=false` (`jepa.py:192,338` zero `past_act_emb` in BOTH the train `predict_intention` and the eval-rollout path), so the action head MUST read the latent. The CLEAN A/B at no-history is: **sigreg-OFF (sibling `reacher_sigoff_noah`, λ=0)** vs **sigreg-ON (THIS arm `reacher_sigon_noah`, λ=0.09)**. If sigreg-OFF stays full-rank AND holds SR even here (matching this sigreg-ON reference), the conjecture is CLEANLY confirmed; this entry supplies the **reference** the sigreg-OFF arm is compared against (same recipe, same cap, only `loss.sigreg.weight` differs: 0.09 vs 0).
 
 ### Design — the §31 reacher arm-A recipe with ONE change vs the canonical reacher arm A: `model.use_action_history=false`
-FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192, the load-bearing choice that lets collapse show), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0.09`** (sigreg ON — the reference; latent SIGReg term contributes `0.09·sigreg_loss` to `loss`), **`model.use_action_history=false`** (THE clean-test knob — past-action stream zeroed). Budget MATCHED to the §31 reacher A/B/C + the sibling sigOFF-noah arm for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=1000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). `limit_train_batches=1000` = the RELAUNCHED §31 reacher cap (same cap = comparable). Data = committed `config/train/data/dmc.yaml` (`name: reacher.h5`, frameskip 5 ⇒ action_block 10, adim=2). reacher has the §15 val-best CHECKPOINT TRAP → headline the CONVERGED `weights_epoch_100.pt`, NOT val-best.
+FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192, the load-bearing choice that lets collapse show), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0.09`** (sigreg ON — the reference; latent SIGReg term contributes `0.09·sigreg_loss` to `loss`), **`model.use_action_history=false`** (THE clean-test knob — past-action stream zeroed). Budget MATCHED to the §31 reacher A/B/C + the sibling sigOFF-noah arm for comparability: `trainer.max_epochs=100 +trainer.limit_train_batches=1000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4 +ckpt_every=10`, seed 3072 (lewm.yaml default). `limit_train_batches=1000` = the RELAUNCHED §31 reacher cap (same cap = comparable). Data = committed `configs/train/data/dmc.yaml` (`name: reacher.h5`, frameskip 5 ⇒ action_block 10, adim=2). reacher has the §15 val-best CHECKPOINT TRAP → headline the CONVERGED `weights_epoch_100.pt`, NOT val-best.
 
 ### STEP 1 — `use_action_history=false` zeroing VERIFIED NUMERICALLY (real reacher batch, GPU 0, `/mnt/minghao_data/verify_reacher_noah.py`) ✅
 The decisive check isolates the zeroing line. AdaLN-Zero (`module.py:104-105`, `nn.init.constant_(adaLN_modulation[-1].weight/bias, 0)`) makes the predictor OUTPUT insensitive to its conditioning at random init, so an output-invariance test is inconclusive at init — instead the script captures the conditioning tensor `c` actually fed to `action_predictor.forward` AFTER predict_intention's `use_action_history` gate:
@@ -4723,7 +4723,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_da
   HF_HOME=/mnt/minghao_data/hf HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 \
   SPT_CACHE_DIR=/mnt/minghao_data/spt_reacher_sigon_noah PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=6 python train_sigreg.py data=dmc \
+CUDA_VISIBLE_DEVICES=6 python scripts/train_sigreg.py data=dmc \
   model.use_action_history=false \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 \
@@ -4742,7 +4742,7 @@ CUDA_VISIBLE_DEVICES=6 python train_sigreg.py data=dmc \
 
 ### STEP 4 — EVAL SR (reacher, `eval_gip.py --config-name reacher`, N=50, seeds {42,0,1}, same-box, planning + bc) [PENDING convergence; auto-run by finalizer]
 ```
-PYTHONPATH=/tmp/reacher_compat:$B python eval_gip.py --config-name reacher \
+PYTHONPATH=/tmp/reacher_compat:$B python scripts/eval_gip.py --config-name reacher \
   policy=sigreg_sigon_noah_reacher_scratch +gip_eval.mode=<planning|bc> eval.num_eval=50 seed=<42|0|1>
 ```
 (planning = pure WM CEM; bc = intention head reactive. Reacher needs the dm_control↔mujoco compat shim `/tmp/reacher_compat/sitecustomize.py` on PYTHONPATH, §15 blocker 1; eval same-box GPU 6 = the train GPU per the cross-GPU render gotcha [[project_l40s_cross_gpu_rendering]].)
@@ -4773,7 +4773,7 @@ This arm establishes the full-rank, sigreg-ON reference at the no-history settin
 
 ### STEP 1 — flag verification (DONE ✅)
 - **sigreg-zeroing exact (real cube batch, bs64, `lejepa_forward`):** `loss.sigreg.weight=0` makes TOTAL loss = `pred + intent + act` EXACTLY. Numeric (GPU7, /mnt/minghao_data/verify_cube_sigoff_noah.py): with w=0.09 `pred=0.072219 sigreg=27.4884 lambd*sigreg=2.473956 intent=1.015423 act=1.091987 TOTAL=4.653585`; with w=0 `lambd*sigreg=0.000000 TOTAL=2.179630 = pred+intent+act` (|diff|=3.73e-8 FP). **sigreg contribution == 0 confirmed.** ✓
-- **`use_action_history=false` zeros `a_<t` — confirmed by CODE (jepa.py:192 in `predict_intention`, jepa.py:338 in the eval AR loop: `past_act_emb = torch.zeros_like(past_act_emb)` BEFORE the predictor) AND by the §18 empirical pusht result (zeroing it changed open-loop val_act).** The model config comment (`config/train/model/lewm.yaml:4`) documents the override `model.use_action_history=false`; it TRAVELS to eval via the saved `config.json` (read by `gip.load_gip_model`), so eval also cannot see `a_<t`. (A synthetic intention-invariance probe was attempted on GPU7 but the cube h5 [101 GB] dataset-cache step was disk-bound on the oversubscribed L40S and ran long; the zeroing is already proven by the code path + §18 + the saved-config verification below, so training was launched without blocking on the probe.)
+- **`use_action_history=false` zeros `a_<t` — confirmed by CODE (jepa.py:192 in `predict_intention`, jepa.py:338 in the eval AR loop: `past_act_emb = torch.zeros_like(past_act_emb)` BEFORE the predictor) AND by the §18 empirical pusht result (zeroing it changed open-loop val_act).** The model config comment (`configs/train/model/lewm.yaml:4`) documents the override `model.use_action_history=false`; it TRAVELS to eval via the saved `config.json` (read by `gip.load_gip_model`), so eval also cannot see `a_<t`. (A synthetic intention-invariance probe was attempted on GPU7 but the cube h5 [101 GB] dataset-cache step was disk-bound on the oversubscribed L40S and ran long; the zeroing is already proven by the code path + §18 + the saved-config verification below, so training was launched without blocking on the probe.)
 
 ### Design — `cube_sigoff_noah` = the existing cube sigreg-OFF recipe (`sigreg_B_cube_scratch`) + `model.use_action_history=false`
 FROM SCRATCH (`init_from=null`, encoder `vit_hf` size=tiny patch=14 image=224 **pretrained=false** → random CLS-192 — the load-bearing choice: warm-start would pre-establish a non-collapsed latent and HIDE collapse), `action_pred.enabled=true detach_decoder=false head=mse w_act=1.0 w_intent=1.0 detach_target=true sigreg_act=false`, **`loss.sigreg.weight=0`** (latent SIGReg OFF: module still RUNS + `sigreg_loss` still logged, contributes 0 to `loss`), **`model.use_action_history=false`** (THE clean knob: zeros `a_<t`). Data = `data=ogb` (cube `ogbench/cube_single_expert.h5`, frameskip 5 ⇒ action_block adim=25). **Budget MATCHED to the sibling cube sigreg arms `sigreg_B_cube_scratch` / `cube_A_sigreg` for comparability:** `trainer.max_epochs=100 +trainer.limit_train_batches=1000 +trainer.limit_val_batches=20 loader.batch_size=64 num_workers=4`, seed 3072, `+ckpt_every=10`. **NOTE the cap is 1000 (not §30-pusht's 4000):** the existing cube arms cap at 1000 (verified from `sigreg_B_cube_scratch/config.yaml: limit_train_batches: 1000`); "same cap across both sigreg arms of this env" ⇒ this clean arm uses 1000 too, directly comparable to `sigreg_B_cube_scratch` (the sigreg-OFF cube arm at `use_action_history=true`) and to the sibling `cube_sigon_noah`.
@@ -4789,7 +4789,7 @@ export STABLEWM_HOME=/mnt/minghao_data/.stable-wm XDG_CACHE_HOME=/mnt/minghao_da
        HF_HUB_OFFLINE=1 MUJOCO_GL=egl WANDB_MODE=offline OMP_NUM_THREADS=4 \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /var/lib/docker/data/minghao_home/workspace/le-wm-repro
-CUDA_VISIBLE_DEVICES=5 python train_sigreg.py data=ogb \
+CUDA_VISIBLE_DEVICES=5 python scripts/train_sigreg.py data=ogb \
   model.use_action_history=false \
   action_pred.enabled=true action_pred.detach_decoder=false action_pred.head=mse \
   action_pred.w_act=1.0 action_pred.w_intent=1.0 action_pred.detach_target=true action_pred.sigreg_act=false \
@@ -4852,7 +4852,7 @@ So this campaign runs **7 arms** (not 9), each evaluated in **bc/guided/planning
 
 **EXACT train command (per arm,dataset; via `/mnt/data_nvme1/minghao.fu/overnight174/run_arm.sh <gpu> <arm> <dataset>`):**
 ```
-CUDA_VISIBLE_DEVICES=<gpu> .venv/bin/python train.py \
+CUDA_VISIBLE_DEVICES=<gpu> .venv/bin/python scripts/train.py \
   data=<DATACFG> model=lewm [or model=lewm_dinov2 model.encoder.pretrained=true embed_dim=384] \
   output_model_name=<arm>_<ds> subdir=<arm>_<ds> \
   action_pred.enabled=true action_pred.w_intent=0 action_pred.w_act=1 \
@@ -4890,7 +4890,7 @@ CUDA_VISIBLE_DEVICES=<gpu> .venv/bin/python train.py \
 **Motivation (why).** SMWM (2606.20104, Balestriero) shows an inverse-dynamics regularizer `‖h(z_t,z_{t+1})−a_t‖²` prevents latent collapse and can REPLACE SIGReg (matches SIGReg on 2D, beats it on 3D Cube 84 vs 59). In our setting `sigreg_off` FLOORS — the latent collapses (measured: pusht scratch z_std A_sigreg_ON=0.963 vs B_sigreg_OFF=0.189, B/A=0.196 = COLLAPSE, erank 86→112 but dimstd max 1.56→0.44; `sigreg_collapse_traj.log`) because the forward head cheats through the past-action stream. **Hypothesis:** a DENSE inverse term (over EVERY consecutive latent pair in the context window, not just one transition) forces the action INTO the latent and replaces SIGReg, while we keep the planning-free forward policy unchanged. **User's bar:** `idm+sigreg_off` must MATCH/BEAT the SIGReg base across datasets, not merely survive.
 
 ### Implementation (additive, config-gated, default OFF → byte-identical; the running 16-job campaign is unaffected)
-Three edits in `le-wm-repro`, all gated so existing arms (no new flag) are byte-for-byte unchanged. Backups: `jepa.py.bak_idm`, `train.py.bak_idm`, `config/train/lewm.yaml.bak_idm`.
+Three edits in `le-wm-repro`, all gated so existing arms (no new flag) are byte-for-byte unchanged. Backups: `jepa.py.bak_idm`, `train.py.bak_idm`, `configs/train/lewm.yaml.bak_idm`.
 
 1. **`jepa.py` — `JEPA.__init__`** gains `inverse_conditioned=False`, `inverse_action_dim=None`. When `inverse_conditioned`: builds `self.inverse_model = Sequential(Linear(2D,256), GELU, Linear(256,Adim))` — SMWM's head shape (2·D=384→256→Adim, D=192 vit-tiny, Adim=frameskip·action_dim). Adds `predict_inverse(z_t,z_tp1) = inverse_model(cat([z_t,z_tp1],-1))`. Default OFF → head never built → no `inverse_model.*` keys in the state_dict → load_state_dict byte-identical. The gate rides in `config.json` (cfg.model) so `gip.load_gip_model` rebuilds the SAME head before `load_state_dict` (keeps the strict `assert not unexpected_keys` meaningful). The deployed policy (`predict_intention` / `intention_rollout`) is UNCHANGED — `L_inv` is a train-time anti-collapse term only.
 2. **`train.py` `lejepa_forward` — L_inv block**, gated by `action_pred.w_inv` (default 0.0 → block skipped → byte-identical). When `w_inv>0` and the head exists:
@@ -4898,7 +4898,7 @@ Three edits in `le-wm-repro`, all gated so existing arms (no new flag) are byte-
    - **TARGET** (`inv_target=encoded`, default): `z_{τ+1}` = encoded next latent. `inv_target=predicted` (the A8/cycle variant): `z_{τ+1}` = the FDM rollout `ẑ_{t+1}=predict(z_t,a_t)` (read the action off the FDM's own prediction).
    - `output["inv_loss"]=L_inv; output["loss"] += w_inv·L_inv`; logged as `inv_loss`. Multi-task: target masked like `act_loss` (padded dims zeroed).
    - Mirror block added to `train_sigreg.py` (= `train.py` + the `z_std` collapse-monitor line; my arms run `train_sigreg.py` so z_std is logged every step).
-3. **`config/train/lewm.yaml`** — under `action_pred`: `w_inv: 0.0`, `inv_mode: dense`, `inv_target: encoded`. `train.py` sets `cfg.model.inverse_conditioned=True` + `cfg.model.inverse_action_dim=action_encoder.input_dim` when `w_inv>0` (mirrors how `horizon_conditioned` is set), so the gate travels to config.json. NOTE: because these keys now EXIST in the config, override them with plain `action_pred.w_inv=0.5` (NOT `+action_pred.w_inv=...`, which errors "item already at action_pred.w_inv").
+3. **`configs/train/lewm.yaml`** — under `action_pred`: `w_inv: 0.0`, `inv_mode: dense`, `inv_target: encoded`. `train.py` sets `cfg.model.inverse_conditioned=True` + `cfg.model.inverse_action_dim=action_encoder.input_dim` when `w_inv>0` (mirrors how `horizon_conditioned` is set), so the gate travels to config.json. NOTE: because these keys now EXIST in the config, override them with plain `action_pred.w_inv=0.5` (NOT `+action_pred.w_inv=...`, which errors "item already at action_pred.w_inv").
 
 ### SMOKE TEST (CPU, no GPU — the campaign owns them). PASSED.
 `smoke_idm.py` (in repo): builds the real JEPA (vit-tiny + ARPredictor + action head) and runs the real `lejepa_forward` on a seeded synthetic batch.
@@ -4925,7 +4925,7 @@ Datasets: **pusht (`data=pusht`), cube (`data=ogb`), tworoom (`data=tworoom`), r
 **EXACT train command (orchestrator `/mnt/minghao_data/idm_ablation/run_idm.sh`, mirrors `overnight/run_overnight.sh`):**
 ```
 source /mnt/minghao_data/overnight/env_common.sh tr_ov_<arm>_<ds>   # SPT_CACHE_DIR/XDG/TMPDIR/MPL/HF → /mnt/minghao_data (disk-safe)
-CUDA_VISIBLE_DEVICES=<gpu> python train_sigreg.py data=<DATACFG> \
+CUDA_VISIBLE_DEVICES=<gpu> python scripts/train_sigreg.py data=<DATACFG> \
   action_pred.enabled=true action_pred.w_act=1.0 action_pred.w_intent=0.0 \
   action_pred.detach_decoder=false action_pred.head=mse model.use_action_history=true \
   history_size=3 loss.sigreg.weight=0.09 init_from=null freeze_wm=false embed_dim=192 \

@@ -12,7 +12,6 @@ Usage: measure_collapse_generic.py <run_name> [--epoch N] [--bs 256]
 Prints one PARSE line:  PARSE run=<run> z_std=.. act_std=.. erank=.. inv_loss=.. D=.. n=..
 """
 import os, sys, argparse, math
-sys.path.insert(0, "/var/lib/docker/data/minghao_home/workspace/le-wm-repro")
 
 from pathlib import Path
 import torch
@@ -21,8 +20,8 @@ from omegaconf import OmegaConf
 import stable_worldmodel.data.formats.hdf5  # self-registers HDF5
 import stable_pretraining as spt
 import stable_worldmodel as swm
-import gip
-from utils import get_column_normalizer, get_img_preprocessor
+import lewam.models.gip as gip
+from lewam.utils import get_column_normalizer, get_img_preprocessor
 
 CKROOT = Path(os.environ.get("STABLEWM_HOME", "/mnt/minghao_data/.stable-wm")) / "checkpoints"
 

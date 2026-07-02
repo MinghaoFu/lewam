@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lewam"
+version = "0.1.0"
+description = "LeWAM: latent JEPA world-action model with goal-conditioned inverse dynamics"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = ["lewam", "lewam.models", "lewam.data", "lewam.envs"]

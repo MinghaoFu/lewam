@@ -30,9 +30,9 @@ import torch
 from omegaconf import OmegaConf
 from hydra.utils import instantiate as hydra_instantiate
 
-import jepa  # noqa
-from module import MLP, DiffusionHead
-from gcidm import GCIDMHead
+import lewam.models.jepa as jepa  # noqa
+from lewam.models.module import MLP, DiffusionHead
+from lewam.models.gcidm import GCIDMHead
 
 CKPT = "/mnt/minghao_data/.stable-wm/checkpoints"
 GC_DIR = f"{CKPT}/can_gc_ours"

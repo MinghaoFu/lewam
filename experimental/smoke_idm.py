@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 REPO = "/var/lib/docker/data/minghao_home/workspace/le-wm-repro"
 sys.path.insert(0, REPO)
 
-from module import SIGReg  # noqa
+from lewam.models.module import SIGReg  # noqa
 
 
 import types
@@ -48,7 +48,7 @@ def build_cfg(w_inv, sigreg_w, inv_mode="dense", inv_target="encoded"):
 def build_model(jepa_mod, embed_dim=192, adim=10, inverse=False):
     """Construct a JEPA with the SAME module specs the real config uses, plus the
     action_predictor + action_decoder the gip_on path attaches."""
-    from module import ARPredictor, Embedder, MLP
+    from lewam.models.module import ARPredictor, Embedder, MLP
     import stable_pretraining as spt
     torch.manual_seed(0)
     enc = spt.backbone.utils.vit_hf(size="tiny", patch_size=14, image_size=224,

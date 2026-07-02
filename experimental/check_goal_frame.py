@@ -6,7 +6,7 @@ init+goal via the world's _extract_init_goal and checks:
   (2) goal == frame at start+goal_offset in the raw episode -> goal is the RIGHT frame
   (3) encode(goal) gives a non-degenerate latent distinct from encode(start)
 """
-import robomimic_env  # noqa
+import lewam.envs.robomimic_env as robomimic_env  # noqa
 import stable_worldmodel.data.formats.hdf5  # noqa
 import os
 os.environ["MUJOCO_GL"] = "egl"
@@ -15,7 +15,7 @@ import torch
 from omegaconf import OmegaConf
 import stable_worldmodel as swm
 from stable_worldmodel.world.world import _extract_init_goal
-import gip
+import lewam.models.gip as gip
 
 cfg = OmegaConf.create({
     "cache_dir": None,

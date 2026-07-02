@@ -1,10 +1,88 @@
 # LeWAM — a Simple, Fast, Scalable World-Action Model
 
-> **🚀 New machine? Start with [ONBOARDING.md](ONBOARDING.md)** — zero → running training/eval in ~20 min (+ the data pull). It covers context, env, data, the smoke test, and every config-driven setting.
+> **New here? Start with [ONBOARDING.md](ONBOARDING.md)** — zero → running training/eval in ~20 min (+ the data pull). It covers context, env, data, the smoke test, and every config-driven setting.
 
-**LeWAM** is a latent JEPA World-Action Model built on **LeWM** (LeWorldModel, arXiv 2603.19312). On top of LeWM's plannable latent it adds a planning-free, history/goal/horizon-conditioned action head, so **one trained model** serves behavior cloning, goal-conditioned policy, and CEM planning. Code: `jepa.py` (model) + `train.py` (loss) + `config/train/lewm.yaml` (every setting via `action_pred.*`). Deeper context in [`docs/`](docs/) — project rules ([`docs/CLAUDE.md`](docs/CLAUDE.md)), experiment log ([`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md)), equations ([`docs/results/lewam_equations.html`](docs/results/lewam_equations.html)), asset transfer ([`docs/MACHINE_TRANSFER.md`](docs/MACHINE_TRANSFER.md)).
+**LeWAM** is a latent JEPA World-Action Model built on **LeWM** (LeWorldModel, arXiv 2603.19312). On top of LeWM's plannable latent it adds a planning-free, history/goal/horizon-conditioned action head, so **one trained model** serves behavior cloning, goal-conditioned policy, and CEM planning. The core contribution is `lewam/models/jepa.py` (model) + `scripts/train.py` (loss) + `configs/train/lewm.yaml` (every setting via `action_pred.*`). Deeper context in [`docs/`](docs/) — project rules ([`docs/CLAUDE.md`](docs/CLAUDE.md)), experiment log ([`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md)), equations ([`docs/results/lewam_equations.html`](docs/results/lewam_equations.html)), asset transfer ([`docs/MACHINE_TRANSFER.md`](docs/MACHINE_TRANSFER.md)).
 
-⚠️ The data (425 GB) + checkpoints (111 GB) are **not** in this repo — see ONBOARDING §3.
+⚠️ The datasets and checkpoints are **not** in this repo — pull them from HuggingFace (see [Data](#data)) or, for the original assets, ONBOARDING §3.
+
+## Repository layout
+
+```
+lewam/                     installable package  (pip install -e .)
+  models/    jepa.py · module.py · gip.py · gcidm.py
+  data/      goal_dataset.py · multitask_dataset.py
+  envs/      robomimic_env.py
+  utils.py
+scripts/     train.py · eval.py · eval_gip.py · decode_lewm.py
+             train_gcidm.py · train_ours_gc.py · train_sigreg.py
+configs/     Hydra configs — train/ · eval/ · decode/
+docs/        design notes, experiment log, equations
+experimental/  one-off research scripts (viz / decoders / converters) — not maintained
+```
+
+Everything runs on a plain single-GPU server — there are no cluster or filesystem
+assumptions in the code; dataset and checkpoint locations are controlled by the
+`STABLEWM_HOME` environment variable (see [Data](#data)).
+
+## Setup
+
+```bash
+uv venv --python=3.10
+source .venv/bin/activate
+uv pip install stable-worldmodel[train,env]   # environments, planning, eval + training deps
+uv pip install -e .                            # the lewam package (this repo)
+```
+
+`robomimic` is only needed for the robomimic benchmark (`scripts/eval_histbc_robomimic.py`);
+install it separately if you use that path.
+
+## Data
+
+Datasets use the HDF5 format for fast loading. Download from [HuggingFace](https://huggingface.co/collections/quentinll/lewm) and decompress:
+
+```bash
+tar --zstd -xvf archive.tar.zst
+```
+
+Place the extracted `.h5` files under `$STABLEWM_HOME` (defaults to `~/.stable-wm/`), overridable:
+```bash
+export STABLEWM_HOME=/path/to/your/storage
+```
+
+Dataset names are given without the `.h5` extension. E.g. `configs/train/data/pusht.yaml` references `pusht_expert_train`, which resolves to `$STABLEWM_HOME/pusht_expert_train.h5`.
+
+## Training
+
+`lewam/models/jepa.py` is the PyTorch model; the training loss lives in `scripts/train.py`.
+Training is configured via [Hydra](https://hydra.cc/) files under `configs/train/`.
+
+Set your WandB `entity`/`project` in `configs/train/lewm.yaml`:
+```yaml
+wandb:
+  config:
+    entity: your_entity
+    project: your_project
+```
+
+Launch:
+```bash
+python scripts/train.py data=pusht
+```
+
+Checkpoints are saved under `$STABLEWM_HOME`.
+
+## Planning / Evaluation
+
+Eval configs live under `configs/eval/`. Set `policy` to the checkpoint path **relative to `$STABLEWM_HOME`**, without the `_object.ckpt` suffix:
+
+```bash
+# ✓ correct
+python scripts/eval.py --config-name=pusht.yaml policy=pusht/lewm
+
+# ✗ incorrect
+python scripts/eval.py --config-name=pusht.yaml policy=pusht/lewm_object.ckpt
+```
 
 ---
 
@@ -62,13 +140,13 @@ Place the extracted `.h5` files under `$STABLEWM_HOME` (defaults to `~/.stable-w
 export STABLEWM_HOME=/path/to/your/storage
 ```
 
-Dataset names are specified without the `.h5` extension. For example, `config/train/data/pusht.yaml` references `pusht_expert_train`, which resolves to `$STABLEWM_HOME/pusht_expert_train.h5`.
+Dataset names are specified without the `.h5` extension. For example, `configs/train/data/pusht.yaml` references `pusht_expert_train`, which resolves to `$STABLEWM_HOME/pusht_expert_train.h5`.
 
 ## Training
 
-`jepa.py` contains the PyTorch implementation of LeWM. Training is configured via [Hydra](https://hydra.cc/) config files under `config/train/`.
+`lewam/models/jepa.py` contains the PyTorch implementation of LeWM. Training is configured via [Hydra](https://hydra.cc/) config files under `configs/train/`.
 
-Before training, set your WandB `entity` and `project` in `config/train/lewm.yaml`:
+Before training, set your WandB `entity` and `project` in `configs/train/lewm.yaml`:
 ```yaml
 wandb:
   config:
@@ -78,7 +156,7 @@ wandb:
 
 To launch training:
 ```bash
-python train.py data=pusht
+python scripts/train.py data=pusht
 ```
 
 Checkpoints are saved to `$STABLEWM_HOME` upon completion.
@@ -87,14 +165,14 @@ For baseline scripts, see the stable-worldmodel [scripts](https://github.com/gal
 
 ## Planning
 
-Evaluation configs live under `config/eval/`. Set the `policy` field to the checkpoint path **relative to `$STABLEWM_HOME`**, without the `_object.ckpt` suffix:
+Evaluation configs live under `configs/eval/`. Set the `policy` field to the checkpoint path **relative to `$STABLEWM_HOME`**, without the `_object.ckpt` suffix:
 
 ```bash
 # ✓ correct
-python eval.py --config-name=pusht.yaml policy=pusht/lewm
+python scripts/eval.py --config-name=pusht.yaml policy=pusht/lewm
 
 # ✗ incorrect
-python eval.py --config-name=pusht.yaml policy=pusht/lewm_object.ckpt
+python scripts/eval.py --config-name=pusht.yaml policy=pusht/lewm_object.ckpt
 ```
 
 ## Pretrained Checkpoints
@@ -129,7 +207,7 @@ is available on [Google Drive](https://drive.google.com/drive/folders/1r31os0d4-
 ### From the Drive archive
 
 Each tar archive contains two files per checkpoint:
-- `<name>_object.ckpt` — a serialized Python object for convenient loading; this is what `eval.py` and the `stable_worldmodel` API use
+- `<name>_object.ckpt` — a serialized Python object for convenient loading; this is what `scripts/eval.py` and the `stable_worldmodel` API use
 - `<name>_weight.ckpt` — a weights-only checkpoint (`state_dict`) for cases where you want to load weights into your own model instance
 
 Place the extracted files under `$STABLEWM_HOME/` and load via:
@@ -151,7 +229,7 @@ The returned module is in `eval` mode with its PyTorch weights accessible via `.
 
 The HF model repos ship the LeWM checkpoint as a `weights.pt` (state dict) plus a
 `config.json` describing the model. Convert once to produce the `_object.ckpt`
-that `eval.py` expects:
+that `scripts/eval.py` expects:
 
 ```bash
 # download weights.pt + config.json
@@ -161,8 +239,8 @@ hf download quentinll/lewm-pusht --local-dir $STABLEWM_HOME/hf_pusht
 python - <<'PY'
 import json, torch, stable_pretraining as spt
 from pathlib import Path
-from jepa import JEPA
-from module import ARPredictor, Embedder, MLP
+from lewam.models.jepa import JEPA
+from lewam.models.module import ARPredictor, Embedder, MLP
 import stable_worldmodel as swm
 
 src = Path(swm.data.utils.get_cache_dir(), "hf_pusht")

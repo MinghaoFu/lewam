@@ -1,13 +1,13 @@
 """Diagnostic (additive): for each eval start state, check env.is_success() at
 step 0 (right after set_state, before any action). Quantifies how many 'successes'
 are pre-solved start states (the latched-OR success convention then counts them)."""
-import robomimic_env  # noqa
+import lewam.envs.robomimic_env as robomimic_env  # noqa
 import stable_worldmodel.data.formats.hdf5  # noqa
 import os
 os.environ["MUJOCO_GL"] = "egl"
 import hydra, numpy as np
-import gip
-from robomimic_env import RoboMimicEnv
+import lewam.models.gip as gip
+from lewam.envs.robomimic_env import RoboMimicEnv
 
 @hydra.main(config_path="./config/eval", config_name="robomimic", version_base=None)
 def run(cfg):

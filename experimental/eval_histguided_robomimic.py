@@ -13,7 +13,7 @@ Run:
       world.task=Lift dataset.stats=lift eval.dataset_name=lift \
       eval.num_eval=15 eval.goal_offset_steps=30 eval.eval_budget=80
 """
-import robomimic_env  # noqa: F401
+import lewam.envs.robomimic_env as robomimic_env  # noqa: F401
 import stable_worldmodel.data.formats.hdf5  # noqa: F401
 import os
 
@@ -31,7 +31,7 @@ from hydra.utils import instantiate as hydra_instantiate
 
 import stable_worldmodel as swm
 
-import gip
+import lewam.models.gip as gip
 from eval_histbc_robomimic import HistoryBCPolicy
 
 

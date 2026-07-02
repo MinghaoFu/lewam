@@ -11,7 +11,7 @@ import sys
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import stable_worldmodel as swm
-import gip
+import lewam.models.gip as gip
 
 NMAX = int(os.environ.get("NMAX", "40"))
 OUT = os.environ.get("OUT", "/mnt/data_nvme1/minghao.fu/le-wm-repro-logs/sweep_dense.csv")

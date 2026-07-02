@@ -10,7 +10,7 @@ Single env, manual history-aware BC rollout (mirrors HistoryBCPolicy exactly).
 Run:  python honest_eval_robomimic.py --config-name robomimic policy=gip_robomimic_can \
         world.task=PickPlaceCan dataset.stats=can eval.dataset_name=can eval.num_eval=20 eval.eval_budget=150
 """
-import robomimic_env  # noqa
+import lewam.envs.robomimic_env as robomimic_env  # noqa
 import stable_worldmodel.data.formats.hdf5  # noqa
 import os
 os.environ["MUJOCO_GL"] = "egl"
@@ -21,8 +21,8 @@ import numpy as np
 import torch
 from torchvision import tv_tensors
 
-import gip
-from robomimic_env import RoboMimicEnv
+import lewam.models.gip as gip
+from lewam.envs.robomimic_env import RoboMimicEnv
 
 
 @hydra.main(config_path="./config/eval", config_name="robomimic", version_base=None)

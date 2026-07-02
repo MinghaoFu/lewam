@@ -10,8 +10,8 @@ import stable_worldmodel as swm
 import stable_worldmodel.data.formats.hdf5  # noqa
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
-from utils import get_img_preprocessor
-import gip
+from lewam.utils import get_img_preprocessor
+import lewam.models.gip as gip
 
 DSET = os.environ.get("PROBE_DSET", "can.h5")
 RUN = os.environ.get("PROBE_RUN", "gip_robomimic_can")
