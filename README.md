@@ -6,6 +6,24 @@
 
 ⚠️ The datasets and checkpoints are **not** in this repo — pull them from HuggingFace (see [Data](#data)) or, for the original assets, ONBOARDING §3.
 
+## Results
+
+![Goal-conditioned success rate across four tasks](docs/results/sr_comparison.png)
+
+Goal-conditioned success rate (%, mean ± std over 3 seeds) from our ablation campaign.
+**LeWAM** (with and without the consistency loss) matches or beats every baseline on all four
+tasks — GC-IDM (scratch / frozen) and our own CEM-planning **LeWM reproduction**. The
+consistency loss makes no measurable difference (w/o ≈ w/).
+
+📊 **[Explore the interactive dashboard](docs/results/dashboard/index.html)** — per-task
+success rates, training-convergence curves, the speed benchmark, the consistency-loss
+decomposition, and the full LeWM reproduction. Open the HTML locally; GitHub does not render it inline.
+
+> These are results from our experiment campaign, not a one-command reproduction. The figure
+> combines three code paths — `scripts/train_lewam_gc.py` (LeWAM), `scripts/train_gcidm.py`
+> (GC-IDM scratch / frozen), and `scripts/eval.py` CEM planning (LeWM repro) — plus external
+> checkpoints. See [Training](#training).
+
 ## Repository layout
 
 ```
