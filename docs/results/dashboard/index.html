@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LeWAM — Dashboard</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --ink:#1a1c22; --muted:#8a909b;
+    --line:#e7e9ee; --coral:#d16650; --coral-soft:#fdeee9; --coral-ink:#b44a35;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Source Sans 3","Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;
+       display:flex;overflow:hidden}
+  /* ---------- sidebar ---------- */
+  .side{width:238px;flex:0 0 238px;height:100vh;background:var(--panel);
+        border-right:1px solid var(--line);display:flex;flex-direction:column;
+        padding:20px 14px;gap:4px}
+  .brand{display:flex;align-items:center;gap:10px;padding:6px 8px 16px}
+  .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--coral),#e79684);
+        display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:15px;
+        box-shadow:0 3px 10px rgba(209,102,80,.35)}
+  .brand .t{font-weight:750;font-size:16px;letter-spacing:-.01em}
+  .brand .s{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .navlab{font-size:10.5px;font-weight:700;letter-spacing:.08em;color:#b3b8c2;
+          text-transform:uppercase;padding:10px 10px 4px}
+  .nav{display:flex;align-items:center;gap:11px;padding:10px 11px;border-radius:10px;
+       cursor:pointer;font-size:14.5px;font-weight:550;color:#3d424c;transition:background .14s,color .14s}
+  .nav .ic{width:19px;text-align:center;font-size:16px;opacity:.85}
+  .nav:hover{background:#f4f5f7}
+  .nav.active{background:var(--coral-soft);color:var(--coral-ink);font-weight:680}
+  .nav .dot{margin-left:auto;width:7px;height:7px;border-radius:50%;background:var(--coral);
+            opacity:0;transition:opacity .14s}
+  .nav.active .dot{opacity:1}
+  .spacer{flex:1}
+  .status{background:#f7f8fa;border:1px solid var(--line);border-radius:11px;padding:11px 12px;
+          font-size:11.5px;color:var(--muted);line-height:1.5}
+  .status b{color:#2f333b}
+  .live{display:inline-flex;align-items:center;gap:5px;color:#b45309;font-weight:650}
+  .live i{width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block;
+          animation:blink 1.4s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+  /* ---------- main ---------- */
+  .main{flex:1;height:100vh;display:flex;flex-direction:column;min-width:0}
+  .top{height:46px;flex:0 0 46px;background:var(--panel);border-bottom:1px solid var(--line);
+       display:flex;align-items:center;padding:0 20px;gap:10px}
+  .top .pg{font-weight:650;font-size:14.5px}
+  .top .path{color:var(--muted);font-size:12px;margin-left:2px}
+  .top .ext{margin-left:auto;font-size:12.5px;color:var(--coral-ink);text-decoration:none;
+            padding:5px 11px;border:1px solid #f0d5cd;border-radius:8px;background:var(--coral-soft)}
+  .top .ext:hover{background:#fbe2da}
+  .frame{flex:1;border:0;width:100%;background:#fff}
+  /* ---------- responsive ---------- */
+  @media(max-width:720px){
+    body{flex-direction:column;overflow:auto}
+    .side{width:100%;flex:none;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;
+          padding:10px;gap:6px;border-right:0;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+    .brand{padding:2px 6px}.navlab,.spacer,.status{display:none}
+    .nav{padding:8px 12px}.main{height:auto}.frame{height:calc(100vh - 120px)}
+  }
+</style>
+</head>
+<body>
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">Le</div>
+      <div><div class="t">LeWAM</div><div class="s">§10 ablation campaign</div></div>
+    </div>
+    <div class="navlab">Views</div>
+    <div class="nav active" data-src="lewam_overview.html" data-name="Overview &amp; Analysis" data-ic="🧭">
+      <span class="ic">🧭</span> Overview <span class="dot"></span></div>
+    <div class="nav" data-src="lewam_comparison.html" data-name="Success-Rate Comparison" data-ic="📊">
+      <span class="ic">📊</span> Comparison <span class="dot"></span></div>
+    <div class="nav" data-src="lewam_results.html" data-name="Results" data-ic="📈">
+      <span class="ic">📈</span> Results <span class="dot"></span></div>
+    <div class="nav" data-src="lewam_settings.html" data-name="Settings &amp; Equations" data-ic="⚙️">
+      <span class="ic">⚙️</span> Settings <span class="dot"></span></div>
+    <div class="spacer"></div>
+    <div class="status">
+      <div style="color:#2e9e6b;font-weight:650">✓ grid complete</div>
+      <div style="margin-top:6px">All 12 variants trained · 16/16 eval cells done · §10 campaign complete.</div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="top">
+      <span class="pg" id="pg">Overview &amp; Analysis</span>
+      <span class="path" id="path">lewam_overview.html</span>
+      <a class="ext" id="ext" href="lewam_overview.html" target="_blank">Open in new tab ↗</a>
+    </div>
+    <iframe class="frame" id="frame" src="lewam_overview.html" title="page"></iframe>
+  </div>
+
+<script>
+  const frame=document.getElementById("frame"), pg=document.getElementById("pg"),
+        path=document.getElementById("path"), ext=document.getElementById("ext");
+  function select(nav){
+    document.querySelectorAll(".nav").forEach(n=>n.classList.remove("active"));
+    nav.classList.add("active");
+    const src=nav.dataset.src;
+    frame.src=src; pg.innerHTML=nav.dataset.name; path.textContent=src; ext.href=src;
+    if(history.replaceState) history.replaceState(null,"","#"+src.replace(".html",""));
+  }
+  document.querySelectorAll(".nav").forEach(n=>n.addEventListener("click",()=>select(n)));
+  // deep-link via hash (e.g. index.html#lewam_results)
+  const h=location.hash.slice(1);
+  if(h){const m=[...document.querySelectorAll(".nav")].find(n=>n.dataset.src.startsWith(h));if(m)select(m);}
+</script>
+</body>
+</html>

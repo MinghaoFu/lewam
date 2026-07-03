@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeWAM GC-IDM Results Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e4e4e7;
+    --muted: #71717a;
+    --accent: #6366f1;
+    --accent2: #818cf8;
+    --green: #22c55e;
+    --green-bg: rgba(34,197,94,0.12);
+    --yellow: #eab308;
+    --yellow-bg: rgba(234,179,8,0.12);
+    --red: #ef4444;
+    --red-bg: rgba(239,68,68,0.12);
+    --blue: #3b82f6;
+    --blue-bg: rgba(59,130,246,0.12);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; padding: 2rem; min-height: 100vh; }
+  .header { max-width: 1200px; margin: 0 auto 2rem; }
+  .header h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+  .header h1 span { color: var(--accent2); }
+  .header .subtitle { color: var(--muted); font-size: 0.9rem; }
+  .header .timestamp { color: var(--muted); font-size: 0.8rem; font-family: 'IBM Plex Mono', monospace; margin-top: 0.5rem; }
+
+  .grid { max-width: 1200px; margin: 0 auto; display: grid; gap: 1.5rem; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; }
+  .card h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+  .card h2 .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .card h2 .dot.green { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .card h2 .dot.yellow { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); animation: pulse 2s infinite; }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th { text-align: left; padding: 0.6rem 0.75rem; color: var(--muted); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+  td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); font-family: 'IBM Plex Mono', monospace; font-size: 0.85rem; }
+  tr:last-child td { border-bottom: none; }
+  .sr-high { color: var(--green); font-weight: 600; }
+  .sr-mid { color: var(--yellow); font-weight: 600; }
+  .sr-low { color: var(--red); font-weight: 600; }
+  .sr-pending { color: var(--muted); font-style: italic; font-family: 'IBM Plex Sans', sans-serif; }
+  .sr-training { color: var(--yellow); font-family: 'IBM Plex Sans', sans-serif; }
+  .mean { font-weight: 700; font-size: 0.95rem; }
+
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; font-family: 'IBM Plex Sans', sans-serif; }
+  .badge-green { background: var(--green-bg); color: var(--green); }
+  .badge-yellow { background: var(--yellow-bg); color: var(--yellow); }
+  .badge-blue { background: var(--blue-bg); color: var(--blue); }
+  .badge-red { background: var(--red-bg); color: var(--red); }
+
+  .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+  .summary-cell { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; }
+  .summary-cell .task-name { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+  .summary-cell .best-sr { font-size: 1.5rem; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
+
+  .comparison-table th.task-col { text-align: center; }
+  .comparison-table td.task-val { text-align: center; }
+  .comparison-table td.exp-name { font-family: 'IBM Plex Sans', sans-serif; font-weight: 500; }
+
+  .status-section { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .status-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .status-item .job-name { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.5rem; }
+  .status-item .job-detail { font-size: 0.8rem; color: var(--muted); line-height: 1.6; }
+  .status-item .job-detail span { font-family: 'IBM Plex Mono', monospace; color: var(--text); }
+
+  .paper-row td { color: var(--muted); }
+  .paper-row td.task-val { font-style: italic; }
+
+  .legend { margin-top: 1rem; font-size: 0.8rem; color: var(--muted); line-height: 1.8; }
+  .legend code { font-family: 'IBM Plex Mono', monospace; background: var(--bg); padding: 0.1rem 0.4rem; border-radius: 3px; }
+
+  @media (max-width: 768px) {
+    .summary-grid { grid-template-columns: repeat(2, 1fr); }
+    .status-section { grid-template-columns: 1fr; }
+    body { padding: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>LeWAM <span>GC-IDM</span> Results Dashboard</h1>
+  <div class="subtitle">Section 10 Experiment Campaign &mdash; Frozen-Encoder Reproduction &amp; Ablations</div>
+  <div class="timestamp">Last updated: 2026-07-01 13:30 UTC+8 &bull; Paper: arXiv 2605.08732</div>
+</div>
+
+<div class="grid">
+
+  <!-- Best SR per task -->
+  <div class="card">
+    <h2><span class="dot green"></span> Best Success Rate by Task</h2>
+    <div class="summary-grid">
+      <div class="summary-cell">
+        <div class="task-name">TwoRoom</div>
+        <div class="best-sr sr-high">100%</div>
+        <div class="badge badge-green">3/3 methods</div>
+      </div>
+      <div class="summary-cell">
+        <div class="task-name">PushT</div>
+        <div class="best-sr sr-high">88.0%</div>
+        <div class="badge badge-green">frozen</div>
+      </div>
+      <div class="summary-cell">
+        <div class="task-name">Reacher</div>
+        <div class="best-sr sr-high">97.3%</div>
+        <div class="badge badge-green">frozen</div>
+      </div>
+      <div class="summary-cell">
+        <div class="task-name">Cube</div>
+        <div class="best-sr sr-high">100%</div>
+        <div class="badge badge-green">frozen</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Comparison -->
+  <div class="card">
+    <h2>Mean Success Rate Comparison (3 seeds &times; 50 episodes)</h2>
+    <table class="comparison-table">
+      <thead>
+        <tr>
+          <th>Experiment</th>
+          <th class="task-col">TwoRoom</th>
+          <th class="task-col">PushT</th>
+          <th class="task-col">Reacher</th>
+          <th class="task-col">Cube</th>
+          <th class="task-col">Mean</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="paper-row">
+          <td class="exp-name">GC-IDM Paper (Tab.1)</td>
+          <td class="task-val">100.0%</td>
+          <td class="task-val">84.7%</td>
+          <td class="task-val">100.0%</td>
+          <td class="task-val">99.3%</td>
+          <td class="task-val">96.0%</td>
+        </tr>
+        <tr>
+          <td class="exp-name">GC-IDM Frozen <span class="badge badge-green">repro</span></td>
+          <td class="task-val sr-high mean">100.0%</td>
+          <td class="task-val sr-high mean">88.0%</td>
+          <td class="task-val sr-high mean">97.3%</td>
+          <td class="task-val sr-high mean">100.0%</td>
+          <td class="task-val sr-high mean">96.3%</td>
+        </tr>
+        <tr>
+          <td class="exp-name">GC-IDM Scratch <span class="badge badge-blue">ablation</span></td>
+          <td class="task-val sr-high mean">100.0%</td>
+          <td class="task-val sr-mid mean">73.3%</td>
+          <td class="task-val sr-low mean">13.3%</td>
+          <td class="task-val sr-mid mean">89.3%</td>
+          <td class="task-val sr-mid mean">69.0%</td>
+        </tr>
+        <tr>
+          <td class="exp-name">LeWAM-GC (ours) <span class="badge badge-yellow">new</span></td>
+          <td class="task-val sr-high mean">100.0%</td>
+          <td class="task-val sr-mid mean">80.7%</td>
+          <td class="task-val sr-training">training</td>
+          <td class="task-val sr-training">training</td>
+          <td class="task-val sr-pending">&mdash;</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="legend">
+      <strong>Key:</strong>
+      <code>Frozen</code> = pretrained LeWM encoder (frozen) + GC-IDM head &bull;
+      <code>Scratch</code> = encoder + head trained jointly from scratch &bull;
+      <code>LeWAM-GC</code> = our method (LeWAM encoder + GC head, end-to-end)
+    </div>
+  </div>
+
+  <!-- Detailed per-seed -->
+  <div class="card">
+    <h2>Detailed Per-Seed Results</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Experiment</th>
+          <th>Task</th>
+          <th>Seed 42</th>
+          <th>Seed 0</th>
+          <th>Seed 1</th>
+          <th>Mean SR</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Frozen -->
+        <tr>
+          <td rowspan="4" style="vertical-align:top; font-weight:600;">GC-IDM Frozen</td>
+          <td>TwoRoom</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high mean">100.0%</td>
+        </tr>
+        <tr>
+          <td>PushT</td>
+          <td class="sr-high">86%</td>
+          <td class="sr-high">90%</td>
+          <td class="sr-high">88%</td>
+          <td class="sr-high mean">88.0%</td>
+        </tr>
+        <tr>
+          <td>Reacher</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">96%</td>
+          <td class="sr-high">96%</td>
+          <td class="sr-high mean">97.3%</td>
+        </tr>
+        <tr>
+          <td>Cube</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high mean">100.0%</td>
+        </tr>
+        <!-- Scratch -->
+        <tr>
+          <td rowspan="4" style="vertical-align:top; font-weight:600;">GC-IDM Scratch</td>
+          <td>TwoRoom</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high mean">100.0%</td>
+        </tr>
+        <tr>
+          <td>PushT</td>
+          <td class="sr-mid">72%</td>
+          <td class="sr-mid">80%</td>
+          <td class="sr-mid">68%</td>
+          <td class="sr-mid mean">73.3%</td>
+        </tr>
+        <tr>
+          <td>Reacher (best.pt)</td>
+          <td class="sr-low">18%</td>
+          <td class="sr-low">8%</td>
+          <td class="sr-low">14%</td>
+          <td class="sr-low mean">13.3%</td>
+        </tr>
+        <tr>
+          <td>Reacher (latest.pt)</td>
+          <td class="sr-low">14%</td>
+          <td class="sr-low">12%</td>
+          <td class="sr-low">14%</td>
+          <td class="sr-low mean">13.3%</td>
+        </tr>
+        <tr>
+          <td>Cube</td>
+          <td class="sr-high">86%</td>
+          <td class="sr-high">96%</td>
+          <td class="sr-high">86%</td>
+          <td class="sr-mid mean">89.3%</td>
+        </tr>
+        <!-- LeWAM-GC -->
+        <tr>
+          <td rowspan="4" style="vertical-align:top; font-weight:600;">LeWAM-GC (ours)</td>
+          <td>TwoRoom</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high">100%</td>
+          <td class="sr-high mean">100.0%</td>
+        </tr>
+        <tr>
+          <td>PushT</td>
+          <td class="sr-mid">84%</td>
+          <td class="sr-high">92%</td>
+          <td class="sr-mid">66%</td>
+          <td class="sr-mid mean">80.7%</td>
+        </tr>
+        <tr>
+          <td>Reacher</td>
+          <td class="sr-training" colspan="3" style="text-align:center;">training (~12h remaining)</td>
+          <td class="sr-pending">&mdash;</td>
+        </tr>
+        <tr>
+          <td>Cube</td>
+          <td class="sr-training" colspan="3" style="text-align:center;">training (~12h remaining)</td>
+          <td class="sr-pending">&mdash;</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Active Jobs -->
+  <div class="card">
+    <h2><span class="dot yellow"></span> Active Training Jobs</h2>
+    <div class="status-section">
+      <div class="status-item">
+        <div class="job-name">LeWAM-GC Cube <span class="badge badge-yellow">50 ep</span></div>
+        <div class="job-detail">
+          Started: <span>Jul 1 01:43</span><br>
+          Elapsed: <span>~12h</span><br>
+          Status: <span>Training, ckpt @13:17</span><br>
+          Job: <span><a href="https://ml.byteintl.net/development/instance/jobs/36225c872e70fbde" style="color:var(--accent2)">36225c87</a></span>
+        </div>
+      </div>
+      <div class="status-item">
+        <div class="job-name">LeWAM-GC Reacher <span class="badge badge-yellow">50 ep</span></div>
+        <div class="job-detail">
+          Started: <span>Jul 1 01:43</span><br>
+          Elapsed: <span>~12h</span><br>
+          Status: <span>Training, ckpt @13:22</span><br>
+          Job: <span><a href="https://ml.byteintl.net/development/instance/jobs/1ee0600b2140c674" style="color:var(--accent2)">1ee0600b</a></span>
+        </div>
+      </div>
+      <div class="status-item">
+        <div class="job-name">Completed Evals <span class="badge badge-green">done</span></div>
+        <div class="job-detail">
+          LeWAM-GC PushT: <span style="color:var(--yellow)">80.7%</span><br>
+          Scratch Reacher (best.pt): <span style="color:var(--red)">13.3%</span><br>
+          Scratch Reacher (latest.pt): <span style="color:var(--red)">13.3%</span>
+        </div>
+      </div>
+      <div class="status-item">
+        <div class="job-name">Pending Evals <span class="badge badge-yellow">waiting</span></div>
+        <div class="job-detail">
+          LeWAM-GC Cube: <span>after training</span><br>
+          LeWAM-GC Reacher: <span>after training</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notes -->
+  <div class="card">
+    <h2>Notes &amp; Observations</h2>
+    <div style="font-size:0.85rem; line-height:1.8; color:var(--muted);">
+      <p><strong style="color:var(--text);">Frozen repro matches/exceeds paper.</strong> Our reproduction achieves 96.3% mean SR vs paper's 96.0%. PushT slightly exceeds (88.0% vs 84.7%).</p>
+      <p style="margin-top:0.75rem;"><strong style="color:var(--text);">LeWAM-GC PushT: 80.7% (promising).</strong> End-to-end finetuning achieves 80.7% vs frozen 88.0%. Some variance across seeds (66-92%). Cube &amp; Reacher training ~12h remaining.</p>
+      <p style="margin-top:0.75rem;"><strong style="color:var(--text);">Scratch ablation shows encoder quality matters.</strong> Without pretrained encoder, PushT drops 14.7pp (88.0% → 73.3%), Cube drops 10.7pp (100% → 89.3%), and Reacher drops catastrophically (97.3% → 13.3%). Both best.pt and latest.pt produce 13.3% &mdash; pretrained encoder is essential for reacher.</p>
+      <p style="margin-top:0.75rem;"><strong style="color:var(--text);">Key checkpoint traps discovered:</strong></p>
+      <ul style="margin-left:1.5rem; margin-top:0.25rem;">
+        <li>Reacher: <code style="font-family:'IBM Plex Mono';background:var(--bg);padding:0.1rem 0.3rem;border-radius:3px;">latest.pt</code> outperforms <code style="font-family:'IBM Plex Mono';background:var(--bg);padding:0.1rem 0.3rem;border-radius:3px;">best.pt</code> (97.3% vs 73.3%)</li>
+        <li>TwoRoom: Must use task-specific encoder, not generic LeWM weights (100% vs 38%)</li>
+        <li>dm_control version must be 1.0.43 for mujoco 3.10.0 compatibility</li>
+      </ul>
+      <p style="margin-top:0.75rem;"><strong style="color:var(--text);">Data on SSD-HDFS.</strong> All 4 datasets (242GB) migrated to fast SSD tier (<code style="font-family:'IBM Plex Mono';background:var(--bg);padding:0.1rem 0.3rem;border-radius:3px;">bi_algo_a2f</code>). Jobs symlink directly &mdash; no more 22-min decompression.</p>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

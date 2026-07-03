@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LeWAM-GC — Success-Rate Comparison</title>
+<style>
+  :root{
+    --bg:#ffffff; --ink:#1a1a1a; --muted:#6b7280; --grid:#e6e6e6; --axis:#333;
+    --v1:#f2b8ac; --v2:#e2907f; --v3:#d16650;         /* our ablation (coral gradient) */
+    --gcidm:#6f9fce; --gcidms:#bcd3ea;                 /* GC-IDM frozen (solid) / scratch (light) */
+    --lewm:#b7b7b7; --lewmr:#7d8794; --rand:#d7d7d7;                    /* references */
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Source Sans 3","Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  header{padding:26px 32px 10px}
+  h1{margin:0;font-size:22px;font-weight:700;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13.5px;margin-top:4px;max-width:1100px;line-height:1.5}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;padding:12px 32px 4px}
+  .lg{display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;user-select:none;
+      padding:3px 8px;border-radius:7px;transition:background .15s,opacity .15s}
+  .lg:hover{background:#f3f4f6}
+  .lg.off{opacity:.32}
+  .sw{width:15px;height:15px;border-radius:3px;border:1px solid rgba(0,0,0,.15)}
+  .sw.dash{border:1.5px dashed #9a9a9a;background:var(--rand)!important}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:8px 20px 8px}
+  @media(max-width:1080px){.grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .panel{padding:4px}
+  svg{width:100%;height:auto;display:block;overflow:visible}
+  .title{font-size:15px;font-weight:600;fill:var(--ink)}
+  .ylab{font-size:12px;fill:var(--muted)}
+  .tick{font-size:11px;fill:var(--muted)}
+  .xlab{font-size:11.5px;fill:var(--ink)}
+  .xlabhl{fill:var(--coral,#d16650);font-weight:750}
+  .val{font-size:12px;font-weight:700;fill:#1a1a1a}
+  .gridline{stroke:var(--grid);stroke-width:1}
+  .axis{stroke:var(--axis);stroke-width:1.2}
+  .whisk{stroke:#3a3a3a;stroke-width:1.4}
+  .bar{transition:opacity .15s,filter .15s;cursor:pointer}
+  .bar:hover{filter:brightness(1.06)}
+  .bar.hidden{display:none}
+  .waiting{fill:#f5f5f5;stroke:#c9c9c9;stroke-width:1.4;stroke-dasharray:5 4}
+  .wtext{font-size:10.5px;fill:#b26b2f;font-weight:600}
+  @keyframes pulse{0%,100%{opacity:.45}50%{opacity:.95}}
+  .pulse{animation:pulse 1.6s ease-in-out infinite}
+  #tip{position:fixed;pointer-events:none;z-index:10;background:#111;color:#fff;
+       font-size:12px;line-height:1.5;padding:9px 11px;border-radius:8px;opacity:0;
+       transition:opacity .1s;max-width:240px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+  #tip b{color:#ffd7c9}
+  #tip .seeds{color:#b9c7ff}
+  footer{color:var(--muted);font-size:12px;padding:6px 32px 30px;line-height:1.6;max-width:1100px}
+  .pill{display:inline-block;background:#fff1e8;color:#b45309;border:1px solid #f3d3bd;
+        border-radius:999px;padding:1px 9px;font-size:11.5px;font-weight:600;margin-left:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>LeWAM-GC — success rate across tasks <span class="pill" id="pill" style="background:#e6f6ee;color:#2e9e6b;border-color:#bfe6d0">✓ complete</span></h1>
+  <div class="sub">
+    Goal-conditioned success rate (%), mean&nbsp;±&nbsp;std over 3 seeds (50 episodes each).
+    <b style="color:#d16650">LeWAM</b> (our model), <b>w/o</b> vs <b>w/</b> the FDM-IDM consistency (cycle) loss. Baselines: <b>GC-IDM</b> (scratch / frozen) and <b>LeWM</b> (our CEM reproduction); Random for reference. Hover a bar for details; click the legend to toggle.
+  </div>
+</header>
+
+<div class="legend" id="legend"></div>
+<div class="grid" id="grid"></div>
+
+<footer id="foot"></footer>
+<div id="tip"></div>
+
+<script>
+// ---------- data: seeds = our eval (3 seeds); ref = value taken from LeWM paper ----------
+const METHODS = [
+  {key:"v2",    label:"LeWAM w/o cons.", color:"var(--v2)", cls:"v2", hl:true},
+  {key:"v3",    label:"LeWAM w/ cons.",  color:"var(--v3)", cls:"v3", hl:true},
+  {key:"GCIDMs",label:"GC-IDM (scratch)", color:"var(--gcidms)", cls:"gcidms"},
+  {key:"GCIDM", label:"GC-IDM (frozen)",  color:"var(--gcidm)",  cls:"gcidm"},
+  {key:"LeWMr", label:"LeWM (repro)", color:"var(--lewmr)", cls:"lewmr"},
+  {key:"Random",label:"Random",       color:"var(--rand)",  cls:"rand", dash:true, ref:true},
+];
+const TASKS = [
+  {name:"Two-Room", data:{
+    LeWM:{ref:87,err:2}, LeWMr:{seeds:[96,98,98]}, v2:{seeds:[100,100,100]}, v3:{seeds:[100,100,100]},
+    GCIDM:{seeds:[100,100,100]}, GCIDMs:{seeds:[100,100,100]}, Random:{ref:0,err:0}}},
+  {name:"Reacher", data:{
+    LeWM:{ref:86,err:5}, LeWMr:{seeds:[84,88,82]}, v2:{seeds:[100,96,100]}, v3:{seeds:[100,96,100]},
+    GCIDM:{seeds:[100,96,96]}, GCIDMs:{seeds:[18,8,14]}, Random:{ref:10,err:4}}},
+  {name:"Push-T", data:{
+    LeWM:{ref:96,err:3}, LeWMr:{seeds:[84,88,80]}, v2:{seeds:[86,94,84]}, v3:{seeds:[86,90,88]},
+    GCIDM:{seeds:[86,90,88]}, GCIDMs:{seeds:[72,80,68]}, Random:{ref:2,err:2}}},
+  {name:"OGBench-Cube", data:{
+    LeWM:{ref:74,err:3}, LeWMr:{seeds:[68,64,58]}, v2:{seeds:[100,100,100]}, v3:{seeds:[100,100,100]},
+    GCIDM:{seeds:[100,100,100]}, GCIDMs:{seeds:[86,96,86]}, Random:{ref:48,err:4}}},
+];
+
+const stats = d=>{
+  if(!d) return {na:true};
+  if(d.training) return {training:true, mean:0, err:0};
+  if(d.na) return {na:true, mean:0, err:0};
+  if(d.ref!==undefined) return {mean:d.ref, err:d.err||0, ref:true};
+  const s=d.seeds, m=s.reduce((a,b)=>a+b,0)/s.length;
+  const sd=Math.sqrt(s.reduce((a,b)=>a+(b-m)**2,0)/s.length);
+  return {mean:m, err:sd, seeds:s};
+};
+
+const off = new Set();               // toggled-off method keys
+const NS="http://www.w3.org/2000/svg";
+const el=(t,a={})=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
+const tip=document.getElementById("tip");
+
+function showTip(ev, html){tip.innerHTML=html;tip.style.opacity=1;moveTip(ev);}
+function moveTip(ev){const p=12;let x=ev.clientX+p,y=ev.clientY+p;
+  const r=tip.getBoundingClientRect();
+  if(x+r.width>innerWidth)x=ev.clientX-r.width-p;
+  if(y+r.height>innerHeight)y=ev.clientY-r.height-p;
+  tip.style.left=x+"px";tip.style.top=y+"px";}
+function hideTip(){tip.style.opacity=0;}
+
+function render(){
+  const grid=document.getElementById("grid"); grid.innerHTML="";
+  const active=METHODS.filter(m=>!off.has(m.key));
+  const W=320,H=340, mL=44,mR=10,mT=34,mB=74;
+  const pw=W-mL-mR, ph=H-mT-mB, y0=mT+ph;
+  const yOf=v=>y0-(v/100)*ph;
+
+  TASKS.forEach(task=>{
+    const panel=document.createElement("div"); panel.className="panel";
+    const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
+
+    // title
+    const tt=el("text",{x:W/2,y:16,"text-anchor":"middle",class:"title"}); tt.textContent=task.name; svg.appendChild(tt);
+    // y gridlines + ticks
+    for(let v=0;v<=100;v+=20){
+      svg.appendChild(el("line",{x1:mL,y1:yOf(v),x2:W-mR,y2:yOf(v),class:"gridline"}));
+      const tk=el("text",{x:mL-7,y:yOf(v)+3.5,"text-anchor":"end",class:"tick"}); tk.textContent=v; svg.appendChild(tk);
+    }
+    // axes
+    svg.appendChild(el("line",{x1:mL,y1:mT,x2:mL,y2:y0,class:"axis"}));
+    svg.appendChild(el("line",{x1:mL,y1:y0,x2:W-mR,y2:y0,class:"axis"}));
+    // y label
+    const yl=el("text",{x:13,y:mT+ph/2,class:"ylab","text-anchor":"middle",
+      transform:`rotate(-90 13 ${mT+ph/2})`}); yl.textContent="Success Rate ( ↑ )"; svg.appendChild(yl);
+
+    // bars
+    const n=active.length, slot=pw/n, bw=Math.min(30, slot*0.66);
+    active.forEach((m,i)=>{
+      const cx=mL+slot*(i+0.5), x=cx-bw/2;
+      const st=stats(task.data[m.key]);
+      // waiting / N-A placeholders
+      if(st.training){
+        const rc=el("rect",{x,y:y0-1,width:bw,height:1,class:"waiting"}); svg.appendChild(rc);
+        const cap=el("rect",{x,y:mT+ph*0.30,width:bw,height:ph*0.70,class:"waiting pulse"}); svg.appendChild(cap);
+        const wt=el("text",{x:cx,y:mT+ph*0.62,"text-anchor":"middle",class:"wtext"}); wt.textContent="running…"; svg.appendChild(wt);
+        const wt2=el("text",{x:cx,y:mT+ph*0.62+13,"text-anchor":"middle",class:"wtext"}); wt2.textContent="(eval)"; svg.appendChild(wt2);
+        addX(svg,cx,y0,m); attach(cap,ev=>showTip(ev,
+          `<b>${m.label}</b> · ${task.name}<br/>status: <span style="color:#ffb27a">training in progress</span><br/>result pending`));
+        return;
+      }
+      if(st.na){
+        const rc=el("rect",{x,y:mT+ph*0.5,width:bw,height:ph*0.5,class:"waiting"}); rc.setAttribute("opacity",".5"); svg.appendChild(rc);
+        const wt=el("text",{x:cx,y:mT+ph*0.5+ph*0.28,"text-anchor":"middle",class:"wtext"}); wt.textContent="n/a"; svg.appendChild(wt);
+        addX(svg,cx,y0,m); return;
+      }
+      const h=Math.max(1,(st.mean/100)*ph), y=y0-h;
+      const rect=el("rect",{x,y,width:bw,height:h,rx:1.5,class:`bar ${m.cls}`,
+        fill:m.color, stroke:m.dash?"#9a9a9a":"rgba(0,0,0,.18)",
+        "stroke-width":m.dash?1.4:1, "stroke-dasharray":m.dash?"5 4":"0",
+        opacity:m.ref?0.9:1});
+      svg.appendChild(rect);
+      // error whisker
+      if(st.err>0){
+        const yt=yOf(Math.min(100,st.mean+st.err)), yb=yOf(Math.max(0,st.mean-st.err));
+        svg.appendChild(el("line",{x1:cx,y1:yt,x2:cx,y2:yb,class:"whisk"}));
+        svg.appendChild(el("line",{x1:cx-4,y1:yt,x2:cx+4,y2:yt,class:"whisk"}));
+        svg.appendChild(el("line",{x1:cx-4,y1:yb,x2:cx+4,y2:yb,class:"whisk"}));
+      }
+      // value label
+      const inside=h>26;
+      const vt=el("text",{x:cx,y:inside?y+16:y-6,"text-anchor":"middle",class:"val"});
+      vt.textContent=Math.round(st.mean); svg.appendChild(vt);
+      addX(svg,cx,y0,m);
+
+      const seedTxt=st.seeds?`<span class="seeds">seeds: ${st.seeds.join(" · ")}</span><br/>`:"";
+      const refTxt=st.ref?`<span style="color:#bbb">(LeWM-paper reference)</span><br/>`:"";
+      rect.addEventListener("mousemove",ev=>showTip(ev,
+        `<b>${m.label}</b> · ${task.name}<br/>SR = <b>${st.mean.toFixed(1)}</b>${st.err>0?` ± ${st.err.toFixed(1)}`:""}<br/>${seedTxt}${refTxt}`));
+      rect.addEventListener("mouseleave",hideTip);
+      rect.addEventListener("mousemove",moveTip);
+    });
+    svg.appendChild(document.createComment("x-labels drawn per bar"));
+    panel.appendChild(svg); grid.appendChild(panel);
+  });
+}
+function addX(svg,cx,y0,m){
+  const t=el("text",{x:cx,y:y0+14,"text-anchor":"end",class:m.hl?"xlab xlabhl":"xlab",
+    transform:`rotate(-35 ${cx} ${y0+14})`}); t.textContent=m.label; svg.appendChild(t);
+}
+
+// ---------- legend ----------
+function buildLegend(){
+  const lg=document.getElementById("legend"); lg.innerHTML="";
+  METHODS.forEach(m=>{
+    const d=document.createElement("div"); d.className="lg"+(off.has(m.key)?" off":"");
+    const sw=document.createElement("span"); sw.className="sw"+(m.dash?" dash":"");
+    sw.style.background=m.color;
+    const tx=document.createElement("span"); tx.textContent=m.label;
+    d.appendChild(sw); d.appendChild(tx);
+    d.onclick=()=>{off.has(m.key)?off.delete(m.key):off.add(m.key); buildLegend(); render();};
+    lg.appendChild(d);
+  });
+}
+
+document.getElementById("foot").innerHTML =
+  "Our numbers: eval_gip success rate, 50 episodes × 3 seeds. "+
+  "(shown as a waiting placeholder). LeWM &amp; Random bars are the published LeWM values, "+
+  "included for visual reference only — not re-run under our protocol. "+
+  "Headline: removing the stop-grad on the dynamics target (v1→v2/v3) lifts Reacher from ~3% to ~99%; "+
+  "v2 and v3 are near-identical (the cycle loss is redundant given the action + no-stop-grad dynamics losses).";
+
+buildLegend(); render();
+window.addEventListener("mousemove",e=>{if(tip.style.opacity==1)moveTip(e);});
+</script>
+</body>
+</html>

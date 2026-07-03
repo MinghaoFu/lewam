@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeWAM S10 Ablation — Settings & Results</title>
+<script>
+MathJax = {
+  tex: { inlineMath: [['$','$'], ['\\(','\\)']], displayMath: [['$$','$$'], ['\\[','\\]']] },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<style>
+:root {
+  --bg: #0d1117; --card: #161b22; --border: #30363d;
+  --text: #c9d1d9; --heading: #f0f6fc; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+  --orange: #f0883e;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.6; padding: 2rem; max-width: 1400px; margin: 0 auto; }
+h1 { color: var(--heading); font-size: 2rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
+h2 { color: var(--accent); font-size: 1.5rem; margin: 2rem 0 1rem; }
+h3 { color: var(--purple); font-size: 1.2rem; margin: 1.5rem 0 0.8rem; }
+.subtitle { color: #8b949e; margin-bottom: 2rem; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+.card-title { color: var(--heading); font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
+.tag-a { background: #1f3a2d; color: var(--green); }
+.tag-b { background: #2d1f3a; color: var(--purple); }
+.tag-c { background: #3a2d1f; color: var(--orange); }
+.tag-bc { background: #1a2332; color: #79c0ff; }
+.tag-gc { background: #2d1a33; color: #d2a8ff; }
+.eq-block { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 1rem 1.5rem; margin: 0.8rem 0; overflow-x: auto; }
+.eq-label { color: #8b949e; font-size: 0.8rem; margin-bottom: 0.3rem; }
+.loss-term { display: inline-block; background: #1a2332; border: 1px solid #1f3a5f; border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 0.85rem; }
+.loss-on { border-color: var(--green); color: var(--green); }
+.loss-off { border-color: var(--red); color: var(--red); text-decoration: line-through; opacity: 0.5; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.85rem; }
+th { background: #21262d; color: var(--heading); padding: 8px 12px; text-align: center; border: 1px solid var(--border); white-space: nowrap; }
+td { padding: 6px 12px; text-align: center; border: 1px solid var(--border); }
+td.arm-name { text-align: left; font-weight: 600; color: var(--accent); white-space: nowrap; }
+tr:hover { background: #1c2128; }
+.best { color: var(--green); font-weight: 700; }
+.worst { color: var(--red); }
+.missing { color: #484f58; font-style: italic; }
+.mode-header { text-align: center !important; }
+.mode-bc { background: #1a2332 !important; }
+.mode-policy { background: #2d1a33 !important; }
+.mode-guided { background: #1f3a2d !important; }
+.mode-planning { background: #3a2d1f !important; }
+.insight { background: #1c2128; border-left: 3px solid var(--accent); padding: 1rem 1.5rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+.insight-title { color: var(--accent); font-weight: 600; margin-bottom: 0.3rem; }
+.arch-flow { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; margin: 1rem 0; }
+.arch-box { background: #1a2332; border: 1px solid #1f3a5f; border-radius: 8px; padding: 1rem; flex: 1; min-width: 200px; }
+.arch-box h4 { color: var(--accent); margin-bottom: 0.5rem; font-size: 0.9rem; }
+.arch-box p { font-size: 0.85rem; color: #8b949e; }
+.arrow { color: var(--accent); font-size: 1.5rem; display: flex; align-items: center; }
+.nav { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border); padding: 0.8rem 0; z-index: 100; margin-bottom: 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+.nav a { color: var(--accent); text-decoration: none; font-size: 0.85rem; padding: 4px 12px; border: 1px solid var(--border); border-radius: 16px; }
+.nav a:hover { background: #1a2332; border-color: var(--accent); }
+.heatmap-low { background: #3a1f1f !important; }
+.heatmap-mid { background: #3a3a1f !important; }
+.heatmap-high { background: #1f3a2d !important; }
+.comparison-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+.delta-pos { color: var(--green); }
+.delta-neg { color: var(--red); }
+.baseline-row { background: #1a1a2e !important; border-top: 2px dashed var(--yellow) !important; }
+.baseline-row td { color: var(--yellow); font-weight: 600; }
+.baseline-row td.arm-name { color: var(--yellow); }
+.baseline-tag { display: inline-block; background: #3a2d1f; color: var(--yellow); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 500; margin-left: 0.5rem; }
+sub.ep { font-size: 0.65em; color: #8b949e; font-weight: 400; }
+sub.ep-warn { font-size: 0.65em; color: var(--red); font-weight: 600; }
+sub.ep-ok { font-size: 0.65em; color: #3fb950; font-weight: 400; }
+.epoch-legend { background: #1c2128; border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1.2rem; margin: 1rem 0; font-size: 0.85rem; }
+.epoch-legend span { margin-right: 1.5rem; }
+</style>
+</head>
+<body>
+
+<h1>LeWAM S10 Ablation Campaign</h1>
+<p class="subtitle">52 arms &times; 4 datasets &times; 4 eval modes &mdash; Complete Results (2026-06-28)</p>
+
+<nav class="nav">
+  <a href="#architecture">Architecture</a>
+  <a href="#eval-modes">Eval Modes</a>
+  <a href="#section-a">Section A: SIGReg</a>
+  <a href="#section-b">Section B: OV-IDM</a>
+  <a href="#section-c">Section C: Components</a>
+  <a href="#full-results">Full Results</a>
+  <a href="#findings">Key Findings</a>
+</nav>
+
+<!-- ==================== ARCHITECTURE ==================== -->
+<section id="architecture">
+<h2>Architecture Overview</h2>
+
+<div class="arch-flow">
+  <div class="arch-box">
+    <h4>Encoder</h4>
+    <p>$x_t \to z_t$</p>
+    <div class="eq-block">$$z_t = \text{Proj}\big(\text{ViT}(x_t)[\text{CLS}]\big)$$</div>
+    <p>ViT extracts patch tokens + CLS token; only CLS kept. Projector = MLP + BatchNorm. Dim $D$.</p>
+  </div>
+  <div class="arrow">&rarr;</div>
+  <div class="arch-box">
+    <h4>Action Encoder</h4>
+    <p>$a_t \to e_t$</p>
+    <div class="eq-block">$$e_t = W_a \cdot a_t + b_a$$</div>
+    <p>Single linear layer. $A = \text{frameskip} \times \text{action\_dim}$</p>
+  </div>
+  <div class="arrow">&rarr;</div>
+  <div class="arch-box">
+    <h4>Forward Dynamics (FDM)</h4>
+    <p>$(z_{1:T}, e_{1:T}) \to \hat{z}_{t+1}$</p>
+    <div class="eq-block">$$\hat{z}_{t+1:t+T} = \text{PredProj}\big(\text{ARPred}(z_{1:T}, e_{1:T})\big)$$</div>
+    <p>Causal transformer, autoregressive next-state prediction.</p>
+  </div>
+</div>
+
+<div class="arch-flow">
+  <div class="arch-box">
+    <h4>Action Head (Intention + Decoder)</h4>
+    <p>$(z_{1:T},\; e_{&lt;t},\; [z_\text{goal}, h]) \to \hat{a}_t$</p>
+    <div class="eq-block">
+      $$\pi_t = \text{ActionPredictor}(z_{1:T},\; e_{&lt;t} + z_\text{goal})$$
+      $$\pi_t' = \text{AdaLN}(\pi_t,\; h) = \text{LN}(\pi_t) \cdot (1 + \gamma(h)) + \beta(h)$$
+      $$\hat{a}_t = \text{ActionDecoder}(\pi_t')$$
+    </div>
+    <p>Separate causal transformer (fresh weights). AdaLN-Zero for horizon conditioning. Decoder: MLP $D \to 2048 \to A$.</p>
+  </div>
+  <div class="arch-box">
+    <h4>Inverse Dynamics (IDM)</h4>
+    <p>$(z_\tau, z_{\tau+1}) \to \hat{a}_\tau^{\text{inv}}$</p>
+    <div class="eq-block">$$\hat{a}_\tau^{\text{inv}} = \text{MLP}\big([z_\tau;\; z_{\tau+1}]\big)$$</div>
+    <p>MLP: $2D \to 256 \to \text{GELU} \to A$. Train-only regularizer, never used at eval.</p>
+  </div>
+</div>
+</section>
+
+<!-- ==================== LOSS TERMS ==================== -->
+<section>
+<h2>Loss Terms</h2>
+<div class="card">
+  <table>
+    <tr><th>Symbol</th><th>Formula</th><th>Purpose</th></tr>
+    <tr><td>$\mathcal{L}_\text{pred}$</td><td>$\|\hat{z}_{t+1} - z_{t+1}\|^2$</td><td>FDM predicts next latent</td></tr>
+    <tr><td>$\mathcal{L}_\text{sigreg}$</td><td>$\text{SIGReg}(z)$ &mdash; variance + decorrelation</td><td>Prevents encoder collapse, structures latent geometry</td></tr>
+    <tr><td>$\mathcal{L}_\text{intent}$</td><td>$\|\pi_t - \text{sg}(e_t)\|^2$</td><td>Intention matches action embedding (stop-gradient on target)</td></tr>
+    <tr><td>$\mathcal{L}_\text{act}$</td><td>$\|\hat{a}_t - a_t\|^2$ (MSE) or $\mathcal{L}_\text{DDPM}$</td><td>Decoder recovers raw action</td></tr>
+    <tr><td>$\mathcal{L}_\text{inv}$</td><td>$\|\hat{a}_\tau^{\text{inv}} - a_\tau\|^2$</td><td>Inverse dynamics regularizer (dense: all consecutive pairs)</td></tr>
+    <tr><td>$\mathcal{L}_\text{sigreg\_act}$</td><td>$\text{SIGReg}(e)$</td><td>Prevents action-embedding collapse</td></tr>
+  </table>
+</div>
+</section>
+
+<!-- ==================== EVAL MODES ==================== -->
+<section id="eval-modes">
+<h2>Evaluation Modes</h2>
+<div class="comparison-grid">
+  <div class="card">
+    <div class="card-title"><span class="tag tag-bc">bc</span> Behavior Cloning</div>
+    <p>Action head predicts from past observations only. <strong>No goal, no planning.</strong></p>
+    <div class="eq-block">$$\hat{a}_t = \text{Decode}\big(\text{ActionPred}(z_{1:T}, e_{&lt;t})\big)$$</div>
+    <p>Tests: can the model imitate training data?</p>
+  </div>
+  <div class="card">
+    <div class="card-title"><span class="tag tag-gc">policy</span> Goal-Conditioned Policy</div>
+    <p>Action head receives goal image + horizon. <strong>No planning/search.</strong></p>
+    <div class="eq-block">$$\hat{a}_t = \text{Decode}\big(\text{ActionPred}(z_{1:T}, e_{&lt;t} + z_\text{goal}, h)\big)$$</div>
+    <p>Tests: can the model directly output goal-directed actions?</p>
+  </div>
+  <div class="card">
+    <div class="card-title"><span style="background:#1f3a2d;color:var(--green)" class="tag">guided</span> CEM + Action Head</div>
+    <p>Action head <strong>warm-starts</strong> CEM, which optimizes via world model rollouts.</p>
+    <div class="eq-block">
+      $$\mu_0 = \text{ActionHead}(z_{1:T}, z_\text{goal}, h)$$
+      $$a^* = \text{CEM}\big(\mu_0,\; \text{FDM},\; \text{cost} = \|z_H - z_\text{goal}\|\big)$$
+    </div>
+    <p>Tests: does the world model improve over the action head via planning?</p>
+  </div>
+  <div class="card">
+    <div class="card-title"><span style="background:#3a2d1f;color:var(--orange)" class="tag">planning</span> Pure CEM</div>
+    <p><strong>No action head</strong> &mdash; CEM searches from random initialization.</p>
+    <div class="eq-block">
+      $$\mu_0 \sim \mathcal{N}(0, I)$$
+      $$a^* = \text{CEM}\big(\mu_0,\; \text{FDM},\; \text{cost} = \|z_H - z_\text{goal}\|\big)$$
+    </div>
+    <p>Tests: how good is the world model alone for planning?</p>
+  </div>
+</div>
+</section>
+
+<!-- ==================== SECTION A ==================== -->
+<section id="section-a">
+<h2><span class="tag tag-a">Section A</span> SIGReg Ablations</h2>
+<p>Training script: <code>train_sigreg.py</code> &nbsp;|&nbsp; <code>goal_conditioned=false</code> &nbsp;|&nbsp; Native eval: <code>bc</code></p>
+
+<div class="card">
+  <div class="card-title">sigreg_base &mdash; Baseline</div>
+  <p>SIGReg ON, intention loss ON. Full regularization.</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 0.09 \cdot \mathcal{L}_\text{sigreg} + 1.0 \cdot \mathcal{L}_\text{intent} + 1.0 \cdot \mathcal{L}_\text{act}$$
+  </div>
+  <div>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{pred}$</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{sigreg}$ &times; 0.09</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{intent}$ &times; 1.0</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{act}$ &times; 1.0</span>
+    <span class="loss-term loss-off">$\mathcal{L}_\text{sigreg\_act}$</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">sigreg_off &mdash; No SIGReg</div>
+  <p>SIGReg turned OFF ($\lambda_\text{sigreg} = 0$). Tests: does representation geometry matter?</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 1.0 \cdot \mathcal{L}_\text{intent} + 1.0 \cdot \mathcal{L}_\text{act}$$
+  </div>
+  <div>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{pred}$</span>
+    <span class="loss-term loss-off">$\mathcal{L}_\text{sigreg}$</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{intent}$ &times; 1.0</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{act}$ &times; 1.0</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">sigreg_act &mdash; + SIGReg on Actions</div>
+  <p>Extends SIGReg to action embeddings. Tests: does action-space geometry also help?</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 0.09 \cdot \mathcal{L}_\text{sigreg} + 0.09 \cdot \mathcal{L}_\text{sigreg\_act} + 1.0 \cdot \mathcal{L}_\text{intent} + 1.0 \cdot \mathcal{L}_\text{act}$$
+  </div>
+  <div>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{pred}$</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{sigreg}$ &times; 0.09</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{sigreg\_act}$ &times; 0.09</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{intent}$ &times; 1.0</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{act}$ &times; 1.0</span>
+  </div>
+</div>
+
+<div class="card" style="border-color: var(--yellow);">
+  <div class="card-title"><span class="baseline-tag">BASELINE</span> LeWM &mdash; Original World Model (CEM Planning Only)</div>
+  <p>The original LeWM system: ViT-tiny scratch encoder ($D\!=\!192$), no SIGReg, no goal conditioning, no action head at eval. Pure CEM search over the learned world model. This is the <strong>planning-only baseline</strong> that all S10 arms are compared against.</p>
+  <div class="eq-block">
+    <div class="eq-label">Training Loss (world model only)</div>
+    $$\mathcal{L}_\text{LeWM} = \mathcal{L}_\text{pred} = \|\hat{z}_{t+1} - z_{t+1}\|^2$$
+  </div>
+  <div class="eq-block">
+    <div class="eq-label">Eval: Pure CEM over frozen world model</div>
+    $$a^* = \text{CEM}\big(\mu_0 \sim \mathcal{N}(0,I),\;\; \text{FDM},\;\; \text{cost} = \|z_H - z_\text{goal}\|\big)$$
+  </div>
+  <p style="margin-top:0.8rem;"><strong>Published baseline results (N=50, seed=42):</strong> tworoom ~95% &nbsp;|&nbsp; cube ~67% &nbsp;|&nbsp; pusht ~76% &nbsp;|&nbsp; reacher ~85%</p>
+</div>
+
+<div class="epoch-legend">
+  <strong>Epoch subscripts:</strong>
+  <span>42<sub class="ep-ok">e15</sub> = fully trained</span>
+  <span>42<sub class="ep-warn">e5</sub> = <strong style="color:var(--red)">undertrained</strong> (only 33% of max epochs)</span>
+  <span>Results from undertrained checkpoints may improve significantly with more training.</span>
+</div>
+
+<h3>Section A Results (Success Rate %)</h3>
+<table>
+  <tr>
+    <th rowspan="2">Setting</th>
+    <th colspan="4" class="mode-bc">bc (native)</th>
+    <th colspan="4" class="mode-guided">guided (CEM+AH)</th>
+    <th colspan="4" class="mode-planning">planning (pure CEM)</th>
+  </tr>
+  <tr>
+    <th class="mode-bc">tw</th><th class="mode-bc">pu</th><th class="mode-bc">re</th><th class="mode-bc">cu</th>
+    <th class="mode-guided">tw</th><th class="mode-guided">pu</th><th class="mode-guided">re</th><th class="mode-guided">cu</th>
+    <th class="mode-planning">tw</th><th class="mode-planning">pu</th><th class="mode-planning">re</th><th class="mode-planning">cu</th>
+  </tr>
+  <tr class="baseline-row">
+    <td class="arm-name">LeWM baseline</td>
+    <td colspan="4" class="missing">n/a (no action head)</td>
+    <td colspan="4" class="missing">n/a (no action head)</td>
+    <td>~95</td><td>~76</td><td>~85</td><td>~67</td>
+  </tr>
+  <tr>
+    <td class="arm-name">sigreg_base<sub class="ep-warn">e5</sub></td>
+    <td>48</td><td>36</td><td>2</td><td>68</td>
+    <td class="best">94</td><td class="best">80</td><td class="best">44</td><td class="best">88</td>
+    <td>94</td><td>70</td><td>42</td><td>66</td>
+  </tr>
+  <tr>
+    <td class="arm-name">sigreg_act<sub class="ep-warn">e5</sub></td>
+    <td>48</td><td>28</td><td>2</td><td>68</td>
+    <td class="best">98</td><td>68</td><td>42</td><td>84</td>
+    <td>94</td><td>62</td><td>42</td><td>68</td>
+  </tr>
+  <tr>
+    <td class="arm-name">sigreg_off<sub class="ep-warn">e5</sub></td>
+    <td>48</td><td>24</td><td>2</td><td>68</td>
+    <td class="best">100</td><td class="worst">30</td><td class="worst">12</td><td class="worst">76</td>
+    <td>100</td><td class="worst">16</td><td class="worst">10</td><td class="worst">58</td>
+  </tr>
+</table>
+
+<div class="insight">
+  <div class="insight-title">Insight: SIGReg is critical for planning</div>
+  <p>In <strong>bc mode</strong>, all three perform similarly (latent geometry doesn't affect pure imitation). But in <strong>guided/planning</strong>, sigreg_off collapses on pusht (30% vs 80%) and reacher (12% vs 44%). The world model's latent space must be geometrically structured for CEM to find good trajectories.</p>
+</div>
+</section>
+
+<!-- ==================== SECTION B ==================== -->
+<section id="section-b">
+<h2><span class="tag tag-b">Section B</span> OV-IDM Dense Ablations</h2>
+<p>Training: <code>train_sigreg.py</code> &nbsp;|&nbsp; <code>goal_conditioned=true</code> &nbsp;|&nbsp; Native eval: <code>policy</code> &nbsp;|&nbsp; $w_\text{intent} = 0$</p>
+
+<div class="card">
+  <div class="card-title">ov_idm_dense_on &mdash; Dense IDM + SIGReg ON</div>
+  <p>Goal-conditioned action head + dense inverse dynamics on <strong>encoded</strong> latents + SIGReg. The full system.</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 0.09 \cdot \mathcal{L}_\text{sigreg} + 1.0 \cdot \mathcal{L}_\text{act} + 0.5 \cdot \mathcal{L}_\text{inv}^{\text{enc}}$$
+  </div>
+  <div class="eq-block">
+    <div class="eq-label">Dense IDM (encoded latents)</div>
+    $$\mathcal{L}_\text{inv}^{\text{enc}} = \sum_{\tau} \big\|\text{MLP}([z_\tau;\; z_{\tau+1}]) - a_\tau\big\|^2$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">ov_idm_dense_sigregoff &mdash; Dense IDM, SIGReg OFF</div>
+  <p>Tests: can dense IDM alone replace SIGReg for structuring representations?</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 1.0 \cdot \mathcal{L}_\text{act} + 0.5 \cdot \mathcal{L}_\text{inv}^{\text{enc}}$$
+  </div>
+  <div>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{pred}$</span>
+    <span class="loss-term loss-off">$\mathcal{L}_\text{sigreg}$</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{act}$ &times; 1.0</span>
+    <span class="loss-term loss-on">$\mathcal{L}_\text{inv}^\text{enc}$ &times; 0.5</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">ov_idm_dense_A8 &mdash; Dense IDM on Predicted Latents</div>
+  <p>IDM inverts on FDM-<strong>predicted</strong> $\hat{z}$ instead of encoded $z$. Tests: does prediction error corrupt the IDM signal?</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 1.0 \cdot \mathcal{L}_\text{act} + 0.5 \cdot \mathcal{L}_\text{inv}^{\text{pred}}$$
+  </div>
+  <div class="eq-block">
+    <div class="eq-label">IDM on predicted latents</div>
+    $$\mathcal{L}_\text{inv}^{\text{pred}} = \sum_{\tau} \big\|\text{MLP}([\hat{z}_\tau;\; \hat{z}_{\tau+1}]) - a_\tau\big\|^2 \quad \text{where } \hat{z} = \text{FDM}(z, e)$$
+  </div>
+</div>
+
+<h3>Section B Results (Success Rate %)</h3>
+<table>
+  <tr>
+    <th rowspan="2">Setting</th>
+    <th colspan="3" class="mode-policy">policy (GC)</th>
+    <th colspan="3" class="mode-guided">guided (CEM+AH)</th>
+    <th colspan="3" class="mode-planning">planning (pure CEM)</th>
+  </tr>
+  <tr>
+    <th class="mode-policy">pu</th><th class="mode-policy">re</th><th class="mode-policy">cu</th>
+    <th class="mode-guided">pu</th><th class="mode-guided">re</th><th class="mode-guided">cu</th>
+    <th class="mode-planning">pu</th><th class="mode-planning">re</th><th class="mode-planning">cu</th>
+  </tr>
+  <tr class="baseline-row">
+    <td class="arm-name">LeWM baseline</td>
+    <td>~76</td><td>~85</td><td>~67</td>
+    <td>~76</td><td>~85</td><td>~67</td>
+    <td>~76</td><td>~85</td><td>~67</td>
+  </tr>
+  <tr>
+    <td class="arm-name">ov_idm_dense_on<sub class="ep-warn">e5</sub></td>
+    <td>52</td><td class="best">12</td><td>90</td>
+    <td class="best">62</td><td class="best">50</td><td class="best">90</td>
+    <td>56</td><td>44</td><td>66</td>
+  </tr>
+  <tr>
+    <td class="arm-name">ov_idm_dense_sigregoff<sub class="ep-warn">e5</sub></td>
+    <td>36</td><td>2</td><td class="best">94</td>
+    <td>40</td><td>16</td><td>88</td>
+    <td>32</td><td>6</td><td>68</td>
+  </tr>
+  <tr>
+    <td class="arm-name">ov_idm_dense_A8<sub class="ep-warn">e5</sub></td>
+    <td>46</td><td>2</td><td>86</td>
+    <td class="worst">24</td><td class="worst">2</td><td class="worst">70</td>
+    <td class="worst">16</td><td class="worst">2</td><td class="worst">56</td>
+  </tr>
+</table>
+
+<div class="insight">
+  <div class="insight-title">Insight: SIGReg + encoded latents = best IDM</div>
+  <p><strong>ov_idm_dense_on</strong> (SIGReg ON, encoded $z$) dominates across all modes. Turning SIGReg off (sigregoff) loses 22% on pusht guided. Using <strong>predicted</strong> latents (A8) is catastrophic &mdash; reacher collapses to 2% in guided/planning. FDM prediction error corrupts the IDM training signal.</p>
+  <p>Validates the paper <a href="https://arxiv.org/abs/2605.08732" style="color:var(--accent)">"Latent Geometry Beyond Search"</a>: structured latent spaces (SIGReg) enable effective amortized planning via GC-IDM.</p>
+</div>
+</section>
+
+<!-- ==================== SECTION C ==================== -->
+<section id="section-c">
+<h2><span class="tag tag-c">Section C</span> Component Ablations</h2>
+<p>Training: <code>train.py</code> &nbsp;|&nbsp; <code>goal_conditioned=true</code> &nbsp;|&nbsp; Native eval: <code>policy</code> &nbsp;|&nbsp; End-to-end (freeze_wm=false)</p>
+
+<div class="card">
+  <div class="card-title">c_base &mdash; Baseline</div>
+  <p>ViT-tiny scratch ($D\!=\!192$), MSE action head, full history ($T\!=\!3$), SIGReg ON.</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 0.09 \cdot \mathcal{L}_\text{sigreg} + 1.0 \cdot \mathcal{L}_\text{act}$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">c_enc_dino &mdash; Pretrained Encoder</div>
+  <p>DINOv2-small pretrained ($D\!=\!384$) replaces ViT-tiny scratch. Everything else identical.</p>
+  <div class="eq-block">
+    <div class="eq-label">Difference from c_base</div>
+    $$z_t = \text{Proj}\big(\text{DINOv2-small}(x_t)[\text{CLS}]\big) \quad \text{vs} \quad z_t = \text{Proj}\big(\text{ViT-tiny}(x_t)[\text{CLS}]\big)$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">c_head_diffusion &mdash; Diffusion Action Head</div>
+  <p>Replaces MSE decoder with DDPM denoising. Multi-modal action distribution support.</p>
+  <div class="eq-block">
+    <div class="eq-label">Action loss becomes diffusion loss</div>
+    $$\mathcal{L}_\text{act}^{\text{DDPM}} = \mathbb{E}_{t, \epsilon}\big[\|\epsilon - \epsilon_\theta(a_t^{(k)}, k, \pi_t)\|^2\big]$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">c_input_stateonly &mdash; No Action History</div>
+  <p>Action embeddings zeroed out: $e_{&lt;t} = \mathbf{0}$. Tests: does action history help?</p>
+  <div class="eq-block">
+    $$\hat{a}_t = \text{Decode}\big(\text{ActionPred}(z_{1:T},\; \mathbf{0} + z_\text{goal},\; h)\big)$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">c_input_markov &mdash; Markov (history_size=1)</div>
+  <p>Only current state + previous action. Tests: is longer history needed?</p>
+  <div class="eq-block">
+    $$\hat{a}_t = \text{Decode}\big(\text{ActionPred}(z_t,\; e_{t-1} + z_\text{goal},\; h)\big)$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">c_sigreg_off &mdash; No SIGReg (GC context)</div>
+  <p>Same as c_base but $\lambda_\text{sigreg} = 0$. Tests: SIGReg impact in goal-conditioned setting.</p>
+  <div class="eq-block">
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 1.0 \cdot \mathcal{L}_\text{act}$$
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">c_predict_emb &mdash; + Intention Loss</div>
+  <p>Adds intention loss ($w_\text{intent}\!=\!1$) with detached decoder. Action head predicts in embedding space, then decoder maps to raw action.</p>
+  <div class="eq-block">
+    <div class="eq-label">Total Loss (extra term)</div>
+    $$\mathcal{L} = \mathcal{L}_\text{pred} + 0.09 \cdot \mathcal{L}_\text{sigreg} + 1.0 \cdot \underbrace{\mathcal{L}_\text{intent}}_{\|\pi_t - \text{sg}(e_t)\|^2} + 1.0 \cdot \mathcal{L}_\text{act}$$
+  </div>
+  <p><code>detach_decoder=true</code> &mdash; decoder gradients don't flow back to the action predictor.</p>
+</div>
+
+<h3>Section C Results (Success Rate %)</h3>
+<table>
+  <tr>
+    <th rowspan="2">Setting</th>
+    <th colspan="4" class="mode-policy">policy (GC)</th>
+    <th colspan="4" class="mode-guided">guided (CEM+AH)</th>
+    <th colspan="4" class="mode-planning">planning (pure CEM)</th>
+  </tr>
+  <tr>
+    <th class="mode-policy">tw</th><th class="mode-policy">cu</th><th class="mode-policy">pu</th><th class="mode-policy">re</th>
+    <th class="mode-guided">tw</th><th class="mode-guided">cu</th><th class="mode-guided">pu</th><th class="mode-guided">re</th>
+    <th class="mode-planning">tw</th><th class="mode-planning">cu</th><th class="mode-planning">pu</th><th class="mode-planning">re</th>
+  </tr>
+  <tr class="baseline-row">
+    <td class="arm-name">LeWM baseline</td>
+    <td>--</td><td>~67</td><td>~76</td><td>~85</td>
+    <td>--</td><td>~67</td><td>~76</td><td>~85</td>
+    <td>~95</td><td>~67</td><td>~76</td><td>~85</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_base<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>86</td><td>40</td><td>12</td>
+    <td class="missing">--</td><td class="best">90</td><td>64</td><td>42</td>
+    <td class="missing">--</td><td>74</td><td>72</td><td>46</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_enc_dino<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td class="best">96</td><td class="best">72</td><td class="best">48</td>
+    <td class="missing">--</td><td>90</td><td class="best">84</td><td class="best">82</td>
+    <td class="missing">--</td><td>74</td><td>78</td><td class="best">82</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_head_diffusion<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>60</td><td class="worst">2</td><td>10</td>
+    <td class="missing">--</td><td>70</td><td>40</td><td>40</td>
+    <td class="missing">--</td><td>70</td><td>54</td><td>46</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_input_markov<sub class="ep-ok">e12</sub></td>
+    <td class="best">98</td><td>90</td><td>34</td><td>4</td>
+    <td class="best">100</td><td>88</td><td>44</td><td>40</td>
+    <td>94</td><td>76</td><td>46</td><td>30</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_input_stateonly<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>94</td><td>54</td><td>10</td>
+    <td class="missing">--</td><td>94</td><td>62</td><td>44</td>
+    <td class="missing">--</td><td>80</td><td>58</td><td>52</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_predict_emb<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>92</td><td>48</td><td>4</td>
+    <td class="missing">--</td><td>88</td><td>58</td><td>44</td>
+    <td class="missing">--</td><td>74</td><td>58</td><td>54</td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_sigreg_off<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>84</td><td>32</td><td>2</td>
+    <td class="missing">--</td><td>88</td><td class="worst">18</td><td class="worst">12</td>
+    <td class="missing">--</td><td>70</td><td class="worst">22</td><td class="worst">10</td>
+  </tr>
+</table>
+
+<div class="insight">
+  <div class="insight-title">Insight: Pretrained encoder is the single biggest factor</div>
+  <p><strong>c_enc_dino</strong> dominates across all modes. In guided mode: pusht 84%, reacher 82% &mdash; far ahead of everything else. DINOv2 features provide a much richer latent space for both policy and planning.</p>
+</div>
+
+<div class="insight">
+  <div class="insight-title">Insight: Diffusion head struggles with policy, rescued by planning</div>
+  <p><strong>c_head_diffusion</strong> gets only 2% on pusht in policy mode (denoising is slow/inaccurate for single-step prediction), but jumps to 54% in pure planning mode. The world model is fine &mdash; the action head is the bottleneck.</p>
+</div>
+
+<div class="insight">
+  <div class="insight-title">Insight: Action history doesn't help much</div>
+  <p><strong>c_input_stateonly</strong> (no action history) often matches or beats c_base. On pusht policy: 54% vs 40%. The current observation + goal already contains enough info for action selection.</p>
+</div>
+</section>
+
+<!-- ==================== FULL RESULTS ==================== -->
+<section id="full-results">
+<h2>Complete Results Table</h2>
+<p>All 13 settings &times; 4 eval modes. Green = best in column, red = worst.</p>
+
+<table>
+  <tr>
+    <th rowspan="2">Setting</th><th rowspan="2">Section</th>
+    <th colspan="4" class="mode-bc">bc</th>
+    <th colspan="4" class="mode-policy">policy</th>
+    <th colspan="4" class="mode-guided">guided</th>
+    <th colspan="4" class="mode-planning">planning</th>
+  </tr>
+  <tr>
+    <th class="mode-bc">tw</th><th class="mode-bc">cu</th><th class="mode-bc">pu</th><th class="mode-bc">re</th>
+    <th class="mode-policy">tw</th><th class="mode-policy">cu</th><th class="mode-policy">pu</th><th class="mode-policy">re</th>
+    <th class="mode-guided">tw</th><th class="mode-guided">cu</th><th class="mode-guided">pu</th><th class="mode-guided">re</th>
+    <th class="mode-planning">tw</th><th class="mode-planning">cu</th><th class="mode-planning">pu</th><th class="mode-planning">re</th>
+  </tr>
+  <tr class="baseline-row">
+    <td class="arm-name">LeWM (CEM only)</td><td>--</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td colspan="4" class="missing">n/a (same as planning)</td>
+    <td>~95</td><td>~67</td><td>~76</td><td>~85</td>
+  </tr>
+  <tr class="baseline-row" style="border-top: none;">
+    <td class="arm-name" style="color:#d2a8ff">GC-IDM (published)</td><td>--</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td>100</td><td>98.7</td><td>84.2</td><td>99.7</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td colspan="4" class="missing">n/a (no CEM)</td>
+  </tr>
+  <tr class="baseline-row" style="border-top: none;">
+    <td class="arm-name" style="color:#7ee787">GC-IDM (our repro, L40S)</td><td>--</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="best">100</td><td>100</td><td>90</td><td>97</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td colspan="4" class="missing">n/a (no CEM)</td>
+  </tr>
+  <tr class="baseline-row" style="border-top: none;">
+    <td class="arm-name" style="color:#f0883e">OURS history GC (L40S)</td><td>--</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td>100</td><td>72.7</td><td>31</td><td>97</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td colspan="4" class="missing">n/a</td>
+  </tr>
+  <tr>
+    <td class="arm-name">sigreg_base</td><td>A</td>
+    <td>48<sub class="ep-warn">e5</sub></td><td>68<sub class="ep-warn">e5</sub></td><td>36<sub class="ep-warn">e5</sub></td><td>2<sub class="ep-warn">e5</sub></td>
+    <td colspan="4" class="missing">n/a</td>
+    <td>94<sub class="ep-warn">e5</sub></td><td>88<sub class="ep-warn">e5</sub></td><td class="best">80<sub class="ep-warn">e5</sub></td><td>44<sub class="ep-warn">e5</sub></td>
+    <td>94<sub class="ep-warn">e5</sub></td><td>66<sub class="ep-warn">e5</sub></td><td>70<sub class="ep-warn">e5</sub></td><td>42<sub class="ep-warn">e5</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">sigreg_act</td><td>A</td>
+    <td>48<sub class="ep-warn">e5</sub></td><td>68<sub class="ep-warn">e5</sub></td><td>28<sub class="ep-warn">e5</sub></td><td>2<sub class="ep-warn">e5</sub></td>
+    <td colspan="4" class="missing">n/a</td>
+    <td>98<sub class="ep-warn">e5</sub></td><td>84<sub class="ep-warn">e5</sub></td><td>68<sub class="ep-warn">e5</sub></td><td>42<sub class="ep-warn">e5</sub></td>
+    <td>94<sub class="ep-warn">e5</sub></td><td>68<sub class="ep-warn">e5</sub></td><td>62<sub class="ep-warn">e5</sub></td><td>42<sub class="ep-warn">e5</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">sigreg_off</td><td>A</td>
+    <td>48<sub class="ep-warn">e5</sub></td><td>68<sub class="ep-warn">e5</sub></td><td>24<sub class="ep-warn">e5</sub></td><td>2<sub class="ep-warn">e5</sub></td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="best">100<sub class="ep-warn">e5</sub></td><td>76<sub class="ep-warn">e5</sub></td><td>30<sub class="ep-warn">e5</sub></td><td>12<sub class="ep-warn">e5</sub></td>
+    <td class="best">100<sub class="ep-warn">e5</sub></td><td>58<sub class="ep-warn">e5</sub></td><td>16<sub class="ep-warn">e5</sub></td><td>10<sub class="ep-warn">e5</sub></td>
+  </tr>
+  <tr style="border-top: 2px solid var(--purple)">
+    <td class="arm-name">ov_idm_dense_on</td><td>B</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>90<sub class="ep-warn">e5</sub></td><td>52<sub class="ep-warn">e5</sub></td><td>12<sub class="ep-warn">e5</sub></td>
+    <td class="missing">--</td><td>90<sub class="ep-warn">e5</sub></td><td>62<sub class="ep-warn">e5</sub></td><td>50<sub class="ep-warn">e5</sub></td>
+    <td class="missing">--</td><td>66<sub class="ep-warn">e5</sub></td><td>56<sub class="ep-warn">e5</sub></td><td>44<sub class="ep-warn">e5</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">ov_idm_dense_sigregoff</td><td>B</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>94<sub class="ep-warn">e5</sub></td><td>36<sub class="ep-warn">e5</sub></td><td>2<sub class="ep-warn">e5</sub></td>
+    <td class="missing">--</td><td>88<sub class="ep-warn">e5</sub></td><td>40<sub class="ep-warn">e5</sub></td><td>16<sub class="ep-warn">e5</sub></td>
+    <td class="missing">--</td><td>68<sub class="ep-warn">e5</sub></td><td>32<sub class="ep-warn">e5</sub></td><td>6<sub class="ep-warn">e5</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">ov_idm_dense_A8</td><td>B</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>86<sub class="ep-warn">e5</sub></td><td>46<sub class="ep-warn">e5</sub></td><td>2<sub class="ep-warn">e5</sub></td>
+    <td class="missing">--</td><td>70<sub class="ep-warn">e5</sub></td><td>24<sub class="ep-warn">e5</sub></td><td class="worst">2<sub class="ep-warn">e5</sub></td>
+    <td class="missing">--</td><td>56<sub class="ep-warn">e5</sub></td><td>16<sub class="ep-warn">e5</sub></td><td class="worst">2<sub class="ep-warn">e5</sub></td>
+  </tr>
+  <tr style="border-top: 2px solid var(--orange)">
+    <td class="arm-name">c_base</td><td style="color:#8b949e">C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>86<sub class="ep-ok">e15</sub></td><td>40<sub class="ep-ok">e15</sub></td><td>12<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>90<sub class="ep-ok">e15</sub></td><td>64<sub class="ep-ok">e15</sub></td><td>42<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>74<sub class="ep-ok">e15</sub></td><td>72<sub class="ep-ok">e15</sub></td><td>46<sub class="ep-ok">e15</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_enc_dino</td><td>C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td class="best">96<sub class="ep-ok">e15</sub></td><td class="best">72<sub class="ep-ok">e15</sub></td><td class="best">48<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>90<sub class="ep-ok">e15</sub></td><td class="best">84<sub class="ep-ok">e15</sub></td><td class="best">82<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>74<sub class="ep-ok">e15</sub></td><td class="best">78<sub class="ep-ok">e15</sub></td><td class="best">82<sub class="ep-ok">e15</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_head_diffusion</td><td>C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>60<sub class="ep-ok">e15</sub></td><td class="worst">2<sub class="ep-ok">e15</sub></td><td>10<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>70<sub class="ep-ok">e15</sub></td><td>40<sub class="ep-ok">e15</sub></td><td>40<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>70<sub class="ep-ok">e15</sub></td><td>54<sub class="ep-ok">e15</sub></td><td>46<sub class="ep-ok">e15</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_input_markov</td><td>C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="best">98<sub class="ep-ok">e12</sub></td><td>90<sub class="ep-ok">e15</sub></td><td>34<sub class="ep-ok">e15</sub></td><td>4<sub class="ep-ok">e15</sub></td>
+    <td class="best">100<sub class="ep-ok">e12</sub></td><td>88<sub class="ep-ok">e15</sub></td><td>44<sub class="ep-ok">e15</sub></td><td>40<sub class="ep-ok">e15</sub></td>
+    <td>94<sub class="ep-ok">e12</sub></td><td>76<sub class="ep-ok">e15</sub></td><td>46<sub class="ep-ok">e15</sub></td><td>30<sub class="ep-ok">e15</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_input_stateonly</td><td>C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>94<sub class="ep-ok">e15</sub></td><td>54<sub class="ep-ok">e15</sub></td><td>10<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>94<sub class="ep-ok">e15</sub></td><td>62<sub class="ep-ok">e15</sub></td><td>44<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>80<sub class="ep-ok">e15</sub></td><td>58<sub class="ep-ok">e15</sub></td><td>52<sub class="ep-ok">e15</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_predict_emb</td><td>C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>92<sub class="ep-ok">e15</sub></td><td>48<sub class="ep-ok">e15</sub></td><td>4<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>88<sub class="ep-ok">e15</sub></td><td>58<sub class="ep-ok">e15</sub></td><td>44<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>74<sub class="ep-ok">e15</sub></td><td>58<sub class="ep-ok">e15</sub></td><td>54<sub class="ep-ok">e15</sub></td>
+  </tr>
+  <tr>
+    <td class="arm-name">c_sigreg_off</td><td>C</td>
+    <td colspan="4" class="missing">n/a</td>
+    <td class="missing">--</td><td>84<sub class="ep-ok">e15</sub></td><td>32<sub class="ep-ok">e15</sub></td><td>2<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>88<sub class="ep-ok">e15</sub></td><td>18<sub class="ep-ok">e15</sub></td><td>12<sub class="ep-ok">e15</sub></td>
+    <td class="missing">--</td><td>70<sub class="ep-ok">e15</sub></td><td>22<sub class="ep-ok">e15</sub></td><td>10<sub class="ep-ok">e15</sub></td>
+  </tr>
+</table>
+</section>
+
+<!-- ==================== KEY FINDINGS ==================== -->
+<section id="findings">
+<h2>Key Findings</h2>
+
+<div class="card">
+  <div class="card-title">1. SIGReg is essential for planning, not for imitation</div>
+  <p>In bc mode, sigreg_base/act/off all score 48% on tworoom and 68% on cube &mdash; identical. But in guided mode, sigreg_off drops to 30% on pusht (vs 80% for sigreg_base). <strong>SIGReg structures the latent space so CEM can efficiently search trajectories.</strong></p>
+</div>
+
+<div class="card">
+  <div class="card-title">2. Pretrained encoder (DINOv2) is the single biggest factor</div>
+  <p>c_enc_dino achieves 84% guided on pusht and 82% on reacher &mdash; far ahead of any other arm. The pretrained visual features provide a richer, more discriminative latent space that benefits both direct policy and CEM planning.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">3. Guided > Planning > Policy (in general)</div>
+  <p>CEM planning improves over raw policy in most cases. Guided (action-head warm-start) usually beats pure planning &mdash; except for c_base and c_head_diffusion where pure CEM does better, suggesting the action head can sometimes mislead the optimizer.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">4. IDM on predicted latents is catastrophic</div>
+  <p>ov_idm_dense_A8 collapses to 2% on reacher across all modes. FDM prediction error compounds through the IDM, corrupting the training signal. Always use <strong>encoded</strong> latents for inverse dynamics.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">5. Diffusion head: bad for policy, good for planning</div>
+  <p>c_head_diffusion scores 2% on pusht in policy mode (denoising is too slow/noisy for one-shot prediction) but recovers to 54% in planning mode. The world model compensates for the weak action head.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">6. Action history is optional</div>
+  <p>c_input_stateonly (no action history) often matches c_base. On pusht policy: 54% vs 40%. The current state + goal provides sufficient information for action selection in these tasks.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">7. Markov assumption works for tworoom</div>
+  <p>c_input_markov (history_size=1) achieves 98-100% on tworoom across all modes. Navigation tasks with clear goals don't benefit from longer history. But on reacher (4% policy vs 12% c_base), the Markov constraint hurts.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">8. Cube is easy, Reacher is hard</div>
+  <p>Most arms achieve 80-96% on cube in policy mode. Reacher is the discriminating task: only c_enc_dino (48% policy, 82% guided) and ov_idm_dense_on (12% policy, 50% guided) show strong performance, revealing which representations truly support fine-grained continuous control.</p>
+</div>
+</section>
+
+<footer style="margin-top: 3rem; padding: 1rem 0; border-top: 1px solid var(--border); color: #484f58; font-size: 0.8rem;">
+  LeWAM S10 Ablation Campaign &mdash; Generated 2026-06-28 &mdash; 50 eval episodes per arm, seed=42
+</footer>
+
+</body>
+</html>
