@@ -1,0 +1,8 @@
+# Merged world-action model: the action head shares the forward-dynamics ARPredictor
+# backbone (one transformer, two readout heads) instead of a separate action_predictor.
+# Inherits everything from lewm.yaml and only swaps the model class -- equivalent to the
+# CLI override  model._target_=lewam.models.jepa_merged.MergedJEPA .
+defaults:
+  - lewm
+  - _self_
+_target_: lewam.models.jepa_merged.MergedJEPA

@@ -130,3 +130,12 @@ The wedge vs OURS: OURS conditions on the latent **history** $z_{\le t}$ + past 
 | **GC-IDM baseline** (Markov, frozen) | `scripts/train_gcidm.py` | $\lVert G_\eta([z_t\Vert z_g],\bar h) - a\rVert^2$ |
 
 All flags are byte-identical no-ops when left at default, so each row is exactly the row above **plus one term/input** — that is the whole design.
+
+### Merged backbone (architecture variant)
+
+`model=lewm_merged` (or `model._target_=lewam.models.jepa_merged.MergedJEPA`) ties the action
+predictor to the forward-dynamics predictor: **one shared `ARPredictor` backbone** feeds both
+readout heads (`pred_proj` → $z_{t+1}$, `action_decoder` → $a_t$), instead of two separate
+transformers. The two AdaLN conditioning modes ($a_{\le t}$ for dynamics, $a_{<t}+z_g+\bar h$ for
+the action) are unchanged. Same losses; ~one `ARPredictor` fewer parameters (~11 M at vit-tiny).
+It is an ablation vs the default separate-backbone runs, and every setting above composes with it.
