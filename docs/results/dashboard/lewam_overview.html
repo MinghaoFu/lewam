@@ -104,7 +104,18 @@
 
   <section id="speed"><h2><span class="n">3</span>Speed &amp; efficiency</h2>
     <div class="cap">Measured on one A100, tworoom, batch as noted. Ours (LeWM-style DataLoader) matches LeWM per-step; the fast loader is 1.81× the old synchronous path; the consistency loss adds only ~1%.</div>
-    <div class="grid4" id="speedgrid" style="grid-template-columns:repeat(3,1fr)"></div></section>
+    <div class="grid4" id="speedgrid" style="grid-template-columns:repeat(3,1fr)"></div>
+    <h2 style="margin-top:22px;font-size:15px">Inference: LeWM CEM planning vs our reactive policy</h2>
+    <div class="cap">Wall-clock per eval seed (50 episodes, parallel envs, A100), steady-state seeds (first seed excluded — it includes process + checkpoint load). Same protocol both sides; timestamps from the run heartbeats.
+      Per <i>decision</i> the gap is architectural: CEM = 300 samples × 30 iterations × 5-step world-model rollout ≈ <b>45,000 predictor forwards per replan</b>; ours = <b>1 forward</b> (encode obs+goal → action).</div>
+    <table style="max-width:760px">
+      <tr><th>Task</th><th>CEM planning (s / 50 ep)</th><th>Reactive, ours (s / 50 ep)</th><th>Wall-clock ×</th><th>Note</th></tr>
+      <tr><td>Two-Room</td><td>91</td><td class="hl">48</td><td class="up">1.9×</td><td></td></tr>
+      <tr><td>Reacher</td><td>155</td><td class="hl">105</td><td class="up">1.5×</td><td></td></tr>
+      <tr><td>Push-T</td><td>124</td><td class="hl">71</td><td class="up">1.7×</td><td></td></tr>
+      <tr><td>OGBench-Cube</td><td>228</td><td>245</td><td>≈1×</td><td class="dim">sim/render-bound; policy compute is not the bottleneck</td></tr>
+    </table>
+    <div class="cap" style="margin-top:8px">Wall-clock folds in env stepping + rendering and episode length (episodes terminate at goal, so SR changes duration) — that is why the end-to-end gap is modest while the per-decision compute gap is ~4 orders of magnitude. On a contended GPU the difference explodes: CEM needed 30+ min for 5 cube episodes on a busy pod, while the reactive policy is a single forward pass per step.</div></section>
 
   <section id="cyc"><h2><span class="n">4</span>Why the consistency loss makes no difference</h2>
     <div class="cap">Final-epoch losses. Final-epoch losses, LeWAM without (w/o) vs with (w/) the consistency loss. Adding it changes act/dyn by &lt;2% — near-parallel to the dynamics loss, can't fix multimodal actions — so the policy lands in the same place.</div>
