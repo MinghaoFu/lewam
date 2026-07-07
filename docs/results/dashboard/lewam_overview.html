@@ -115,7 +115,17 @@
       <tr><td>Push-T</td><td>124</td><td class="hl">71</td><td class="up">1.7×</td><td></td></tr>
       <tr><td>OGBench-Cube</td><td>228</td><td>245</td><td>≈1×</td><td class="dim">sim/render-bound; policy compute is not the bottleneck</td></tr>
     </table>
-    <div class="cap" style="margin-top:8px">Wall-clock folds in env stepping + rendering and episode length (episodes terminate at goal, so SR changes duration) — that is why the end-to-end gap is modest while the per-decision compute gap is ~4 orders of magnitude. On a contended GPU the difference explodes: CEM needed 30+ min for 5 cube episodes on a busy pod, while the reactive policy is a single forward pass per step.</div></section>
+    <div class="cap" style="margin-top:8px">Wall-clock folds in env stepping + rendering and episode length (episodes terminate at goal, so SR changes duration) — that is why the end-to-end gap is modest while the per-decision compute gap is ~4 orders of magnitude. On a contended GPU the difference explodes: CEM needed 30+ min for 5 cube episodes on a busy pod, while the reactive policy is a single forward pass per step.</div>
+    <h2 style="margin-top:22px;font-size:15px">Per-decision benchmark (measured) &amp; the GC-IDM paper's claim</h2>
+    <div class="cap">Our benchmark: L40S, real trained <code>can</code> checkpoints, fp32, batch=1, ≥100 timed reps with CUDA syncs; FLOPs via fvcore (contention-free, the clean number). Full details: <code>docs/EXPERIMENTS.md §SPEED</code>.</div>
+    <table style="max-width:820px">
+      <tr><th>method</th><th>ms / action</th><th>GFLOPs / action</th><th>× faster vs CEM (wall)</th><th>× fewer FLOPs</th></tr>
+      <tr><td class="hl">LeWAM-GC (ours, planning-free)</td><td class="hl">15–18</td><td class="hl">2.87</td><td class="up">90–132×</td><td class="up">1104×</td></tr>
+      <tr><td>GC-IDM (Markovian, planning-free)</td><td>~18</td><td>5.60</td><td>88–112×</td><td>565×</td></tr>
+      <tr><td>DP/LDP diffusion head (K=50)</td><td>44–62</td><td>3.77</td><td>26–39×</td><td>840×</td></tr>
+      <tr><td class="dim">CEM planning (300×30×5 = 45,000 forwards)</td><td class="dim">1590–1980</td><td class="dim">3165</td><td class="dim">1×</td><td class="dim">1×</td></tr>
+    </table>
+    <div class="cap" style="margin-top:8px"><b>Cross-check vs the GC-IDM paper</b> (arXiv 2605.08732): they report a <b>100–130× planning-cost reduction</b> vs CEM (104–130× per plan call, already amortized over CEM's 25-action commit window; 103–134× vs iCEM, 29–34× vs MPPI, 2.0–2.4× vs GradientSolver; ~40× per-episode wall on Two-Room), replacing their 9,000-rollout CEM loop with one forward. Our independent measurement of the same policy — <b>88–112× wall, 565× FLOPs</b> — brackets their claim (ours ran under 100% GPU contention). LeWAM-GC is additionally <b>~2× cheaper than GC-IDM per decision</b> (2.87 vs 5.60 GFLOPs): GC-IDM re-encodes both z_t and z_goal every step, while ours encodes only the one new frame and caches the history latents.</div></section>
 
   <section id="cyc"><h2><span class="n">4</span>Why the consistency loss makes no difference</h2>
     <div class="cap">Final-epoch losses. Final-epoch losses, LeWAM without (w/o) vs with (w/) the consistency loss. Adding it changes act/dyn by &lt;2% — near-parallel to the dynamics loss, can't fix multimodal actions — so the policy lands in the same place.</div>
