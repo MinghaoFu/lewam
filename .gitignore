@@ -28,3 +28,6 @@ venv/
 # ── media (re-downloadable / regenerable) ──
 *.mp4
 docs/proposal/papers/
+
+# Overleaf paper clone (its own git repo; managed via git.overleaf.com, not this repo)
+/overleaf/

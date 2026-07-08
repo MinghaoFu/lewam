@@ -13,7 +13,7 @@
 - **Results**: `outputs/ckpts/` — §10 campaign `lewam_gc_v1/v2/v3`, baselines `gcidm_scratch_v2`,
   `lewm_repro`, merged-backbone series `merged_wam(2)/baseline_wam/merged_mode_wam`.
   Dashboard: `docs/results/dashboard/index.html`.
-- **Paper (Overleaf)**: clone at `~/lewam_project/overleaf/` ⇄ https://git.overleaf.com/6a4dc8458ed014fea0608a21
+- **Paper (Overleaf)**: clone at `~/lewam/overleaf/` ⇄ https://git.overleaf.com/6a4dc8458ed014fea0608a21
   (branch `main`; username literally `git`, password = Overleaf token from the credential store).
 
 ## Git identity — HARD RULE
