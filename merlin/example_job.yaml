@@ -1,0 +1,30 @@
+caption: 'merged WAM v2: cap-robust train+eval, 4 tasks (bg ckpt-sync)'
+jobDefVersion:
+  entrypointMode: FULL_SCRIPT
+  gitRepo: {mnt: /opt/tiger/lewam_job}
+  imageMeta: {imageSource: url, imageUrl: aliyun-va-hub.byted.org/arnold/modelchef-gpu:1.0.0.48}
+  lazyDownloadCode: false
+  name: 'merged WAM v2'
+  resource:
+    arnoldConfig:
+      clusterId: 4
+      elasticTraining: {}
+      groupIds: [62]
+      keepMins: 30
+      preemptible: false
+      quotaPool: default
+      hdfsVolumes:
+        - {accessMode: RO, mnt: /mnt/hdfs/adalgo_compliance/public, path: hdfs://harunava/home/byte_arnold_va_ssd_adalgo/compliance/public}
+        - {accessMode: RW, mnt: /mnt/hdfs/byte_ad_audit/bi_algorithm, path: hdfs://harunava/home/byte_ad_audit/bi_algorithm}
+        - {accessMode: RO, mnt: /mnt/hdfs/bi_algo_a2f, path: hdfs://harunava/home/byte_arnold_va_ssd/bi_algo_a2f}
+      roles:
+        - {cpu: 48, gpu: 4, gpuv: A100-SXM-80GB, memory: 400000, name: worker, num: 1, ports: 1, queueName: compute-334-aliyun.va-cloudnative-ai-bi.algorithm-guarantee}
+    backend: ARNOLD
+jobRunParams:
+  entrypointFullScript: |
+    set -ex
+    mkdir -p /opt/tiger/lewam_job && cd /opt/tiger/lewam_job
+    cp /mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/code/merged_wam_v2.sh .
+    bash merged_wam_v2.sh
+  envsList: {}
+namespace: /user/minghao.fu
