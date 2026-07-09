@@ -59,7 +59,7 @@ def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224,
     Mirrors train.py's init_from path so z = encode({pixels})['emb'][:,0] is the
     exact LeWM latent. Encoder/projector frozen; action_encoder kept for key match."""
     model_cfg = OmegaConf.create({
-        "_target_": "jepa.JEPA",
+        "_target_": "lewam.models.jepa.JEPA",
         "use_action_history": True,
         "use_proprio": False,
         "encoder": {
@@ -68,20 +68,20 @@ def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224,
             "pretrained": False, "use_mask_token": False,
         },
         "predictor": {
-            "_target_": "module.ARPredictor",
+            "_target_": "lewam.models.module.ARPredictor",
             "num_frames": history_size, "input_dim": embed_dim, "hidden_dim": embed_dim,
             "output_dim": embed_dim, "depth": 6, "heads": 16, "mlp_dim": 2048,
             "dim_head": 64, "dropout": 0.1, "emb_dropout": 0.0,
         },
         "action_encoder": {
-            "_target_": "module.Embedder", "input_dim": action_block_dim, "emb_dim": embed_dim,
+            "_target_": "lewam.models.module.Embedder", "input_dim": action_block_dim, "emb_dim": embed_dim,
         },
         "projector": {
-            "_target_": "module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
+            "_target_": "lewam.models.module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
             "hidden_dim": 2048, "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
         },
         "pred_proj": {
-            "_target_": "module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
+            "_target_": "lewam.models.module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
             "hidden_dim": 2048, "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
         },
     })
