@@ -220,32 +220,32 @@ def preload_frames(base, img_t, act_mean, act_std, frameskip, max_eps=None):
     return frame_list, act_list
 
 
-def flatten_for_training(frame_list, act_list, device):
-    """Build flat Frames tensor + per-sample index (t, action, max horizon, ep base)."""
-    offsets, Fs = [], []
-    off = 0
-    for f in frame_list:
-        offsets.append(off)
-        Fs.append(f)
-        off += f.shape[0]
-    Frames = torch.cat(Fs, dim=0).to(device)
-    t_gidx, maxh_list, ep_base_list, A = [], [], [], []
+def flatten_for_training(frame_list, act_list):
+    """Build the per-sample index (episode-local t, action, max horizon, episode id).
+
+    Frames are kept as the per-episode list (no ``torch.cat`` into one giant
+    contiguous tensor): concatenation transiently holds both the sources and the
+    result, doubling peak RAM (~2x the dataset) right at the point where several
+    big preloads coincide — the cause of repeated cgroup OOM-kills. Indexing into
+    the list is numerically identical: frame (ep, t) here == Frames[offset[ep]+t]
+    before. g = t+h and n = t+1 always fall inside the same episode (h <= maxh =
+    last-t), so a single episode id per sample is enough."""
+    t_local, ep_idx, maxh_list, A = [], [], [], []
     for ep, a in enumerate(act_list):
         n_obs = a.shape[0]
         n_fr = frame_list[ep].shape[0]
-        base = offsets[ep]
         last = n_fr - 1
         n_valid = min(n_obs, n_fr - 1)
         for t in range(n_valid):
-            t_gidx.append(base + t)
+            t_local.append(t)
+            ep_idx.append(ep)
             maxh_list.append(last - t)
-            ep_base_list.append(base)
             A.append(a[t])
-    return (Frames,
+    return (frame_list,
             torch.stack(A, dim=0),
-            torch.tensor(t_gidx, dtype=torch.long),
-            torch.tensor(maxh_list, dtype=torch.long),
-            torch.tensor(ep_base_list, dtype=torch.long))
+            torch.tensor(t_local, dtype=torch.long),
+            torch.tensor(ep_idx, dtype=torch.long),
+            torch.tensor(maxh_list, dtype=torch.long))
 
 
 # --------------------------------------------------------------------------- #
@@ -255,10 +255,11 @@ def flatten_for_training(frame_list, act_list, device):
 # clamped to the episode tail, goal at t+h, dynamics target at t+1.            #
 # --------------------------------------------------------------------------- #
 class FramePairDataset(Dataset):
-    def __init__(self, frames, a_flat, t_gidx, maxh, indices, h_max, ablate_horizon):
-        self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only
+    def __init__(self, frames_list, a_flat, t_local, ep_idx, maxh, indices, h_max, ablate_horizon):
+        self.frames_list = frames_list  # list of [n_fr_ep,3,H,W] fp16, CPU, shared read-only
         self.a_flat = a_flat          # [M,adim] fp16, CPU
-        self.t_gidx = t_gidx          # [M] long
+        self.t_local = t_local        # [M] long — t within its episode
+        self.ep_idx = ep_idx          # [M] long — episode id
         self.maxh = maxh              # [M] long
         self.indices = indices        # [K] long — train or val subset
         self.h_max = int(h_max)
@@ -269,17 +270,19 @@ class FramePairDataset(Dataset):
 
     def __getitem__(self, i):
         idx = int(self.indices[i])
-        ti = int(self.t_gidx[idx])
+        ep = int(self.ep_idx[idx])
+        t = int(self.t_local[idx])
         mh = int(self.maxh[idx])
         h = int(torch.randint(1, self.h_max + 1, (1,)).item())
         if h > mh:
             h = mh
         if h < 1:
             h = 1
-        gi = ti + h
-        ni = ti + 1  # == min(ti+1, ti+mh) since mh >= 1
+        g = t + h
+        n = t + 1  # == min(t+1, t+mh) since mh >= 1
+        fe = self.frames_list[ep]  # [n_fr_ep,3,H,W]; g,n stay inside this episode
         # stack [t, g, n] so collate -> [B,3,3,H,W]; kept fp16 to halve H2D bytes
-        trip = torch.stack([self.frames[ti], self.frames[gi], self.frames[ni]], dim=0)
+        trip = torch.stack([fe[t], fe[g], fe[n]], dim=0)
         a_t = self.a_flat[idx]
         h_norm = 0.0 if self.ablate_horizon else min(h, self.h_max) / self.h_max
         return trip, a_t, h_norm
@@ -370,11 +373,11 @@ def main():
     # ---- data ----
     frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
                                           frameskip, max_eps=max_eps)
-    Frames, A_flat, t_gidx, maxh, ep_base = flatten_for_training(
-        frame_list, act_list, "cpu")
-    del frame_list
-    n_samples = t_gidx.shape[0]
-    print(f"[lewam-gc] frames={Frames.shape} samples={n_samples}", flush=True)
+    frames_list, A_flat, t_local, ep_idx, maxh = flatten_for_training(
+        frame_list, act_list)
+    n_frames = sum(f.shape[0] for f in frames_list)
+    n_samples = t_local.shape[0]
+    print(f"[lewam-gc] frames={n_frames} (over {len(frames_list)} eps) samples={n_samples}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_samples, generator=g)
@@ -385,9 +388,9 @@ def main():
           f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders (overlap CPU gather + pinning with GPU compute) ----
-    train_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, train_idx,
+    train_ds = FramePairDataset(frames_list, A_flat, t_local, ep_idx, maxh, train_idx,
                                 args.H_max, args.ablate_horizon)
-    val_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, val_idx,
+    val_ds = FramePairDataset(frames_list, A_flat, t_local, ep_idx, maxh, val_idx,
                               args.H_max, args.ablate_horizon)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
