@@ -86,6 +86,14 @@ def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224,
         },
     })
     model = hydra_instantiate(model_cfg)
+    if weights_path in (None, "self", "scratch"):
+        # end-to-end / from-scratch model: the encoder weights live in the caller's
+        # full-model checkpoint (loaded by load_gcidm_model), not a separate frozen
+        # file. Here we only build the architecture.
+        model.requires_grad_(False)
+        model.eval()
+        model.interpolate_pos_encoding = True
+        return model
     sd = torch.load(weights_path, map_location="cpu", weights_only=False)
     if isinstance(sd, dict) and "state_dict" in sd:
         sd = sd["state_dict"]

@@ -351,6 +351,20 @@ def load_gcidm_model(run_name):
         gcfg["weights"], embed_dim=int(gcfg["emb_dim"]), history_size=3,
         img_size=224, action_block_dim=int(gcfg["action_dim"]),
     )
+    # end-to-end (from-scratch) model: the encoder was trained jointly with the head,
+    # so its weights are in the full-model checkpoint under "encoder.*", not a frozen
+    # file. build_frozen_lewm built the arch only; load the trained encoder here.
+    if gcfg.get("from_scratch") or gcfg.get("weights") == "self":
+        full_pt = run_dir / "gcidm_full_model_best.pt"
+        if not full_pt.exists():
+            full_pt = run_dir / "gcidm_full_model_latest.pt"
+        assert full_pt.exists(), f"no gcidm_full_model_*.pt in {run_dir}"
+        full = torch.load(full_pt, map_location="cpu", weights_only=False)
+        enc_sd = {k[len("encoder."):]: v for k, v in full.items() if k.startswith("encoder.")}
+        r = lewm.load_state_dict(enc_sd, strict=False)
+        assert not r.unexpected_keys, f"unexpected encoder keys: {r.unexpected_keys[:5]}"
+        print(f"[GCIDM] from_scratch encoder <- {full_pt.name}: "
+              f"loaded={len(enc_sd)} missing={len(r.missing_keys)}")
     head = _gcidm.GCIDMHead(
         emb_dim=int(gcfg["emb_dim"]), action_dim=int(gcfg["action_dim"]),
         hidden_dim=int(gcfg["hidden_dim"]), n_freqs=int(gcfg["n_freqs"]),
