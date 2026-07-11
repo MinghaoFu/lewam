@@ -9,6 +9,40 @@ def modulate(x, shift, scale):
     """AdaLN-zero modulation"""
     return x * (1 + scale) + shift
 
+
+def sinusoidal_embedding(h_norm, n_freqs=64):
+    """Sinusoidal embedding of a scalar in [0, 1]: log-spaced freqs, concat(sin, cos).
+    h_norm: (B,) float tensor. Returns (B, 2*n_freqs)."""
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(n_freqs, device=h_norm.device).float()
+        / max(n_freqs - 1, 1)
+    )
+    ang = h_norm.float()[:, None] * freqs[None, :]
+    return torch.cat([ang.sin(), ang.cos()], dim=-1)
+
+
+class AdaLNBlock(nn.Module):
+    """One MLP layer with AdaLN-Zero conditioning: LayerNorm (no affine) -> modulate
+    by (scale, shift) from `cond` -> Linear -> GELU -> Dropout. The (scale, shift)
+    projection is zero-initialized, so at init this block's conditioning is a no-op
+    (AdaLN-Zero)."""
+
+    def __init__(self, in_dim, out_dim, cond_dim, dropout=0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6)
+        self.cond_proj = nn.Linear(cond_dim, 2 * in_dim)
+        nn.init.zeros_(self.cond_proj.weight)
+        nn.init.zeros_(self.cond_proj.bias)
+        self.fc = nn.Linear(in_dim, out_dim)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, cond):
+        scale, shift = self.cond_proj(cond).chunk(2, dim=-1)
+        x = modulate(self.norm(x), shift, scale)
+        return self.drop(self.act(self.fc(x)))
+
+
 class SIGReg(torch.nn.Module):
     """Sketch Isotropic Gaussian Regularizer (single-GPU!)"""
 

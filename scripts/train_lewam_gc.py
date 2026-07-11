@@ -27,165 +27,16 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from omegaconf import OmegaConf
 
 torch.backends.cudnn.benchmark = True  # fixed 224x224 input, let cuDNN pick the conv algo
 
 import stable_worldmodel as swm
-from hydra.utils import instantiate as hydra_instantiate
 
 from lewam.utils import get_img_preprocessor, get_column_normalizer
-
-
-# --------------------------------------------------------------------------- #
-# Sinusoidal embedding (shared by GCHead and HorizonModulator)                #
-# --------------------------------------------------------------------------- #
-def _sinusoidal_embedding(h_norm, n_freqs=64):
-    freqs = torch.exp(
-        -math.log(10000.0) * torch.arange(n_freqs, device=h_norm.device).float()
-        / max(n_freqs - 1, 1)
-    )
-    ang = h_norm.float()[:, None] * freqs[None, :]
-    return torch.cat([ang.sin(), ang.cos()], dim=-1)
-
-
-# --------------------------------------------------------------------------- #
-# AdaLN-Zero block                                                            #
-# --------------------------------------------------------------------------- #
-class AdaLNBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, cond_dim, dropout=0.1):
-        super().__init__()
-        self.norm = nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6)
-        self.cond_proj = nn.Linear(cond_dim, 2 * in_dim)
-        nn.init.zeros_(self.cond_proj.weight)
-        nn.init.zeros_(self.cond_proj.bias)
-        self.fc = nn.Linear(in_dim, out_dim)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x, cond):
-        scale, shift = self.cond_proj(cond).chunk(2, dim=-1)
-        x = self.norm(x) * (1 + scale) + shift
-        return self.drop(self.act(self.fc(x)))
-
-
-# --------------------------------------------------------------------------- #
-# GC action head                                                              #
-# --------------------------------------------------------------------------- #
-class GCHead(nn.Module):
-    """cat[z_t, z_goal] -> 3 AdaLN blocks -> action."""
-
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
-                 n_freqs=64, cond_dim=128, dropout=0.1):
-        super().__init__()
-        self.n_freqs = n_freqs
-        in_dim = 2 * z_dim
-        sin_dim = 2 * n_freqs
-        self.horizon_mlp = nn.Sequential(
-            nn.Linear(sin_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        self.block1 = AdaLNBlock(in_dim, hidden_dim, cond_dim, dropout)
-        self.block2 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
-        self.block3 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
-        self.out = nn.Linear(hidden_dim, action_dim)
-
-    def forward(self, z_t, z_goal, h_norm):
-        x = torch.cat([z_t, z_goal], dim=-1)
-        cond = self.horizon_mlp(_sinusoidal_embedding(h_norm, self.n_freqs))
-        x = self.block1(x, cond)
-        x = self.block2(x, cond)
-        x = self.block3(x, cond)
-        return self.out(x)
-
-
-# --------------------------------------------------------------------------- #
-# Goal-conditioned dynamics predictor                                          #
-# --------------------------------------------------------------------------- #
-class GoalCondDynamics(nn.Module):
-    """cat[z_t, a_t, z_goal] -> z_{t+1}."""
-
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512):
-        super().__init__()
-        in_dim = 2 * z_dim + action_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, z_dim),
-        )
-
-    def forward(self, z_t, a_t, z_goal):
-        return self.net(torch.cat([z_t, a_t, z_goal], dim=-1))
-
-
-# --------------------------------------------------------------------------- #
-# SIGReg (anti-collapse regularizer)                                           #
-# --------------------------------------------------------------------------- #
-class SIGReg(nn.Module):
-    def __init__(self, knots=17, num_proj=1024):
-        super().__init__()
-        self.num_proj = num_proj
-        t = torch.linspace(0, 3, knots, dtype=torch.float32)
-        dt = 3 / (knots - 1)
-        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
-        weights[[0, -1]] = dt
-        window = torch.exp(-t.square() / 2.0)
-        self.register_buffer("t", t)
-        self.register_buffer("phi", window)
-        self.register_buffer("weights", weights * window)
-
-    def forward(self, proj):
-        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
-        A = A.div_(A.norm(p=2, dim=0))
-        x_t = (proj @ A).unsqueeze(-1) * self.t
-        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
-        statistic = (err @ self.weights) * proj.size(-2)
-        return statistic.mean()
-
-
-# --------------------------------------------------------------------------- #
-# Encoder builder (random-init ViT-tiny JEPA)                                  #
-# --------------------------------------------------------------------------- #
-def build_encoder(embed_dim=192, img_size=224, action_block_dim=25):
-    cfg = OmegaConf.create({
-        "_target_": "lewam.models.jepa.JEPA",
-        "use_action_history": True, "use_proprio": False,
-        "encoder": {
-            "_target_": "stable_pretraining.backbone.utils.vit_hf",
-            "size": "tiny", "patch_size": 14, "image_size": img_size,
-            "pretrained": False, "use_mask_token": False,
-        },
-        "predictor": {
-            "_target_": "lewam.models.module.ARPredictor", "num_frames": 3,
-            "input_dim": embed_dim, "hidden_dim": embed_dim, "output_dim": embed_dim,
-            "depth": 6, "heads": 16, "mlp_dim": 2048, "dim_head": 64,
-            "dropout": 0.1, "emb_dropout": 0.0,
-        },
-        "action_encoder": {
-            "_target_": "lewam.models.module.Embedder", "input_dim": action_block_dim,
-            "emb_dim": embed_dim,
-        },
-        "projector": {
-            "_target_": "lewam.models.module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
-            "hidden_dim": 2048,
-            "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
-        },
-        "pred_proj": {
-            "_target_": "lewam.models.module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
-            "hidden_dim": 2048,
-            "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
-        },
-    })
-    model = hydra_instantiate(cfg)
-    model.interpolate_pos_encoding = True
-    n_enc = sum(p.numel() for p in model.encoder.parameters())
-    print(f"[lewam-gc] encoder (random init): {n_enc:,} params")
-    return model
+from lewam.models.module import SIGReg
+from lewam.models.lewam_split import LeWAMSplit
 
 
 # --------------------------------------------------------------------------- #
@@ -352,18 +203,15 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     max_eps = args.max_eps or None
 
-    # ---- build models ----
-    lewm = build_encoder(embed_dim=192, img_size=args.img_size,
-                         action_block_dim=action_block_dim).to(device)
-    gc_head = GCHead(z_dim=192, action_dim=action_block_dim,
-                     hidden_dim=args.hidden_dim, dropout=0.1).to(device)
-    dynamics = GoalCondDynamics(z_dim=192, action_dim=action_block_dim,
-                                hidden_dim=args.hidden_dim).to(device)
+    # ---- build model ----
+    model = LeWAMSplit(embed_dim=192, action_dim=action_block_dim,
+                                   hidden_dim=args.hidden_dim, img_size=args.img_size,
+                                   dropout=0.1).to(device)
     sigreg = SIGReg().to(device)
 
-    n_enc = sum(p.numel() for p in lewm.encoder.parameters())
-    n_head = sum(p.numel() for p in gc_head.parameters())
-    n_dyn = sum(p.numel() for p in dynamics.parameters())
+    n_enc = sum(p.numel() for p in model.encoder.parameters())
+    n_head = sum(p.numel() for p in model.gc_head.parameters())
+    n_dyn = sum(p.numel() for p in model.dynamics.parameters())
     print(f"[lewam-gc] encoder={n_enc/1e6:.2f}M  gc_head={n_head/1e6:.2f}M  "
           f"dynamics={n_dyn/1e6:.2f}M  total={(n_enc+n_head+n_dyn)/1e6:.2f}M", flush=True)
 
@@ -402,11 +250,11 @@ def main():
           f"prefetch={args.prefetch_factor} pin_memory=True", flush=True)
 
     # ---- optimizer: 3 param groups ----
-    enc_params = list(lewm.encoder.parameters()) + list(lewm.projector.parameters())
+    enc_params = list(model.encoder.parameters())
     opt = torch.optim.AdamW([
         {"params": enc_params, "lr": args.encoder_lr},
-        {"params": gc_head.parameters(), "lr": args.head_lr},
-        {"params": dynamics.parameters(), "lr": args.dynamics_lr},
+        {"params": model.gc_head.parameters(), "lr": args.head_lr},
+        {"params": model.dynamics.parameters(), "lr": args.dynamics_lr},
     ], weight_decay=args.weight_decay)
 
     total_epochs = args.epochs
@@ -433,13 +281,12 @@ def main():
 
     # ---- training loop ----
     best_val = float("inf")
-    all_params = enc_params + list(gc_head.parameters()) + list(dynamics.parameters())
 
     for ep in range(args.epochs):
         t0 = time.time()
 
         # ---- train ----
-        lewm.train(); gc_head.train(); dynamics.train()
+        model.train()
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
 
         for trip, a_t, h_norm in train_loader:
@@ -453,17 +300,15 @@ def main():
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 # encode all 3 frames in one pass
-                z_all = lewm.encode({"pixels": frames_all.unsqueeze(1)})["emb"][:, 0]
+                z_all = model.encode(frames_all)
                 z_t, z_g, z_n = z_all.chunk(3, dim=0)
                 z_t_f = z_t.float()
                 z_g_f = z_g.float()
                 z_n_f = z_n.float()
 
-                a_pred = gc_head(z_t_f, z_g_f, h_norm)
-                loss_act = F.mse_loss(a_pred, a_t)
-
                 # no stop-grad: the encoder also learns from the dynamics target
-                z_n_pred = dynamics(z_t_f, a_t, z_g_f)
+                a_pred, z_n_pred = model(z_t_f, z_g_f, h_norm, a_t)
+                loss_act = F.mse_loss(a_pred, a_t)
                 loss_dyn = F.mse_loss(z_n_pred, z_n_f)
 
                 loss_reg = sigreg(z_t_f.unsqueeze(0))
@@ -475,13 +320,13 @@ def main():
                 # consistency: the predicted action through dynamics should reach z_n
                 loss_cyc = torch.tensor(0.0, device=device)
                 if args.w_cyc > 0:
-                    z_n_cyc = dynamics(z_t_f, a_pred, z_g_f)
+                    z_n_cyc = model.dynamics(z_t_f, a_pred, z_g_f)
                     loss_cyc = F.mse_loss(z_n_cyc, z_n_f.detach())
                     loss = loss + args.w_cyc * loss_cyc
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
             tr_act += loss_act.item() * n
@@ -493,7 +338,7 @@ def main():
         sched.step()
 
         # ---- val ----
-        lewm.eval(); gc_head.eval(); dynamics.eval()
+        model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
             for trip, a_t, h_norm in val_loader:
@@ -504,14 +349,12 @@ def main():
                 frames_all = trip.permute(1, 0, 2, 3, 4).reshape(3 * n, *trip.shape[2:]).float()
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    z_all = lewm.encode({"pixels": frames_all.unsqueeze(1)})["emb"][:, 0]
+                    z_all = model.encode(frames_all)
                     z_t, z_g, z_n = z_all.chunk(3, dim=0)
                     z_t_f, z_g_f, z_n_f = z_t.float(), z_g.float(), z_n.float()
 
-                    a_pred = gc_head(z_t_f, z_g_f, h_norm)
+                    a_pred, z_n_pred = model(z_t_f, z_g_f, h_norm, a_t)
                     loss_act = F.mse_loss(a_pred, a_t)
-
-                    z_n_pred = dynamics(z_t_f, a_t, z_g_f)
                     loss_dyn = F.mse_loss(z_n_pred, z_n_f)
 
                 va_act += loss_act.item() * n
@@ -532,21 +375,23 @@ def main():
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
+        # key prefixes (encoder./gc_head./dynamics.) are load-bearing: eval_lewam_gc.sh
+        # remaps them into the gcidm checkpoint format.
         full_sd = {}
-        for k, v in lewm.state_dict().items():
+        for k, v in model.encoder.state_dict().items():
             full_sd[f"encoder.{k}"] = v
-        for k, v in gc_head.state_dict().items():
+        for k, v in model.gc_head.state_dict().items():
             full_sd[f"gc_head.{k}"] = v
-        for k, v in dynamics.state_dict().items():
+        for k, v in model.dynamics.state_dict().items():
             full_sd[f"dynamics.{k}"] = v
         torch.save(full_sd, run_dir / "lewam_gc_latest.pt")
-        torch.save(gc_head.state_dict(), run_dir / "gc_head_latest.pt")
+        torch.save(model.gc_head.state_dict(), run_dir / "gc_head_latest.pt")
 
         combined_val = va_a + va_d
         if combined_val < best_val:
             best_val = combined_val
             torch.save(full_sd, run_dir / "lewam_gc_best.pt")
-            torch.save(gc_head.state_dict(), run_dir / "gc_head_best.pt")
+            torch.save(model.gc_head.state_dict(), run_dir / "gc_head_best.pt")
 
     print(f"[lewam-gc] DONE  best_val={best_val:.5f}  saved -> {run_dir}", flush=True)
 

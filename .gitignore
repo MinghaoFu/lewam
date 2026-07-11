@@ -25,6 +25,7 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+.vscode
 # ── media (re-downloadable / regenerable) ──
 *.mp4
 docs/proposal/papers/

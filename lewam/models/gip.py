@@ -29,7 +29,7 @@ import stable_pretraining as spt
 import stable_worldmodel as swm
 from hydra.utils import instantiate as hydra_instantiate
 from stable_worldmodel.policy import BasePolicy
-from stable_worldmodel.wm.utils import get_cache_dir
+from stable_worldmodel.data.utils import get_cache_dir
 
 from lewam.models.module import MLP
 
