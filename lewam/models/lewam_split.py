@@ -12,10 +12,8 @@ Anti-collapse regularization on the encoder latent is SIGReg (also from `module`
 
 import torch
 from torch import nn
-from stable_pretraining.backbone.utils import vit_hf
 
-from lewam.models.module import AdaLNBlock, MLP, sinusoidal_embedding
-
+from lewam.models.module import AdaLNBlock, sinusoidal_embedding, ViTEncoder
 
 class GCHead(nn.Module):
     """cat[z_t, z_goal] -> 3 AdaLN blocks -> action."""
@@ -62,30 +60,15 @@ class GoalCondDynamics(nn.Module):
         return self.net(torch.cat([z_t, a_t, z_goal], dim=-1))
 
 
-class ViTEncoder(nn.Module):
-    """ViT encoder + BN-MLP projector -> [CLS] latent"""
-
-    def __init__(self, size="tiny", output_dim=192, img_size=224):
-        super().__init__()
-        self.vit = vit_hf(size=size, patch_size=14, image_size=img_size,
-                              pretrained=False, use_mask_token=False)
-        self.projector = MLP(input_dim=self.vit.config.hidden_size, output_dim=output_dim,
-                             hidden_dim=2048, norm_fn=nn.BatchNorm1d)
-
-    def forward(self, pixels):
-        """pixels: (N, 3, H, W) -> (N, embed_dim) cls latent."""
-        out = self.vit(pixels, interpolate_pos_encoding=True)
-        return self.projector(out.last_hidden_state[:, 0])
-
-
 class LeWAMSplit(nn.Module):
     """Shared ViT encoder + two independent goal-conditioned heads on its
     latent: `gc_head` (action) and `dynamics` (next-latent prediction)."""
 
-    def __init__(self, embed_dim=192, action_dim=25, hidden_dim=512,
+    def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1):
         super().__init__()
-        self.encoder = ViTEncoder(output_dim=embed_dim, img_size=img_size)
+        self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
+                                  output_dim=embed_dim, img_size=img_size)
         self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
                               hidden_dim=hidden_dim, dropout=dropout)
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
