@@ -208,7 +208,11 @@ def rollout_loss(model, z, e, h_norm, z_goal, steps, closed_loop, stopgrad):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch_size", type=int, default=128)
+    ap.add_argument("--batch_size", type=int, default=64,
+                    help="the seq model encodes batch_size*num_frames frames/step, so this "
+                         "is ~num_frames x heavier than the split model -- keep it modest")
+    ap.add_argument("--grad_ckpt", action="store_true",
+                    help="gradient checkpointing on the ViT encoder (trades compute for memory)")
     ap.add_argument("--encoder_lr", type=float, default=1e-4)
     ap.add_argument("--lr", type=float, default=3e-4, help="predictor + heads + adapters lr")
     ap.add_argument("--weight_decay", type=float, default=1e-4)
@@ -280,6 +284,9 @@ def main():
     model = LeWAMSeq(act_dim=action_block_dim, img_size=args.img_size, embed_dim=192,
                      n_layers=args.n_layers, n_heads=args.n_heads, mlp_dim=args.mlp_dim,
                      num_frames=args.num_frames, head_hidden=args.head_hidden).to(device)
+    if args.grad_ckpt and hasattr(model.state_encoder.vit, "gradient_checkpointing_enable"):
+        model.state_encoder.vit.gradient_checkpointing_enable()
+        print("[lewam-seq] ViT gradient checkpointing ON", flush=True)
     sigreg = SIGReg().to(device)
     n_tot = sum(p.numel() for p in model.parameters())
     print(f"[lewam-seq] model={n_tot/1e6:.2f}M  nf={args.num_frames} action_block={action_block_dim}",
