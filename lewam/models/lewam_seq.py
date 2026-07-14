@@ -138,9 +138,14 @@ class LeWAMSeq(nn.Module):
 
     # -- Heads
     def _apply_action_head(self, h_act, h_norm, z_goal=None):
+        # h_norm is (B,) [one horizon per window, broadcast] OR (B,T) [per-position
+        # horizon]. Per-position is the correct training signal: each frame in the
+        # window is a different distance from the goal, and the rollout feeds the
+        # current frame's decreasing horizon -- a single broadcast value trains the
+        # earlier frames on the wrong horizon.
         b, t, d = h_act.shape
         zg = h_act.new_zeros(b, t, d) if z_goal is None else z_goal[:, None, :].expand(b, t, d)
-        hn = h_norm[:, None].expand(b, t).reshape(b * t)
+        hn = h_norm[:, None].expand(b, t).reshape(b * t) if h_norm.dim() == 1 else h_norm.reshape(b * t)
         a = self.action_head(h_act.reshape(b * t, d), zg.reshape(b * t, d), hn)
         return a.reshape(b, t, -1)
 
@@ -154,10 +159,12 @@ class LeWAMSeq(nn.Module):
         return self._apply_dynamics_head(h_next, z_goal)
 
     # -- Training (forward)
-    def forward(self, pixels, actions, h_norm, z_goal=None):
-        """pixels: (B,T,C,H,W), actions: (B,T,act_dim), h_norm: (B,),
+    def forward(self, pixels, actions, h_norm, z_goal=None, return_z=False):
+        """pixels: (B,T,C,H,W), actions: (B,T,act_dim), h_norm: (B,) or (B,T),
         z_goal: (B,embed_dim) or None. Returns a_pred (B,T,act_dim),
-        z_pred (B,T,embed_dim) predicting z_{t+1} (drop the last one, no target)."""
+        z_pred (B,T,embed_dim) predicting z_{t+1} (drop the last one, no target).
+        return_z=True also returns (z, e) so the trainer can build dynamics targets
+        (z[:,1:]) and the SIGReg term without re-encoding."""
         z = self.encode_frames(pixels)
         e = self.encode_actions(actions)
         seq = self.tokenize(z, e)
@@ -165,6 +172,8 @@ class LeWAMSeq(nn.Module):
         h_act, h_next = out[:, 0::2], out[:, 1::2]
         a_pred = self._apply_action_head(h_act, h_norm, z_goal)
         z_pred = self._apply_dynamics_head(h_next, z_goal)
+        if return_z:
+            return a_pred, z_pred, z, e
         return a_pred, z_pred
 
     # -- Planning / rollout
@@ -187,8 +196,11 @@ class LeWAMSeq(nn.Module):
               else z0.new_zeros(b, 0, z0.size(-1)))
         z_goal = self.state_encoder(goal_pixels)
 
-        z = z0.unsqueeze(1).expand(b, s, t0, -1).reshape(b * s, t0, -1).clone()
-        e_hist = e0.unsqueeze(1).expand(b, s, t0 - 1, -1).reshape(b * s, t0 - 1, -1).clone()
+        d = z0.size(-1)
+        z = z0.unsqueeze(1).expand(b, s, t0, -1).reshape(b * s, t0, d).clone()
+        # explicit last dim d: reshape(..., -1) is ambiguous on the 0-element tensor when
+        # t0 == 1 (cold start, no past actions) -> RuntimeError. d is always the embed dim.
+        e_hist = e0.unsqueeze(1).expand(b, s, t0 - 1, -1).reshape(b * s, t0 - 1, d).clone()
         e_cand = self.encode_actions(action_candidates.reshape(b * s, hz, -1))
         zg = z_goal.unsqueeze(1).expand(b, s, -1).reshape(b * s, -1)
 
