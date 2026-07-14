@@ -166,6 +166,35 @@ def load_gip_model(run_name, embed_dim=None, epoch=None):
     return model, adim
 
 
+def load_lewam_seq_model(run_name, which="best"):
+    """Load a trained LeWAM-Seq model (lewam.models.lewam_seq.LeWAMSeq) + its config.
+
+    Reads checkpoints/<run_name>/lewam_seq_config.json (arch dims + action z-score
+    stats: action_mean/std, frameskip, action_raw_dim) and lewam_seq_best.pt (or
+    lewam_seq_latest.pt when which='latest' or best is absent). Returns (model, cfg).
+    The trainer only writes best/latest (no per-epoch files)."""
+    from lewam.models.lewam_seq import LeWAMSeq
+
+    cache = Path(get_cache_dir(sub_folder="checkpoints"))
+    run_dir = cache / run_name
+    cfg = json.loads((run_dir / "lewam_seq_config.json").read_text())
+    model = LeWAMSeq(
+        act_dim=int(cfg["action_dim"]), img_size=224, embed_dim=int(cfg["embed_dim"]),
+        n_layers=int(cfg["n_layers"]), n_heads=int(cfg["n_heads"]), mlp_dim=int(cfg["mlp_dim"]),
+        num_frames=int(cfg["num_frames"]), head_hidden=int(cfg["head_hidden"]),
+    )
+    ckpt = run_dir / ("lewam_seq_latest.pt" if which == "latest" else "lewam_seq_best.pt")
+    if not ckpt.exists():
+        ckpt = run_dir / "lewam_seq_latest.pt"
+    assert ckpt.exists(), f"no lewam_seq_*.pt checkpoint in {run_dir}"
+    sd = torch.load(ckpt, map_location="cpu")
+    res = model.load_state_dict(sd, strict=True)
+    print(f"[SEQ] load {run_name} <- {ckpt.name}: nf={cfg['num_frames']} "
+          f"action_block={cfg['action_dim']} (raw {cfg['action_raw_dim']}x{cfg['frameskip']}) "
+          f"H_max={cfg['H_max']} missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
+    return model, cfg
+
+
 def attach_intention_actor(model, history_size=3, goal_conditioned=False):
     """Make a GIP model satisfy the Actionable protocol so CEM warm-starts from
     the intention. Binds get_action(info, horizon, prefix_actions) onto the
@@ -463,12 +492,188 @@ class GCIDMPolicy(BasePolicy):
         return action
 
 
+# LeWAM-Seq eval adapter (modes: seq_policy = get_action AR/BC; seq_cem = get_cost CEM)
+class LeWAMSeqPolicy(BasePolicy):
+    """Eval adapter for LeWAM-Seq (lewam.models.lewam_seq.LeWAMSeq).
+
+    Two planners share one sliding history buffer -- the last `num_frames` observed
+    obs-frames plus the z-scored action blocks emitted between them (exactly the
+    context the model saw in training):
+      plan_mode='policy'  ->  model.get_action (AR/BC): one goal-conditioned action
+                              block per replan straight from the action head; reactive
+                              receding-horizon (replan every obs-step on the real frame).
+      plan_mode='cem'     ->  CEM over model.get_cost: sample z-scored action-block
+                              sequences, roll them through the dynamics head, keep the
+                              lowest-cost elites, execute the best FIRST block (MPC).
+
+    Action normalization uses the model's OWN z-score (action_mean/std, frameskip,
+    action_raw_dim from lewam_seq_config.json): past-action blocks fed to the model
+    are z-scored, and the action head's z-scored output block is un-z-scored back to
+    raw env actions. The policy therefore ignores process['action'] (feeding it a
+    process would double-normalize) -- only `transform` (pixels/goal) is applied.
+
+    One replan == one obs-step == one action block == `action_block`(frameskip) env
+    steps. The horizon countdown (obs-steps to the goal frame, init horizon0 =
+    goal_offset/frameskip, decremented per replan, clamped >=1, fed as min(h,H_max)/H_max)
+    mirrors GCIDMPolicy so the head sees the same remaining-horizon signal as training.
+    """
+
+    def __init__(self, model, cfg, action_block, action_dim, plan_mode="policy",
+                 horizon0=None, H_max=50, process=None, transform=None,
+                 goal_conditioned=True, cem_horizon=5, cem_samples=256, cem_iters=3,
+                 cem_elites=32, **kw):
+        super().__init__(**kw)
+        self.type = f"lewam_seq_{plan_mode}"
+        self.model = model.eval()  # BN-in-projector -> eval() = deterministic running stats
+        self.cfg = cfg
+        self.num_frames = int(cfg["num_frames"])
+        self.frameskip = int(cfg["frameskip"])
+        self.raw_adim = int(cfg["action_raw_dim"])
+        self.block_dim = int(cfg["action_dim"])           # frameskip * raw_adim
+        self.H_max = int(cfg.get("H_max", H_max))
+        self.action_block = int(action_block)
+        self.action_dim = int(action_dim)                 # per-step raw dim = raw_adim
+        self.plan_mode = str(plan_mode)
+        self.goal_conditioned = bool(goal_conditioned)
+        self.horizon0 = float(horizon0) if horizon0 is not None else float(H_max)
+        self.transform = transform or {}
+        self.process = {}                                 # action un-norm handled internally
+        dev = next(model.parameters()).device
+        self._amean = torch.tensor(cfg["action_mean"], dtype=torch.float32, device=dev)  # (raw_adim,)
+        self._astd = torch.tensor(cfg["action_std"], dtype=torch.float32, device=dev).clamp_min(1e-6)
+        # CEM knobs (plan_mode='cem' only)
+        self.cem_horizon = int(cem_horizon); self.cem_samples = int(cem_samples)
+        self.cem_iters = int(cem_iters); self.cem_elites = int(cem_elites)
+        # per-env state (allocated in set_env)
+        self._action_buffer = None
+        self._frame_buf = None       # deque(maxlen=num_frames) of the last obs-frames (C,H,W)
+        self._pastblk_buf = None     # deque(maxlen=num_frames-1) of z-scored blocks (block_dim,)
+        self._steps_left = None
+
+    def set_env(self, env):
+        self.env = env
+        self._reset_bufs(getattr(env, "num_envs", 1))
+
+    def _reset_bufs(self, n):
+        self._action_buffer = [deque() for _ in range(n)]
+        self._frame_buf = [deque(maxlen=self.num_frames) for _ in range(n)]
+        self._pastblk_buf = [deque(maxlen=max(self.num_frames - 1, 0)) for _ in range(n)]
+        self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+
+    def _zscore(self, raw_block):
+        x = raw_block.reshape(self.frameskip, self.raw_adim)
+        return ((x - self._amean) / self._astd).reshape(-1)
+
+    def _unzscore(self, z_block):
+        x = z_block.reshape(self.frameskip, self.raw_adim)
+        return (x * self._astd + self._amean).reshape(-1)
+
+    @torch.no_grad()
+    def _cem_block(self, px_hist, past_actions, goal_px, h0):
+        """CEM over z-scored action-block sequences (train actions ~ N(0,1) -> N(0,1)
+        prior). Rolls candidates through model.get_cost, refits on the elites, returns
+        the best FIRST block (z-scored)."""
+        dev = next(self.model.parameters()).device
+        Hz, S, E = self.cem_horizon, self.cem_samples, self.cem_elites
+        mean = torch.zeros(Hz, self.block_dim, device=dev)
+        std = torch.ones(Hz, self.block_dim, device=dev)
+        for _ in range(self.cem_iters):
+            cand = mean[None] + std[None] * torch.randn(S, Hz, self.block_dim, device=dev)
+            cost = self.model.get_cost(px_hist, past_actions, cand.unsqueeze(0),
+                                       goal_px, history_size=self.num_frames)[0]   # (S,)
+            elite = cand[cost.topk(E, largest=False).indices]                      # (E,Hz,bd)
+            mean, std = elite.mean(0), elite.std(0).clamp_min(1e-3)
+        return mean[0]
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kw):
+        info_dict = self._prepare_info(info_dict)
+        n = self.env.num_envs
+        dev = next(self.model.parameters()).device
+        if self._action_buffer is None:
+            self._reset_bufs(n)
+
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(n):
+                if flush[i]:
+                    self._action_buffer[i].clear(); self._frame_buf[i].clear()
+                    self._pastblk_buf[i].clear(); self._steps_left[i] = self.horizon0
+
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
+
+        # one replan == one obs-step: push the current frame into the sliding window
+        cur_px = info_dict["pixels"]  # (n,T,C,H,W) or (n,C,H,W), preprocessed
+        for i in range(n):
+            if not dead[i] and len(self._action_buffer[i]) == 0:
+                fr = cur_px[i]
+                fr = fr[-1] if (hasattr(fr, "ndim") and fr.ndim == 4) else fr  # (C,H,W)
+                self._frame_buf[i].append(fr.to(dev).float())
+
+        replan = [i for i in range(n) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            gpx = info_dict.get("goal")
+            if self.goal_conditioned or self.plan_mode == "cem":
+                assert gpx is not None, "LeWAM-Seq eval needs info_dict['goal'] (goal-reaching)"
+            for i in replan:
+                frames = list(self._frame_buf[i])
+                px_hist = torch.stack(frames, dim=0).unsqueeze(0)              # (1,T0,C,H,W)
+                T0 = px_hist.size(1)
+                past = list(self._pastblk_buf[i])[-(T0 - 1):] if T0 > 1 else []
+                past_actions = (torch.stack(past, dim=0).unsqueeze(0).to(dev) if past
+                                else px_hist.new_zeros(1, 0, self.block_dim))  # (1,T0-1,bd)
+                g = None
+                if gpx is not None and (self.goal_conditioned or self.plan_mode == "cem"):
+                    gi = gpx[i]
+                    gi = gi[-1] if (hasattr(gi, "ndim") and gi.ndim == 4) else gi  # (C,H,W)
+                    g = gi.unsqueeze(0).to(dev).float()                          # (1,C,H,W)
+                steps = max(self._steps_left[i], 1.0)
+                h0 = float(min(steps, self.H_max) / self.H_max)
+                if self.plan_mode == "cem":
+                    z_blk = self._cem_block(px_hist, past_actions, g, h0)        # (bd,) z-scored
+                else:
+                    z_blk = self.model.get_action(
+                        px_hist, past_actions, horizon=1, z_goal_pixels=g,
+                        h_norm0=h0, H_max=self.H_max, history_size=self.num_frames)[0, 0]
+                self._pastblk_buf[i].append(z_blk.detach().to(dev))             # feed next a_{<t}
+                raw = self._unzscore(z_blk).reshape(self.action_block, self.action_dim).cpu()
+                self._action_buffer[i].extend(raw)
+                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)
+
+        action = torch.full((n, self.action_dim), float("nan"))
+        for i in range(n):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
 # policy factory (the one config switch)
 def build_policy(cfg, model, adim, process, transform):
     """Dispatch on cfg.gip_eval.mode -> a configured policy."""
     mode = cfg.get("gip_eval", {}).get("mode", "bc")
     goal_conditioned = bool(cfg.get("gip_eval", {}).get("goal_conditioned", False))
     action_block = int(cfg.plan_config.action_block)
+
+    # mode=seq_policy | seq_cem: LeWAM-Seq adapter. `model` is a loaded LeWAMSeq with its
+    # config attached as model._seq_cfg (done in eval_gip.py). action_block(=frameskip)
+    # splits the model's z-scored action block into per-step raw env actions.
+    if mode in ("seq_policy", "seq_cem"):
+        ge = cfg.get("gip_eval", {})
+        seq_cfg = getattr(model, "_seq_cfg")
+        horizon0 = ge.get("horizon0", None)
+        if horizon0 is None:
+            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+        return LeWAMSeqPolicy(
+            model=model, cfg=seq_cfg, action_block=action_block,
+            action_dim=adim // action_block, plan_mode=("cem" if mode == "seq_cem" else "policy"),
+            horizon0=float(horizon0), H_max=int(ge.get("horizon_H_max", seq_cfg.get("H_max", 50))),
+            process=process, transform=transform,
+            goal_conditioned=bool(ge.get("goal_conditioned", True)),
+            cem_horizon=int(ge.get("cem_horizon", cfg.plan_config.horizon)),
+            cem_samples=int(ge.get("cem_samples", 256)), cem_iters=int(ge.get("cem_iters", 3)),
+            cem_elites=int(ge.get("cem_elites", 32)),
+        )
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
     if mode == "gcidm":

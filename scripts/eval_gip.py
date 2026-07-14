@@ -49,6 +49,14 @@ def run(cfg: DictConfig):
     # mode=gcidm loads its own frozen-LeWM + GCIDMHead, not the JEPA-checkpoint loader
     if mode == "gcidm":
         policy = gip.build_policy(cfg, None, None, process, transform)
+    elif mode in ("seq_policy", "seq_cem"):
+        # LeWAM-Seq: its own loader + config; adim = the model's z-scored action block dim.
+        model, seq_cfg = gip.load_lewam_seq_model(cfg.policy, which=cfg.get("seq_which", "best"))
+        model = model.to("cuda").eval()
+        model.requires_grad_(False)
+        model._seq_cfg = seq_cfg
+        adim = int(seq_cfg["action_dim"])
+        policy = gip.build_policy(cfg, model, adim, process, transform)
     else:
         model, adim = gip.load_gip_model(cfg.policy, epoch=cfg.get("ckpt_epoch", None))
         model = model.to("cuda").eval()
