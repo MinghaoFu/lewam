@@ -3,39 +3,138 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+from stable_pretraining.backbone.utils import vit_hf
 from einops import rearrange
+
+def sinusoidal_embedding(h_norm, n_freqs=64):
+    """Sinusoidal embedding of a scalar in [0, 1]: log-spaced freqs, concat(sin, cos).
+    h_norm: (B,) float tensor. Returns (B, 2*n_freqs)."""
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(n_freqs, device=h_norm.device).float()
+        / max(n_freqs - 1, 1)
+    )
+    ang = h_norm.float()[:, None] * freqs[None, :]
+    return torch.cat([ang.sin(), ang.cos()], dim=-1)
+
 
 def modulate(x, shift, scale):
     """AdaLN-zero modulation"""
     return x * (1 + scale) + shift
 
-class SIGReg(torch.nn.Module):
-    """Sketch Isotropic Gaussian Regularizer (single-GPU!)"""
 
-    def __init__(self, knots=17, num_proj=1024):
+class MLP(nn.Module):
+    """Simple MLP with optional normalization and activation"""
+
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        output_dim=None,
+        norm_fn=None,
+        norm_first=True,
+        act_fn=nn.GELU,
+    ):
         super().__init__()
-        self.num_proj = num_proj
-        t = torch.linspace(0, 3, knots, dtype=torch.float32)
-        dt = 3 / (knots - 1)
-        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
-        weights[[0, -1]] = dt
-        window = torch.exp(-t.square() / 2.0)
-        self.register_buffer("t", t)
-        self.register_buffer("phi", window)
-        self.register_buffer("weights", weights * window)
+        if norm_first:
+            norm = norm_fn(input_dim) if norm_fn is not None else nn.Identity()
+            self.net = nn.Sequential(
+                norm,
+                nn.Linear(input_dim, hidden_dim),
+                act_fn(),
+                nn.Linear(hidden_dim, output_dim or input_dim),
+            )
+        else:
+            norm = norm_fn(hidden_dim) if norm_fn is not None else nn.Identity()
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                norm,
+                act_fn(),
+                nn.Linear(hidden_dim, output_dim or input_dim),
+            )
 
-    def forward(self, proj):
+    def forward(self, x):
         """
-        proj: (T, B, D)
+        x: (B*T, D)
         """
-        # sample random projections
-        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
-        A = A.div_(A.norm(p=2, dim=0))
-        # compute the epps-pulley statistic
-        x_t = (proj @ A).unsqueeze(-1) * self.t
-        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
-        statistic = (err @ self.weights) * proj.size(-2)
-        return statistic.mean() # average over projections and time
+        return self.net(x)
+
+
+class Embedder(nn.Module):
+    def __init__(
+        self,
+        input_dim=10,
+        smoothed_dim=10,
+        emb_dim=10,
+        mlp_scale=4,
+    ):
+        super().__init__()
+        self.patch_embed = nn.Conv1d(input_dim, smoothed_dim, kernel_size=1, stride=1)
+        self.embed = MLP(
+            input_dim=smoothed_dim,
+            hidden_dim=mlp_scale * emb_dim,
+            output_dim=emb_dim,
+            norm_fn=None,
+            norm_first=False,
+            act_fn=nn.SiLU
+        )
+
+    def forward(self, x):
+        """
+        x: (B, T, D)
+        """
+        x = x.float()
+        x = x.permute(0, 2, 1)
+        x = self.patch_embed(x)
+        x = x.permute(0, 2, 1)
+        x = self.embed(x)
+        return x
+
+
+class ModalityAdapter(nn.Module):
+    """Modality adapter: LayerNorm -> Linear -> add learnable token per modality"""
+
+    def __init__(self, embed_dim, input_dim=None):
+        super().__init__()
+        input_dim = input_dim or embed_dim
+        self.adapter = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, embed_dim)
+        )
+        self.token = nn.Parameter(
+            torch.randn(1, 1, embed_dim) * 0.02
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, T, D_in) modality latents
+        Returns:
+            (B, T, D_embed) adapted latents + token
+        """
+        return self.adapter(x) + self.token
+
+
+class AdaLNBlock(nn.Module):
+    """One MLP layer with AdaLN-Zero conditioning: LayerNorm (no affine) -> modulate
+    by (scale, shift) from `cond` -> Linear -> GELU -> Dropout. The (scale, shift)
+    projection is zero-initialized, so at init this block's conditioning is a no-op
+    (AdaLN-Zero)."""
+
+    def __init__(self, in_dim, out_dim, cond_dim, dropout=0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6)
+        self.cond_proj = nn.Linear(cond_dim, 2 * in_dim)
+        nn.init.zeros_(self.cond_proj.weight)
+        nn.init.zeros_(self.cond_proj.bias)
+        self.fc = nn.Linear(in_dim, out_dim)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, cond):
+        scale, shift = self.cond_proj(cond).chunk(2, dim=-1)
+        x = modulate(self.norm(x), shift, scale)
+        return self.drop(self.act(self.fc(x)))
+
     
 class FeedForward(nn.Module):
     """FeedForward network used in Transformers"""
@@ -43,7 +142,6 @@ class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(dim),
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -58,15 +156,15 @@ class FeedForward(nn.Module):
 class Attention(nn.Module):
     """Scaled dot-product attention with causal masking"""
 
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, causal=True):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
         self.heads = heads
         self.scale = dim_head**-0.5
         self.dropout = dropout
-        self.norm = nn.LayerNorm(dim)
-        self.attend = nn.Softmax(dim=-1)
+        self.causal = causal
+
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
         self.to_out = (
             nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
@@ -74,15 +172,14 @@ class Attention(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x, causal=True):
+    def forward(self, x):
         """
         x : (B, T, D)
         """
-        x = self.norm(x)
         drop = self.dropout if self.training else 0.0
         qkv = self.to_qkv(x).chunk(3, dim=-1)  # q, k, v: (B, heads, T, dim_head)
         q, k, v = (rearrange(t, "b t (h d) -> b h t d", h=self.heads) for t in qkv)
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=drop, is_causal=causal)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=drop, is_causal=self.causal)
         out = rearrange(out, "b h t d -> b t (h d)")
         return self.to_out(out)
 
@@ -90,10 +187,9 @@ class Attention(nn.Module):
 class ConditionalBlock(nn.Module):
     """Transformer block with AdaLN-zero conditioning"""
 
-    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0):
+    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0, causal=True):
         super().__init__()
-
-        self.attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)
+        self.attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout, causal=causal)
         self.mlp = FeedForward(dim, mlp_dim, dropout=dropout)
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
@@ -116,10 +212,9 @@ class ConditionalBlock(nn.Module):
 class Block(nn.Module):
     """Standard Transformer block"""
 
-    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0):
+    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0, causal=True):
         super().__init__()
-
-        self.attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)
+        self.attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout, causal=causal)
         self.mlp = FeedForward(dim, mlp_dim, dropout=dropout)
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
@@ -143,6 +238,7 @@ class Transformer(nn.Module):
         dim_head,
         mlp_dim,
         dropout=0.0,
+        causal=True,
         block_class=Block,
     ):
         super().__init__()
@@ -169,78 +265,21 @@ class Transformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(
-                block_class(hidden_dim, heads, dim_head, mlp_dim, dropout)
+                block_class(hidden_dim, heads, dim_head, mlp_dim, dropout, causal)
             )
 
     def forward(self, x, c=None):
 
-        if hasattr(self, "input_proj"):
-            x = self.input_proj(x)
-
-        if c is not None and hasattr(self, "cond_proj"):
+        x = self.input_proj(x)
+        if c is not None:
             c = self.cond_proj(c)
 
         for block in self.layers:
             x = block(x) if isinstance(block, Block) else block(x, c)
         x = self.norm(x)
+        x = self.output_proj(x)
 
-        if hasattr(self, "output_proj"):
-            x = self.output_proj(x)
         return x
-
-class Embedder(nn.Module):
-    def __init__(
-        self,
-        input_dim=10,
-        smoothed_dim=10,
-        emb_dim=10,
-        mlp_scale=4,
-    ):
-        super().__init__()
-        self.patch_embed = nn.Conv1d(input_dim, smoothed_dim, kernel_size=1, stride=1)
-        self.embed = nn.Sequential(
-            nn.Linear(smoothed_dim, mlp_scale * emb_dim),
-            nn.SiLU(),
-            nn.Linear(mlp_scale * emb_dim, emb_dim),
-        )
-
-    def forward(self, x):
-        """
-        x: (B, T, D)
-        """
-        x = x.float()
-        x = x.permute(0, 2, 1)
-        x = self.patch_embed(x)
-        x = x.permute(0, 2, 1)
-        x = self.embed(x)
-        return x
-
-
-class MLP(nn.Module):
-    """Simple MLP with optional normalization and activation"""
-
-    def __init__(
-        self,
-        input_dim,
-        hidden_dim,
-        output_dim=None,
-        norm_fn=nn.LayerNorm,
-        act_fn=nn.GELU,
-    ):
-        super().__init__()
-        norm_fn = norm_fn(hidden_dim) if norm_fn is not None else nn.Identity()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            norm_fn,
-            act_fn(),
-            nn.Linear(hidden_dim, output_dim or input_dim),
-        )
-
-    def forward(self, x):
-        """
-        x: (B*T, D)
-        """
-        return self.net(x)
 
 
 class GMMHead(nn.Module):
@@ -357,6 +396,32 @@ class DiffusionHead(nn.Module):
         return x_t
 
 
+class ViTEncoder(nn.Module):
+    """ViT encoder + projector"""
+
+    def __init__(self, img_size=224, size="tiny", output_type="cls", 
+                output_dim=192, proj_mlp_scale=4):
+        super().__init__()
+        self.output_type = output_type
+
+        self.vit = vit_hf(size=size, patch_size=14, image_size=img_size,
+                              pretrained=False, use_mask_token=False)
+        mlp_in = self.vit.config.hidden_size
+        # maps to representation space using a MLP with Batch Normalization.
+        # necessary because the final ViT layer applies Layer Normalization, which prevents
+        # SIGReg being optimized effectively.
+        self.projector = MLP(input_dim=mlp_in, output_dim=output_dim,
+                             hidden_dim=proj_mlp_scale * output_dim,
+                             norm_fn=nn.BatchNorm1d, norm_first=False)
+
+    def forward(self, pixels):
+        """pixels: (N, 3, H, W)"""
+        out = self.vit(pixels, interpolate_pos_encoding=True)
+        if self.output_type == "cls":
+            return self.projector(out.last_hidden_state[:, 0])  # (N, D)
+        return self.projector(out.last_hidden_state[:, 1:])  # (N, n_patch, D)
+
+
 class ARPredictor(nn.Module):
     """Autoregressive predictor for next-step embedding prediction."""
 
@@ -412,3 +477,32 @@ class ARPredictor(nn.Module):
         seq = self.dropout(seq)
         out = self.transformer(seq, c2)
         return out[:, 0::2], out[:, 1::2]
+
+
+class SIGReg(torch.nn.Module):
+    """Sketch Isotropic Gaussian Regularizer (single-GPU!)"""
+
+    def __init__(self, knots=17, num_proj=1024):
+        super().__init__()
+        self.num_proj = num_proj
+        t = torch.linspace(0, 3, knots, dtype=torch.float32)
+        dt = 3 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
+
+    def forward(self, proj):
+        """
+        proj: (T, B, D)
+        """
+        # sample random projections
+        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
+        A = A.div_(A.norm(p=2, dim=0))
+        # compute the epps-pulley statistic
+        x_t = (proj @ A).unsqueeze(-1) * self.t
+        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
+        statistic = (err @ self.weights) * proj.size(-2)
+        return statistic.mean() # average over projections and time

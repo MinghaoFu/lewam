@@ -27,165 +27,16 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from omegaconf import OmegaConf
 
 torch.backends.cudnn.benchmark = True  # fixed 224x224 input, let cuDNN pick the conv algo
 
 import stable_worldmodel as swm
-from hydra.utils import instantiate as hydra_instantiate
 
 from lewam.utils import get_img_preprocessor, get_column_normalizer
-
-
-# --------------------------------------------------------------------------- #
-# Sinusoidal embedding (shared by GCHead and HorizonModulator)                #
-# --------------------------------------------------------------------------- #
-def _sinusoidal_embedding(h_norm, n_freqs=64):
-    freqs = torch.exp(
-        -math.log(10000.0) * torch.arange(n_freqs, device=h_norm.device).float()
-        / max(n_freqs - 1, 1)
-    )
-    ang = h_norm.float()[:, None] * freqs[None, :]
-    return torch.cat([ang.sin(), ang.cos()], dim=-1)
-
-
-# --------------------------------------------------------------------------- #
-# AdaLN-Zero block                                                            #
-# --------------------------------------------------------------------------- #
-class AdaLNBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, cond_dim, dropout=0.1):
-        super().__init__()
-        self.norm = nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6)
-        self.cond_proj = nn.Linear(cond_dim, 2 * in_dim)
-        nn.init.zeros_(self.cond_proj.weight)
-        nn.init.zeros_(self.cond_proj.bias)
-        self.fc = nn.Linear(in_dim, out_dim)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x, cond):
-        scale, shift = self.cond_proj(cond).chunk(2, dim=-1)
-        x = self.norm(x) * (1 + scale) + shift
-        return self.drop(self.act(self.fc(x)))
-
-
-# --------------------------------------------------------------------------- #
-# GC action head                                                              #
-# --------------------------------------------------------------------------- #
-class GCHead(nn.Module):
-    """cat[z_t, z_goal] -> 3 AdaLN blocks -> action."""
-
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
-                 n_freqs=64, cond_dim=128, dropout=0.1):
-        super().__init__()
-        self.n_freqs = n_freqs
-        in_dim = 2 * z_dim
-        sin_dim = 2 * n_freqs
-        self.horizon_mlp = nn.Sequential(
-            nn.Linear(sin_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        self.block1 = AdaLNBlock(in_dim, hidden_dim, cond_dim, dropout)
-        self.block2 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
-        self.block3 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
-        self.out = nn.Linear(hidden_dim, action_dim)
-
-    def forward(self, z_t, z_goal, h_norm):
-        x = torch.cat([z_t, z_goal], dim=-1)
-        cond = self.horizon_mlp(_sinusoidal_embedding(h_norm, self.n_freqs))
-        x = self.block1(x, cond)
-        x = self.block2(x, cond)
-        x = self.block3(x, cond)
-        return self.out(x)
-
-
-# --------------------------------------------------------------------------- #
-# Goal-conditioned dynamics predictor                                          #
-# --------------------------------------------------------------------------- #
-class GoalCondDynamics(nn.Module):
-    """cat[z_t, a_t, z_goal] -> z_{t+1}."""
-
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512):
-        super().__init__()
-        in_dim = 2 * z_dim + action_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, z_dim),
-        )
-
-    def forward(self, z_t, a_t, z_goal):
-        return self.net(torch.cat([z_t, a_t, z_goal], dim=-1))
-
-
-# --------------------------------------------------------------------------- #
-# SIGReg (anti-collapse regularizer)                                           #
-# --------------------------------------------------------------------------- #
-class SIGReg(nn.Module):
-    def __init__(self, knots=17, num_proj=1024):
-        super().__init__()
-        self.num_proj = num_proj
-        t = torch.linspace(0, 3, knots, dtype=torch.float32)
-        dt = 3 / (knots - 1)
-        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
-        weights[[0, -1]] = dt
-        window = torch.exp(-t.square() / 2.0)
-        self.register_buffer("t", t)
-        self.register_buffer("phi", window)
-        self.register_buffer("weights", weights * window)
-
-    def forward(self, proj):
-        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
-        A = A.div_(A.norm(p=2, dim=0))
-        x_t = (proj @ A).unsqueeze(-1) * self.t
-        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
-        statistic = (err @ self.weights) * proj.size(-2)
-        return statistic.mean()
-
-
-# --------------------------------------------------------------------------- #
-# Encoder builder (random-init ViT-tiny JEPA)                                  #
-# --------------------------------------------------------------------------- #
-def build_encoder(embed_dim=192, img_size=224, action_block_dim=25):
-    cfg = OmegaConf.create({
-        "_target_": "lewam.models.jepa.JEPA",
-        "use_action_history": True, "use_proprio": False,
-        "encoder": {
-            "_target_": "stable_pretraining.backbone.utils.vit_hf",
-            "size": "tiny", "patch_size": 14, "image_size": img_size,
-            "pretrained": False, "use_mask_token": False,
-        },
-        "predictor": {
-            "_target_": "lewam.models.module.ARPredictor", "num_frames": 3,
-            "input_dim": embed_dim, "hidden_dim": embed_dim, "output_dim": embed_dim,
-            "depth": 6, "heads": 16, "mlp_dim": 2048, "dim_head": 64,
-            "dropout": 0.1, "emb_dropout": 0.0,
-        },
-        "action_encoder": {
-            "_target_": "lewam.models.module.Embedder", "input_dim": action_block_dim,
-            "emb_dim": embed_dim,
-        },
-        "projector": {
-            "_target_": "lewam.models.module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
-            "hidden_dim": 2048,
-            "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
-        },
-        "pred_proj": {
-            "_target_": "lewam.models.module.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
-            "hidden_dim": 2048,
-            "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
-        },
-    })
-    model = hydra_instantiate(cfg)
-    model.interpolate_pos_encoding = True
-    n_enc = sum(p.numel() for p in model.encoder.parameters())
-    print(f"[lewam-gc] encoder (random init): {n_enc:,} params")
-    return model
+from lewam.models.module import SIGReg
+from lewam.models.lewam_split import LeWAMSplit
 
 
 # --------------------------------------------------------------------------- #
@@ -220,32 +71,32 @@ def preload_frames(base, img_t, act_mean, act_std, frameskip, max_eps=None):
     return frame_list, act_list
 
 
-def flatten_for_training(frame_list, act_list):
-    """Build the per-sample index (episode-local t, action, max horizon, episode id).
-
-    Frames are kept as the per-episode list (no ``torch.cat`` into one giant
-    contiguous tensor): concatenation transiently holds both the sources and the
-    result, doubling peak RAM (~2x the dataset) right at the point where several
-    big preloads coincide — the cause of repeated cgroup OOM-kills. Indexing into
-    the list is numerically identical: frame (ep, t) here == Frames[offset[ep]+t]
-    before. g = t+h and n = t+1 always fall inside the same episode (h <= maxh =
-    last-t), so a single episode id per sample is enough."""
-    t_local, ep_idx, maxh_list, A = [], [], [], []
+def flatten_for_training(frame_list, act_list, device):
+    """Build flat Frames tensor + per-sample index (t, action, max horizon, ep base)."""
+    offsets, Fs = [], []
+    off = 0
+    for f in frame_list:
+        offsets.append(off)
+        Fs.append(f)
+        off += f.shape[0]
+    Frames = torch.cat(Fs, dim=0).to(device)
+    t_gidx, maxh_list, ep_base_list, A = [], [], [], []
     for ep, a in enumerate(act_list):
         n_obs = a.shape[0]
         n_fr = frame_list[ep].shape[0]
+        base = offsets[ep]
         last = n_fr - 1
         n_valid = min(n_obs, n_fr - 1)
         for t in range(n_valid):
-            t_local.append(t)
-            ep_idx.append(ep)
+            t_gidx.append(base + t)
             maxh_list.append(last - t)
+            ep_base_list.append(base)
             A.append(a[t])
-    return (frame_list,
+    return (Frames,
             torch.stack(A, dim=0),
-            torch.tensor(t_local, dtype=torch.long),
-            torch.tensor(ep_idx, dtype=torch.long),
-            torch.tensor(maxh_list, dtype=torch.long))
+            torch.tensor(t_gidx, dtype=torch.long),
+            torch.tensor(maxh_list, dtype=torch.long),
+            torch.tensor(ep_base_list, dtype=torch.long))
 
 
 # --------------------------------------------------------------------------- #
@@ -255,11 +106,10 @@ def flatten_for_training(frame_list, act_list):
 # clamped to the episode tail, goal at t+h, dynamics target at t+1.            #
 # --------------------------------------------------------------------------- #
 class FramePairDataset(Dataset):
-    def __init__(self, frames_list, a_flat, t_local, ep_idx, maxh, indices, h_max, ablate_horizon):
-        self.frames_list = frames_list  # list of [n_fr_ep,3,H,W] fp16, CPU, shared read-only
+    def __init__(self, frames, a_flat, t_gidx, maxh, indices, h_max, ablate_horizon):
+        self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only
         self.a_flat = a_flat          # [M,adim] fp16, CPU
-        self.t_local = t_local        # [M] long — t within its episode
-        self.ep_idx = ep_idx          # [M] long — episode id
+        self.t_gidx = t_gidx          # [M] long
         self.maxh = maxh              # [M] long
         self.indices = indices        # [K] long — train or val subset
         self.h_max = int(h_max)
@@ -270,141 +120,20 @@ class FramePairDataset(Dataset):
 
     def __getitem__(self, i):
         idx = int(self.indices[i])
-        ep = int(self.ep_idx[idx])
-        t = int(self.t_local[idx])
+        ti = int(self.t_gidx[idx])
         mh = int(self.maxh[idx])
         h = int(torch.randint(1, self.h_max + 1, (1,)).item())
         if h > mh:
             h = mh
         if h < 1:
             h = 1
-        g = t + h
-        n = t + 1  # == min(t+1, t+mh) since mh >= 1
-        fe = self.frames_list[ep]  # [n_fr_ep,3,H,W]; g,n stay inside this episode
+        gi = ti + h
+        ni = ti + 1  # == min(ti+1, ti+mh) since mh >= 1
         # stack [t, g, n] so collate -> [B,3,3,H,W]; kept fp16 to halve H2D bytes
-        trip = torch.stack([fe[t], fe[g], fe[n]], dim=0)
+        trip = torch.stack([self.frames[ti], self.frames[gi], self.frames[ni]], dim=0)
         a_t = self.a_flat[idx]
         h_norm = 0.0 if self.ablate_horizon else min(h, self.h_max) / self.h_max
         return trip, a_t, h_norm
-
-
-# --------------------------------------------------------------------------- #
-# Streaming path: build the per-sample index + z-scored actions WITHOUT loading #
-# any pixels (actions are a separate, tiny h5 dataset). Frames are read on       #
-# demand in StreamFramePairDataset via base._load_slice (the exact same reader   #
-# the preload path uses, so a streamed frame == the preloaded one). Keeps only   #
-# ~20 MB of actions + index in RAM instead of ~1x the dataset — no OOM, and the  #
-# OS page-caches the h5 so epochs after the first are fast.                       #
-# --------------------------------------------------------------------------- #
-def build_stream_index(base, frameskip, act_mean, act_std, raw_adim, max_eps=None):
-    import h5py
-    act_mean_t = torch.tensor(act_mean, dtype=torch.float32)
-    act_std_t = torch.tensor(act_std, dtype=torch.float32)
-    lengths = np.asarray(base.lengths)
-    n_eps = len(lengths) if max_eps is None else min(max_eps, len(lengths))
-    t0 = time.time()
-    # read ONLY the action column + episode offsets straight from the h5 (no pixels)
-    with h5py.File(base.h5_path, "r", swmr=True) as hf:
-        act_all = torch.from_numpy(np.asarray(hf["action"][:]))          # [total_raw, adim]
-        if "ep_offset" in hf:
-            offsets = np.asarray(hf["ep_offset"][:]).astype(np.int64)
-        else:
-            offsets = np.concatenate([[0], np.cumsum(lengths)[:-1]]).astype(np.int64)
-    ep_idx_l, t_local_l, maxh_l, A = [], [], [], []
-    for ep in range(n_eps):
-        L = int(lengths[ep]); off = int(offsets[ep])
-        n_obs = L // frameskip
-        # identical action processing to preload_frames (z-score per raw action dim)
-        a = act_all[off:off + n_obs * frameskip].reshape(n_obs, frameskip, raw_adim)
-        a = ((a - act_mean_t) / act_std_t).reshape(n_obs, frameskip * raw_adim).half()
-        n_fr = min((L + frameskip - 1) // frameskip, n_obs + 1)   # == preload's n_keep
-        n_valid = min(n_obs, n_fr - 1)
-        last = n_fr - 1
-        for t in range(n_valid):
-            ep_idx_l.append(ep); t_local_l.append(t); maxh_l.append(last - t)
-            A.append(a[t])
-    print(f"[lewam-gc] stream index built: {len(A)} samples over {n_eps} eps "
-          f"({time.time()-t0:.0f}s, pixels NOT preloaded)", flush=True)
-    return (torch.stack(A, dim=0),
-            torch.tensor(t_local_l, dtype=torch.long),
-            torch.tensor(ep_idx_l, dtype=torch.long),
-            torch.tensor(maxh_l, dtype=torch.long))
-
-
-class StreamFramePairDataset(Dataset):
-    """Same samples as FramePairDataset, but the 3 frames are read from the h5 on
-    demand (per-worker handle; HDF5Dataset.__getstate__ drops the file so each
-    worker reopens). obs-frame f == raw frame f*frameskip; base._load_slice already
-    strides pixels by frameskip, so slice [f*fs, f*fs+1] returns exactly that frame."""
-
-    def __init__(self, base, img_t, frameskip, a_flat, t_local, ep_idx, maxh,
-                 indices, h_max, ablate_horizon):
-        self.base = base
-        self.img_t = img_t
-        self.fs = int(frameskip)
-        self.a_flat = a_flat
-        self.t_local = t_local
-        self.ep_idx = ep_idx
-        self.maxh = maxh
-        self.indices = indices
-        self.h_max = int(h_max)
-        self.ablate_horizon = bool(ablate_horizon)
-
-    def __len__(self):
-        return self.indices.numel()
-
-    def _frame(self, ep, obs_t):
-        r = obs_t * self.fs
-        pix = self.base._load_slice(ep, r, r + 1)["pixels"]  # 1 strided frame == raw r
-        if not torch.is_tensor(pix):
-            pix = torch.as_tensor(np.asarray(pix))
-        return self.img_t({"pixels": pix})["pixels"].float()[0].half()  # [3,H,W]
-
-    def __getitem__(self, i):
-        idx = int(self.indices[i])
-        ep = int(self.ep_idx[idx])
-        t = int(self.t_local[idx])
-        mh = int(self.maxh[idx])
-        h = int(torch.randint(1, self.h_max + 1, (1,)).item())
-        if h > mh:
-            h = mh
-        if h < 1:
-            h = 1
-        g = t + h
-        n = t + 1
-        trip = torch.stack([self._frame(ep, t), self._frame(ep, g), self._frame(ep, n)], dim=0)
-        a_t = self.a_flat[idx]
-        h_norm = 0.0 if self.ablate_horizon else min(h, self.h_max) / self.h_max
-        return trip, a_t, h_norm
-
-
-# --------------------------------------------------------------------------- #
-# Collapse metrics on a batch of latents z [N, D]. Without SIGReg the question  #
-# is whether action/dynamics prediction alone keep z from collapsing. We track: #
-#   z_std     mean per-dim std across samples          -> 0 on full collapse     #
-#   eff_rank  participation ratio (Σλ)²/Σλ² of cov(z)  -> 1 on rank-1 collapse   #
-#             (D=192 if z fills the space); reported also as a fraction of D      #
-#   cos_offdiag mean pairwise cosine similarity        -> 1 on directional collapse#
-#   sigreg    the SIGReg statistic (dist. from N(0,1)) -> comparable to w_reg runs #
-# --------------------------------------------------------------------------- #
-def collapse_metrics(Z, sigreg=None, device="cpu"):
-    Z = Z.float()
-    N, D = Z.shape
-    z_std = Z.std(dim=0).mean().item()
-    Zc = Z - Z.mean(dim=0, keepdim=True)
-    cov = (Zc.t() @ Zc) / max(N - 1, 1)
-    eig = torch.linalg.eigvalsh(cov).clamp(min=0)
-    denom = (eig * eig).sum().item()
-    eff_rank = (eig.sum().item() ** 2 / denom) if denom > 0 else 0.0
-    Zn = Z / Z.norm(dim=1, keepdim=True).clamp(min=1e-6)
-    G = Zn @ Zn.t()
-    cos_off = ((G.sum() - G.diag().sum()) / max(N * (N - 1), 1)).item()
-    out = {"z_std": z_std, "eff_rank": eff_rank, "eff_rank_frac": eff_rank / D,
-           "cos_offdiag": cos_off}
-    if sigreg is not None:
-        with torch.no_grad():
-            out["sigreg"] = sigreg(Z.to(device).unsqueeze(0)).item()
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -437,13 +166,6 @@ def main():
                     help="disable dynamics loss (w_dyn=0), keep gc_head only")
     ap.add_argument("--w_cyc", type=float, default=0.0,
                     help="FDM-IDM consistency loss weight (0=without, 1.0=with)")
-    ap.add_argument("--stream", action="store_true",
-                    help="read frames from the h5 on demand (no RAM preload of pixels); "
-                         "actions are tiny and still preloaded. Avoids the ~1x-dataset "
-                         "anon-RAM footprint (and the OOM it caused); page cache warms after ep 1.")
-    ap.add_argument("--collapse_n", type=int, default=8192,
-                    help="# val latents sampled per epoch to compute collapse metrics "
-                         "(z std / effective rank / SIGReg stat). 0 disables.")
     # data-pipeline knobs (no effect on loss/model logic)
     ap.add_argument("--num_workers", type=int, default=6,
                     help="DataLoader worker processes")
@@ -481,36 +203,26 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     max_eps = args.max_eps or None
 
-    # ---- build models ----
-    lewm = build_encoder(embed_dim=192, img_size=args.img_size,
-                         action_block_dim=action_block_dim).to(device)
-    gc_head = GCHead(z_dim=192, action_dim=action_block_dim,
-                     hidden_dim=args.hidden_dim, dropout=0.1).to(device)
-    dynamics = GoalCondDynamics(z_dim=192, action_dim=action_block_dim,
-                                hidden_dim=args.hidden_dim).to(device)
+    # ---- build model ----
+    model = LeWAMSplit(embed_dim=192, action_dim=action_block_dim,
+                                   hidden_dim=args.hidden_dim, img_size=args.img_size,
+                                   dropout=0.1).to(device)
     sigreg = SIGReg().to(device)
 
-    n_enc = sum(p.numel() for p in lewm.encoder.parameters())
-    n_head = sum(p.numel() for p in gc_head.parameters())
-    n_dyn = sum(p.numel() for p in dynamics.parameters())
+    n_enc = sum(p.numel() for p in model.encoder.parameters())
+    n_head = sum(p.numel() for p in model.gc_head.parameters())
+    n_dyn = sum(p.numel() for p in model.dynamics.parameters())
     print(f"[lewam-gc] encoder={n_enc/1e6:.2f}M  gc_head={n_head/1e6:.2f}M  "
           f"dynamics={n_dyn/1e6:.2f}M  total={(n_enc+n_head+n_dyn)/1e6:.2f}M", flush=True)
 
     # ---- data ----
-    if args.stream:
-        # no pixel preload: build the index + z-scored actions only, read frames on demand
-        frames_list = None
-        A_flat, t_local, ep_idx, maxh = build_stream_index(
-            base, frameskip, act_mean, act_std, raw_adim, max_eps=max_eps)
-    else:
-        frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
-                                              frameskip, max_eps=max_eps)
-        frames_list, A_flat, t_local, ep_idx, maxh = flatten_for_training(
-            frame_list, act_list)
-        n_frames = sum(f.shape[0] for f in frames_list)
-        print(f"[lewam-gc] frames={n_frames} (over {len(frames_list)} eps)", flush=True)
-    n_samples = t_local.shape[0]
-    print(f"[lewam-gc] mode={'stream' if args.stream else 'preload'} samples={n_samples}", flush=True)
+    frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
+                                          frameskip, max_eps=max_eps)
+    Frames, A_flat, t_gidx, maxh, ep_base = flatten_for_training(
+        frame_list, act_list, "cpu")
+    del frame_list
+    n_samples = t_gidx.shape[0]
+    print(f"[lewam-gc] frames={Frames.shape} samples={n_samples}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_samples, generator=g)
@@ -521,16 +233,10 @@ def main():
           f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders (overlap CPU gather + pinning with GPU compute) ----
-    if args.stream:
-        train_ds = StreamFramePairDataset(base, img_t, frameskip, A_flat, t_local, ep_idx,
-                                          maxh, train_idx, args.H_max, args.ablate_horizon)
-        val_ds = StreamFramePairDataset(base, img_t, frameskip, A_flat, t_local, ep_idx,
-                                        maxh, val_idx, args.H_max, args.ablate_horizon)
-    else:
-        train_ds = FramePairDataset(frames_list, A_flat, t_local, ep_idx, maxh, train_idx,
-                                    args.H_max, args.ablate_horizon)
-        val_ds = FramePairDataset(frames_list, A_flat, t_local, ep_idx, maxh, val_idx,
-                                  args.H_max, args.ablate_horizon)
+    train_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, train_idx,
+                                args.H_max, args.ablate_horizon)
+    val_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, val_idx,
+                              args.H_max, args.ablate_horizon)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
         num_workers=args.num_workers,
@@ -544,11 +250,11 @@ def main():
           f"prefetch={args.prefetch_factor} pin_memory=True", flush=True)
 
     # ---- optimizer: 3 param groups ----
-    enc_params = list(lewm.encoder.parameters()) + list(lewm.projector.parameters())
+    enc_params = list(model.encoder.parameters())
     opt = torch.optim.AdamW([
         {"params": enc_params, "lr": args.encoder_lr},
-        {"params": gc_head.parameters(), "lr": args.head_lr},
-        {"params": dynamics.parameters(), "lr": args.dynamics_lr},
+        {"params": model.gc_head.parameters(), "lr": args.head_lr},
+        {"params": model.dynamics.parameters(), "lr": args.dynamics_lr},
     ], weight_decay=args.weight_decay)
 
     total_epochs = args.epochs
@@ -575,14 +281,12 @@ def main():
 
     # ---- training loop ----
     best_val = float("inf")
-    collapse_hist = []
-    all_params = enc_params + list(gc_head.parameters()) + list(dynamics.parameters())
 
     for ep in range(args.epochs):
         t0 = time.time()
 
         # ---- train ----
-        lewm.train(); gc_head.train(); dynamics.train()
+        model.train()
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
 
         for trip, a_t, h_norm in train_loader:
@@ -596,17 +300,15 @@ def main():
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 # encode all 3 frames in one pass
-                z_all = lewm.encode({"pixels": frames_all.unsqueeze(1)})["emb"][:, 0]
+                z_all = model.encode(frames_all)
                 z_t, z_g, z_n = z_all.chunk(3, dim=0)
                 z_t_f = z_t.float()
                 z_g_f = z_g.float()
                 z_n_f = z_n.float()
 
-                a_pred = gc_head(z_t_f, z_g_f, h_norm)
-                loss_act = F.mse_loss(a_pred, a_t)
-
                 # no stop-grad: the encoder also learns from the dynamics target
-                z_n_pred = dynamics(z_t_f, a_t, z_g_f)
+                a_pred, z_n_pred = model(z_t_f, z_g_f, h_norm, a_t)
+                loss_act = F.mse_loss(a_pred, a_t)
                 loss_dyn = F.mse_loss(z_n_pred, z_n_f)
 
                 loss_reg = sigreg(z_t_f.unsqueeze(0))
@@ -618,13 +320,13 @@ def main():
                 # consistency: the predicted action through dynamics should reach z_n
                 loss_cyc = torch.tensor(0.0, device=device)
                 if args.w_cyc > 0:
-                    z_n_cyc = dynamics(z_t_f, a_pred, z_g_f)
+                    z_n_cyc = model.dynamics(z_t_f, a_pred, z_g_f)
                     loss_cyc = F.mse_loss(z_n_cyc, z_n_f.detach())
                     loss = loss + args.w_cyc * loss_cyc
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
             tr_act += loss_act.item() * n
@@ -636,9 +338,8 @@ def main():
         sched.step()
 
         # ---- val ----
-        lewm.eval(); gc_head.eval(); dynamics.eval()
+        model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
-        z_buf, z_budget = [], int(args.collapse_n)   # collect z_t for collapse metrics
         with torch.no_grad():
             for trip, a_t, h_norm in val_loader:
                 n = trip.shape[0]
@@ -648,21 +349,17 @@ def main():
                 frames_all = trip.permute(1, 0, 2, 3, 4).reshape(3 * n, *trip.shape[2:]).float()
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    z_all = lewm.encode({"pixels": frames_all.unsqueeze(1)})["emb"][:, 0]
+                    z_all = model.encode(frames_all)
                     z_t, z_g, z_n = z_all.chunk(3, dim=0)
                     z_t_f, z_g_f, z_n_f = z_t.float(), z_g.float(), z_n.float()
 
-                    a_pred = gc_head(z_t_f, z_g_f, h_norm)
+                    a_pred, z_n_pred = model(z_t_f, z_g_f, h_norm, a_t)
                     loss_act = F.mse_loss(a_pred, a_t)
-
-                    z_n_pred = dynamics(z_t_f, a_t, z_g_f)
                     loss_dyn = F.mse_loss(z_n_pred, z_n_f)
 
                 va_act += loss_act.item() * n
                 va_dyn += loss_dyn.item() * n
                 va_count += n
-                if z_budget > 0 and sum(b.shape[0] for b in z_buf) < z_budget:
-                    z_buf.append(z_t_f.detach().cpu())
 
         tr_a = tr_act / max(tr_count, 1)
         tr_d = tr_dyn / max(tr_count, 1)
@@ -671,40 +368,30 @@ def main():
         va_a = va_act / max(va_count, 1)
         va_d = va_dyn / max(va_count, 1)
         lrs = sched.get_last_lr()
-
-        # ---- collapse metrics on z_t (does action/dynamics pred alone avoid collapse?) ----
-        cm = {}
-        if z_buf:
-            cm = collapse_metrics(torch.cat(z_buf, dim=0), sigreg=sigreg, device=device)
-            cm_rec = {"epoch": ep + 1, "val_act": va_a, "val_dyn": va_d, **cm}
-            collapse_hist.append(cm_rec)
-            (run_dir / "collapse_metrics.json").write_text(json.dumps(collapse_hist, indent=2))
-
         dt = time.time() - t0
         cyc_str = f"  cyc={tr_c:.5f}" if args.w_cyc > 0 else ""
-        col_str = (f"  [collapse] z_std={cm['z_std']:.4f} eff_rank={cm['eff_rank']:.1f}"
-                   f"/{cm['eff_rank_frac']*100:.0f}% cos={cm['cos_offdiag']:.3f} "
-                   f"sigreg={cm.get('sigreg', float('nan')):.3f}" if cm else "")
         print(f"[lewam-gc] ep {ep+1}/{args.epochs}  "
               f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}  "
-              f"lr_enc={lrs[0]:.2e}  {dt:.1f}s{col_str}", flush=True)
+              f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
+        # key prefixes (encoder./gc_head./dynamics.) are load-bearing: eval_lewam_gc.sh
+        # remaps them into the gcidm checkpoint format.
         full_sd = {}
-        for k, v in lewm.state_dict().items():
+        for k, v in model.encoder.state_dict().items():
             full_sd[f"encoder.{k}"] = v
-        for k, v in gc_head.state_dict().items():
+        for k, v in model.gc_head.state_dict().items():
             full_sd[f"gc_head.{k}"] = v
-        for k, v in dynamics.state_dict().items():
+        for k, v in model.dynamics.state_dict().items():
             full_sd[f"dynamics.{k}"] = v
         torch.save(full_sd, run_dir / "lewam_gc_latest.pt")
-        torch.save(gc_head.state_dict(), run_dir / "gc_head_latest.pt")
+        torch.save(model.gc_head.state_dict(), run_dir / "gc_head_latest.pt")
 
         combined_val = va_a + va_d
         if combined_val < best_val:
             best_val = combined_val
             torch.save(full_sd, run_dir / "lewam_gc_best.pt")
-            torch.save(gc_head.state_dict(), run_dir / "gc_head_best.pt")
+            torch.save(model.gc_head.state_dict(), run_dir / "gc_head_best.pt")
 
     print(f"[lewam-gc] DONE  best_val={best_val:.5f}  saved -> {run_dir}", flush=True)
 
