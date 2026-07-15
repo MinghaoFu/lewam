@@ -159,19 +159,20 @@ class LeWAMSeq(nn.Module):
         return self._apply_dynamics_head(h_next, z_goal)
 
     # -- Training (forward)
-    def forward(self, pixels, actions, h_norm, z_goal=None, return_z=False):
-        """pixels: (B,T,C,H,W), actions: (B,T,act_dim), h_norm: (B,) or (B,T),
-        z_goal: (B,embed_dim) or None. Returns a_pred (B,T,act_dim),
-        z_pred (B,T,embed_dim) predicting z_{t+1} (drop the last one, no target).
-        return_z=True also returns (z, e) so the trainer can build dynamics targets
-        (z[:,1:]) and the SIGReg term without re-encoding."""
+    def forward(self, pixels, actions, h_norm, z_goal=None, z_goal_dyn=None, return_z=False):
+        """pixels: (B,T,C,H,W), actions: (B,T,act_dim), h_norm: (B,) or (B,T).
+        z_goal (B,embed_dim) conditions the ACTION head; z_goal_dyn the DYNAMICS head
+        (defaults to z_goal). They are separate so goal-dropout can differ per head.
+        Returns a_pred (B,T,act_dim), z_pred (B,T,embed_dim) predicting z_{t+1} (drop the
+        last one, no target). return_z=True also returns (z, e) so the trainer can build
+        dynamics targets (z[:,1:]) and the SIGReg term without re-encoding."""
         z = self.encode_frames(pixels)
         e = self.encode_actions(actions)
         seq = self.tokenize(z, e)
         out = self.predictor(seq)
         h_act, h_next = out[:, 0::2], out[:, 1::2]
         a_pred = self._apply_action_head(h_act, h_norm, z_goal)
-        z_pred = self._apply_dynamics_head(h_next, z_goal)
+        z_pred = self._apply_dynamics_head(h_next, z_goal if z_goal_dyn is None else z_goal_dyn)
         if return_z:
             return a_pred, z_pred, z, e
         return a_pred, z_pred

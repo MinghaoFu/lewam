@@ -113,18 +113,17 @@ def build_seq_index(base, num_frames, frameskip, act_mean, act_std, raw_adim, ma
 class SeqDataset(Dataset):
     """One full-length window + a goal frame + per-position horizon. Frames come from
     a per-episode preloaded list (preload) or the h5 on demand (stream). Goal is at
-    start+num_frames-1+h, h~U[1,H_max] clamped to the episode; dropped with prob
-    goal_dropout_p (use_goal=0 -> trainer zeros the goal latent + horizon)."""
+    start+num_frames-1+h, h~U[1,H_max] clamped to the episode. Goal-dropout is applied
+    per-head in run_batch (separate rates for the action and dynamics heads), not here."""
 
     def __init__(self, acts_by_ep, nfr_by_ep, index, indices, num_frames, h_max,
-                 goal_dropout_p, frames_by_ep=None, base=None, img_t=None, frameskip=None):
+                 frames_by_ep=None, base=None, img_t=None, frameskip=None):
         self.acts = acts_by_ep
         self.nfr = nfr_by_ep
         self.index = index
         self.indices = indices
         self.nf = int(num_frames)
         self.h_max = int(h_max)
-        self.gdrop = float(goal_dropout_p)
         self.frames_by_ep = frames_by_ep          # preload path (list of [n_fr,3,H,W] fp16)
         self.base = base; self.img_t = img_t       # stream path
         self.fs = int(frameskip) if frameskip else None
@@ -156,8 +155,7 @@ class SeqDataset(Dataset):
         actions = self.acts[ep][start:start + nf]                 # (nf, adim)
         pos = torch.arange(start, start + nf, dtype=torch.float32)
         h_norm = ((g - pos) / self.h_max).clamp(0.0, 1.0)         # per-position horizon (nf,)
-        use_goal = 1.0 if torch.rand(1).item() >= self.gdrop else 0.0
-        return window, actions, goal, h_norm, torch.tensor(use_goal, dtype=torch.float32)
+        return window, actions, goal, h_norm     # goal-dropout applied per-head in run_batch
 
 
 def preload_seq_frames(base, img_t, frameskip, max_eps=None):
@@ -241,9 +239,16 @@ def main():
                     help="feed the action head's own prediction (else ground-truth actions)")
     ap.add_argument("--rollout_stopgrad", action="store_true",
                     help="stop-grad the rollout target latents (parked; default end-to-end)")
-    # goal / head
-    ap.add_argument("--goal_dropout_p", type=float, default=0.5,
-                    help="0 = always goal-conditioned, 1 = pure BC/FDM, in between = mixed")
+    # goal / head -- SEPARATE goal-dropout per head. The action/policy head and the
+    # dynamics/FDM head are conditioned on the goal independently; the policy defaults to
+    # always-goal-conditioned to match the split baseline and the other models (eval
+    # seq_policy uses ONLY the action head, so its goal-conditioning must be fully trained).
+    ap.add_argument("--goal_dropout_act", type=float, default=0.0,
+                    help="policy/action-head goal-dropout (0 = always goal-conditioned; 1 = pure BC)")
+    ap.add_argument("--goal_dropout_dyn", type=float, default=0.5,
+                    help="dynamics/FDM-head goal-dropout (0 = always GC; 1 = goal-agnostic dynamics)")
+    ap.add_argument("--goal_dropout_p", type=float, default=None,
+                    help="legacy shim: if set, overrides BOTH act and dyn (old single-flag behaviour)")
     ap.add_argument("--action_head", type=str, default="mse", choices=["mse", "gmm", "diffusion"])
     # data pipeline
     ap.add_argument("--stream", action="store_true", help="read frames from h5 on demand (no preload)")
@@ -251,6 +256,8 @@ def main():
     ap.add_argument("--num_workers", type=int, default=8)
     ap.add_argument("--prefetch_factor", type=int, default=4)
     args = ap.parse_args()
+    if args.goal_dropout_p is not None:      # legacy single-flag -> set both heads the same
+        args.goal_dropout_act = args.goal_dropout_dyn = args.goal_dropout_p
 
     if args.action_head != "mse":
         raise NotImplementedError(
@@ -306,7 +313,7 @@ def main():
 
     def make_ds(idx):
         return SeqDataset(acts_by_ep, nfr_by_ep, index, idx, args.num_frames, args.H_max,
-                          args.goal_dropout_p, frames_by_ep=frames_by_ep,
+                          frames_by_ep=frames_by_ep,
                           base=(base if args.stream else None),
                           img_t=(img_t if args.stream else None), frameskip=frameskip)
     lc = dict(batch_size=args.batch_size, pin_memory=True, drop_last=True, num_workers=args.num_workers)
@@ -335,7 +342,8 @@ def main():
         model="lewam_seq", embed_dim=192, action_dim=action_block_dim, num_frames=args.num_frames,
         H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std, n_layers=args.n_layers, n_heads=args.n_heads,
-        mlp_dim=args.mlp_dim, head_hidden=args.head_hidden, goal_dropout_p=args.goal_dropout_p,
+        mlp_dim=args.mlp_dim, head_hidden=args.head_hidden,
+        goal_dropout_act=args.goal_dropout_act, goal_dropout_dyn=args.goal_dropout_dyn,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_rollout=args.w_rollout,
         rollout_steps=args.rollout_steps, rollout_closed_loop=args.rollout_closed_loop,
         rollout_stopgrad=args.rollout_stopgrad, action_head=args.action_head,
@@ -343,20 +351,26 @@ def main():
     ), indent=2))
 
     def run_batch(batch, train):
-        window, actions, goal, h_norm, use_goal = [x.to(device, non_blocking=True) for x in batch]
-        window = window.float(); actions = actions.float(); goal = goal.float()
-        h_norm = h_norm.float(); use_goal = use_goal.float()
+        window, actions, goal, h_norm = [x.to(device, non_blocking=True) for x in batch]
+        window = window.float(); actions = actions.float(); goal = goal.float(); h_norm = h_norm.float()
+        b = window.size(0)
+        # independent per-head goal-dropout: zero the goal (and, for the policy, the horizon) on
+        # the dropped fraction. Default goal_dropout_act=0 -> policy always goal-conditioned.
+        use_act = (torch.rand(b, device=device) >= args.goal_dropout_act).float()
+        use_dyn = (torch.rand(b, device=device) >= args.goal_dropout_dyn).float()
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            z_goal = model.state_encoder(goal) * use_goal[:, None]          # zero goal latent if dropped
-            h_norm = h_norm * use_goal[:, None]                            # zero horizon if dropped
-            a_pred, z_pred, z, e = model(window, actions, h_norm, z_goal, return_z=True)
+            zg = model.state_encoder(goal)
+            z_goal_act = zg * use_act[:, None]; h_norm_a = h_norm * use_act[:, None]
+            z_goal_dyn = zg * use_dyn[:, None]
+            a_pred, z_pred, z, e = model(window, actions, h_norm_a, z_goal_act,
+                                         z_goal_dyn=z_goal_dyn, return_z=True)
             l_act = F.mse_loss(a_pred, actions)
             l_dyn = F.mse_loss(z_pred[:, :-1], z[:, 1:])                    # in-window FDM targets
             l_reg = sigreg(z.reshape(-1, z.size(-1)).unsqueeze(0))          # (1, B*nf, D)
             l_roll = z.new_zeros(())
             if args.w_rollout > 0 and args.rollout_steps > 0:
                 k = min(args.rollout_steps, args.num_frames - 1)
-                l_roll = rollout_loss(model, z, e, h_norm, z_goal, k,
+                l_roll = rollout_loss(model, z, e, h_norm_a, z_goal_act, k,
                                       args.rollout_closed_loop, args.rollout_stopgrad)
             loss = args.w_act * l_act + args.w_dyn * l_dyn + args.w_reg * l_reg + args.w_rollout * l_roll
         return loss, l_act, l_dyn, l_reg, l_roll, z
