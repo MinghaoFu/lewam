@@ -521,12 +521,15 @@ class LeWAMSeqPolicy(BasePolicy):
     def __init__(self, model, cfg, action_block, action_dim, plan_mode="policy",
                  horizon0=None, H_max=50, process=None, transform=None,
                  goal_conditioned=True, cem_horizon=5, cem_samples=256, cem_iters=3,
-                 cem_elites=32, **kw):
+                 cem_elites=32, history_size=None, **kw):
         super().__init__(**kw)
         self.type = f"lewam_seq_{plan_mode}"
         self.model = model.eval()  # BN-in-projector -> eval() = deterministic running stats
         self.cfg = cfg
         self.num_frames = int(cfg["num_frames"])
+        # eval context window: <=num_frames. history_size=1 -> memoryless reactive (like GCIDM);
+        # smaller windows trade the learned history for less trajectory covariate-shift at eval.
+        self.hist = int(history_size) if history_size else self.num_frames
         self.frameskip = int(cfg["frameskip"])
         self.raw_adim = int(cfg["action_raw_dim"])
         self.block_dim = int(cfg["action_dim"])           # frameskip * raw_adim
@@ -556,8 +559,8 @@ class LeWAMSeqPolicy(BasePolicy):
 
     def _reset_bufs(self, n):
         self._action_buffer = [deque() for _ in range(n)]
-        self._frame_buf = [deque(maxlen=self.num_frames) for _ in range(n)]
-        self._pastblk_buf = [deque(maxlen=max(self.num_frames - 1, 0)) for _ in range(n)]
+        self._frame_buf = [deque(maxlen=self.hist) for _ in range(n)]
+        self._pastblk_buf = [deque(maxlen=max(self.hist - 1, 0)) for _ in range(n)]
         self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
 
     def _zscore(self, raw_block):
@@ -580,7 +583,7 @@ class LeWAMSeqPolicy(BasePolicy):
         for _ in range(self.cem_iters):
             cand = mean[None] + std[None] * torch.randn(S, Hz, self.block_dim, device=dev)
             cost = self.model.get_cost(px_hist, past_actions, cand.unsqueeze(0),
-                                       goal_px, history_size=self.num_frames)[0]   # (S,)
+                                       goal_px, history_size=self.hist)[0]   # (S,)
             elite = cand[cost.topk(E, largest=False).indices]                      # (E,Hz,bd)
             mean, std = elite.mean(0), elite.std(0).clamp_min(1e-3)
         return mean[0]
@@ -635,7 +638,7 @@ class LeWAMSeqPolicy(BasePolicy):
                 else:
                     z_blk = self.model.get_action(
                         px_hist, past_actions, horizon=1, z_goal_pixels=g,
-                        h_norm0=h0, H_max=self.H_max, history_size=self.num_frames)[0, 0]
+                        h_norm0=h0, H_max=self.H_max, history_size=self.hist)[0, 0]
                 self._pastblk_buf[i].append(z_blk.detach().to(dev))             # feed next a_{<t}
                 raw = self._unzscore(z_blk).reshape(self.action_block, self.action_dim).cpu()
                 self._action_buffer[i].extend(raw)
@@ -673,6 +676,7 @@ def build_policy(cfg, model, adim, process, transform):
             cem_horizon=int(ge.get("cem_horizon", cfg.plan_config.horizon)),
             cem_samples=int(ge.get("cem_samples", 256)), cem_iters=int(ge.get("cem_iters", 3)),
             cem_elites=int(ge.get("cem_elites", 32)),
+            history_size=(int(ge["history_size"]) if ge.get("history_size") else None),
         )
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
