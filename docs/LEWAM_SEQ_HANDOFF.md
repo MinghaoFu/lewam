@@ -1,5 +1,9 @@
 # LeWAM session handoff (2026-07-15)
 
+> **⛔ SEQ IS SCRAPPED (2026-07-17, user + Minghao).** The next direction — improve the split toward
+> a more unified predictor with longer context — and the LeWAM-Seq post-mortem are in
+> **`docs/LEWAM_UNIFIED_HANDOFF.md` (READ THAT FIRST)**. This doc is kept for history only.
+
 Context for a fresh session picking up this work. Written thorough on purpose (project rule 9).
 
 ## SESSION 3 UPDATE (2026-07-17) — READ FIRST
