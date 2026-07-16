@@ -16,13 +16,17 @@ from torch import nn
 from lewam.models.module import AdaLNBlock, sinusoidal_embedding, ViTEncoder
 
 class GCHead(nn.Module):
-    """cat[z_t, z_goal] -> 3 AdaLN blocks -> action."""
+    """cat[state, z_goal] -> 3 AdaLN blocks -> action. `state` is one z_dim vector by
+    default (the split's z_t); `state_dim` widens it so a caller can pass a concatenated
+    state (e.g. the unified model's [z_t, c_t] skip). Defaulting state_dim=z_dim keeps the
+    split's head byte-identical (in_dim = 2*z_dim)."""
 
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
-                 n_freqs=64, cond_dim=128, dropout=0.1):
+                 n_freqs=64, cond_dim=128, dropout=0.1, state_dim=None):
         super().__init__()
         self.n_freqs = n_freqs
-        in_dim = 2 * z_dim
+        state_dim = z_dim if state_dim is None else state_dim
+        in_dim = state_dim + z_dim
         sin_dim = 2 * n_freqs
         self.horizon_mlp = nn.Sequential(
             nn.Linear(sin_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))

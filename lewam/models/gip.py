@@ -232,6 +232,45 @@ def load_lewam_split_model(run_name, which="best"):
     return model, cfg
 
 
+def load_lewam_unified_model(run_name, which="best"):
+    """Load a trained LeWAM-Unified model (lewam.models.lewam_unified.LeWAMUnified) + its
+    config, both written by scripts/train_lewam_unified.py.
+
+    Reads checkpoints/<run_name>/lewam_unified_config.json (arch dims incl. window/agg_depth
+    + action z-score stats) and lewam_unified_best.pt (or _latest.pt). The checkpoint is the
+    full model state_dict (encoder./aggregator./gc_head./dynamics. prefixes) -> loads strict.
+    Returns (model, cfg). This is the direct reactive-GC eval path for the unified model;
+    like the split loader it does NOT go through the frozen-LeWM/JEPA rebuild."""
+    from lewam.models.lewam_unified import LeWAMUnified
+
+    cache = Path(get_cache_dir(sub_folder="checkpoints"))
+    run_dir = cache / run_name
+    cfg = json.loads((run_dir / "lewam_unified_config.json").read_text())
+    ckpt = run_dir / ("lewam_unified_latest.pt" if which == "latest" else "lewam_unified_best.pt")
+    if not ckpt.exists():
+        ckpt = run_dir / "lewam_unified_latest.pt"
+    assert ckpt.exists(), f"no lewam_unified_*.pt checkpoint in {run_dir}"
+    sd = torch.load(ckpt, map_location="cpu")
+    proj_w = sd.get("encoder.projector.net.0.weight")
+    proj_hidden = int(proj_w.shape[0]) if proj_w is not None else None
+    model = LeWAMUnified(
+        embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
+        hidden_dim=int(cfg["hidden_dim"]), img_size=224,
+        dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
+        window=int(cfg["window"]), agg_depth=int(cfg["agg_depth"]),
+        agg_heads=int(cfg.get("agg_heads", 4)),
+        agg_residual=bool(cfg.get("agg_residual", True)),
+        action_skip=bool(cfg.get("action_skip", False)),
+        dyn_on_ct=bool(cfg.get("dyn_on_ct", True)),
+    )
+    res = model.load_state_dict(sd, strict=True)
+    print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
+          f"(raw {cfg['action_raw_dim']}x{cfg['frameskip']}) H_max={cfg['H_max']} "
+          f"window={cfg['window']} agg_depth={cfg['agg_depth']} "
+          f"missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
+    return model, cfg
+
+
 def attach_intention_actor(model, history_size=3, goal_conditioned=False):
     """Make a GIP model satisfy the Actionable protocol so CEM warm-starts from
     the intention. Binds get_action(info, horizon, prefix_actions) onto the
@@ -785,6 +824,97 @@ class LeWAMSplitPolicy(BasePolicy):
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
+# LeWAM-Unified eval adapter (mode: unified_policy = reactive GC over a state window)
+class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
+    """Eval adapter for LeWAM-Unified. Structurally the split policy, but instead of a
+    single-frame z_t it maintains a per-env deque of the last `window` observed frames
+    (one per obs-step / replan), encodes that window, and reads the action off the
+    aggregated context latent c_t = z_t + Aggr([z_{t-k..t}]):
+
+      window = [last W observed frames]            # left-padded (repeat oldest) to length W
+      z_win  = model.encode(window)                # (R, W, D)
+      c_t    = model.aggregate(z_win)              # (R, D) = z_t + temporal correction
+      a      = model.gc_head(c_t, z_goal, h_norm)  # (R, block_dim) z-scored action block
+
+    Frame buffering matches training's causal window (clamp to episode start = repeat the
+    first observed frame). Everything else (goal encode, horizon countdown, un-z-score,
+    action-block unstack, model.eval()) is inherited from LeWAMSplitPolicy unchanged."""
+
+    def __init__(self, model, cfg, *a, **kw):
+        super().__init__(model, cfg, *a, **kw)
+        self.type = "lewam_unified_policy"
+        self.window = int(cfg["window"])
+        self._frame_buf = None  # per-env deque of the last W transformed frames
+
+    def set_env(self, env):
+        super().set_env(env)
+        n = getattr(env, "num_envs", 1)
+        self._frame_buf = [deque(maxlen=self.window) for _ in range(n)]
+
+    def _build_window(self, i):
+        """Left-pad the env-i frame deque to length W by repeating the oldest frame."""
+        buf = list(self._frame_buf[i])
+        pad = [buf[0]] * (self.window - len(buf))
+        return torch.stack(pad + buf, dim=0)  # (W, C, H, W)
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kw):
+        info_dict = self._prepare_info(info_dict)
+        n = self.env.num_envs
+        dev = next(self.model.parameters()).device
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(n)]
+            self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+        if self._frame_buf is None:
+            self._frame_buf = [deque(maxlen=self.window) for _ in range(n)]
+
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(n):
+                if flush[i]:
+                    self._action_buffer[i].clear()
+                    self._frame_buf[i].clear()  # new episode: drop the old window
+                    self._steps_left[i] = self.horizon0
+
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
+
+        replan = [i for i in range(n) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            px = info_dict["pixels"][replan]
+            assert "goal" in info_dict, "LeWAM-Unified eval needs info_dict['goal'] (goal-reaching)"
+            gpx = info_dict["goal"][replan]
+            gpx = gpx[:, -1] if gpx.ndim == 5 else gpx  # (R,C,H,W) single goal frame
+            cpx = px[:, -1] if px.ndim == 5 else px     # (R,C,H,W) current frame
+            # push the current frame into each replanning env's window buffer (one obs-step)
+            for row, i in enumerate(replan):
+                self._frame_buf[i].append(cpx[row])
+            windows = torch.stack([self._build_window(i) for i in replan], dim=0)  # (R,W,C,H,W)
+            R, Wn = windows.shape[0], windows.shape[1]
+            z_win = self.model.encode(windows.reshape(R * Wn, *windows.shape[2:]).to(dev).float())
+            z_win = z_win.reshape(R, Wn, -1)
+            z_g = self.model.encode(gpx.to(dev).float())   # (R, D)
+            steps = np.maximum(self._steps_left[replan], 1.0)
+            h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                  device=dev, dtype=torch.float32)
+            if self.ablate_horizon:
+                h_norm = torch.zeros_like(h_norm)
+            # gc_action encapsulates aggregate + skip-assembly -> arm-agnostic across ablations
+            z_blk = self.model.gc_action(z_win, z_g, h_norm)   # (R, block_dim) z-scored
+            raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
+                   * self._astd + self._amean)             # un-z-score per raw dim
+            raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
+            for row, i in enumerate(replan):
+                self._action_buffer[i].extend(raw[row])
+                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)  # one obs-step consumed
+
+        action = torch.full((n, self.action_dim), float("nan"))
+        for i in range(n):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
 # policy factory (the one config switch)
 def build_policy(cfg, model, adim, process, transform):
     """Dispatch on cfg.gip_eval.mode -> a configured policy."""
@@ -827,6 +957,22 @@ def build_policy(cfg, model, adim, process, transform):
             H_max=int(ge.get("horizon_H_max", split_cfg.get("H_max", 50))),
             process=process, transform=transform,
             ablate_horizon=bool(ge.get("ablate_horizon", split_cfg.get("ablate_horizon", False))),
+        )
+
+    # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
+    # attached as model._unified_cfg (done in eval_gip.py). Reactive GC over a state window, no CEM.
+    if mode == "unified_policy":
+        ge = cfg.get("gip_eval", {})
+        uni_cfg = getattr(model, "_unified_cfg")
+        horizon0 = ge.get("horizon0", None)
+        if horizon0 is None:
+            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+        return LeWAMUnifiedPolicy(
+            model=model, cfg=uni_cfg, action_block=action_block,
+            action_dim=adim // action_block, horizon0=float(horizon0),
+            H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
+            process=process, transform=transform,
+            ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
         )
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
