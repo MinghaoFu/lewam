@@ -109,12 +109,18 @@ def flatten_for_training(frame_list, act_list, device):
         frame_list[ep] = None  # free the source episode tensor incrementally
     if device != "cpu":
         Frames = Frames.to(device)
+    # per-FRAME action block: A_frame[base+t] = a[t] (the action AT obs-step t, i.e. the action
+    # that led INTO frame t+1). Used by agg_action_cond to look up each window token's previous
+    # action a_{tau-1} = A_frame[frame-1]. Zero elsewhere (never read where the mask is False).
+    adim = act_list[0].shape[1]
+    A_frame = torch.zeros((total, adim), dtype=act_list[0].dtype)
     t_gidx, maxh_list, ep_base_list, A = [], [], [], []
     for ep, a in enumerate(act_list):
         n_obs = a.shape[0]
         n_fr = (offsets[ep + 1] if ep + 1 < len(offsets) else total) - offsets[ep]
         base = offsets[ep]
         last = n_fr - 1
+        A_frame[base:base + min(n_obs, n_fr)] = a[: min(n_obs, n_fr)]
         n_valid = min(n_obs, n_fr - 1)
         for t in range(n_valid):
             t_gidx.append(base + t)
@@ -125,7 +131,8 @@ def flatten_for_training(frame_list, act_list, device):
             torch.stack(A, dim=0),
             torch.tensor(t_gidx, dtype=torch.long),
             torch.tensor(maxh_list, dtype=torch.long),
-            torch.tensor(ep_base_list, dtype=torch.long))
+            torch.tensor(ep_base_list, dtype=torch.long),
+            A_frame)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,13 +143,14 @@ def flatten_for_training(frame_list, act_list, device):
 # left-pads the first W-1 obs-steps of an episode with the episode's first frame. #
 # --------------------------------------------------------------------------- #
 class WindowPairDataset(Dataset):
-    def __init__(self, frames, a_flat, t_gidx, maxh, ep_base, indices, h_max,
+    def __init__(self, frames, a_flat, t_gidx, maxh, ep_base, a_frame, indices, h_max,
                  window, ablate_horizon):
         self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only
-        self.a_flat = a_flat          # [M,adim] fp16, CPU
+        self.a_flat = a_flat          # [M,adim] fp16, CPU  action AT sample step t
         self.t_gidx = t_gidx          # [M] long  global frame index of t
         self.maxh = maxh              # [M] long  max horizon (frames to episode end)
         self.ep_base = ep_base        # [M] long  global index of the episode's first frame
+        self.a_frame = a_frame        # [N,adim] fp16  per-frame action block (for agg_action_cond)
         self.indices = indices        # [K] long  train or val subset
         self.h_max = int(h_max)
         self.window = int(window)
@@ -166,12 +174,18 @@ class WindowPairDataset(Dataset):
         W = self.window
         start = ti - (W - 1)
         # window oldest..current; left-pad by clamping to the episode's first frame
-        win = [self.frames[max(base, start + j)] for j in range(W)]
+        frame_idx = [max(base, start + j) for j in range(W)]
+        win = [self.frames[f] for f in frame_idx]
+        # previous-action per token: a_{f-1} = A_frame[f-1], valid iff f > base (else null via mask)
+        a_prev = torch.stack(
+            [self.a_frame[f - 1] if f > base else torch.zeros_like(self.a_frame[0])
+             for f in frame_idx], dim=0)                       # [W, adim]
+        a_prev_mask = torch.tensor([f > base for f in frame_idx], dtype=torch.bool)  # [W]
         # stack [win_0..win_{W-1}, goal, next] -> collate -> [B, W+2, 3, H, W]; fp16 halves H2D bytes
         trip = torch.stack(win + [self.frames[gi], self.frames[ni]], dim=0)
         a_t = self.a_flat[idx]
         h_norm = 0.0 if self.ablate_horizon else min(h, self.h_max) / self.h_max
-        return trip, a_t, h_norm
+        return trip, a_t, h_norm, a_prev, a_prev_mask
 
 
 # --------------------------------------------------------------------------- #
@@ -210,10 +224,16 @@ def main():
     ap.add_argument("--no_agg_residual", action="store_true",
                     help="c_t = Aggr(window) instead of z_t + Aggr(window) (drops the zero-init "
                          "residual that boots the model as the split)")
-    ap.add_argument("--action_skip", action="store_true",
-                    help="action head reads [z_t, c_t] (explicit raw-z_t skip) instead of just c_t")
+    ap.add_argument("--agg_gate", action="store_true",
+                    help="input-dependent sigmoid gate on the residual correction "
+                         "(c_t = z_t + g(z_t)*Aggr; still boots as split). residual only.")
+    ap.add_argument("--agg_action_cond", action="store_true",
+                    help="condition each window token z_tau (AdaLN) on the embedded previous "
+                         "action a_{tau-1} (learnable null-action at episode start); actions "
+                         "enter as conditioning, NOT sequence tokens")
     ap.add_argument("--dyn_on_zt", action="store_true",
-                    help="dynamics reads raw z_t instead of the shared c_t (less unified)")
+                    help="dynamics reads raw z_t instead of the shared c_t (= split dynamics; "
+                         "labeled control, the aggregator is otherwise always used)")
     # loss weights
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
@@ -263,7 +283,8 @@ def main():
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          window=args.window, agg_depth=args.agg_depth,
                          agg_heads=args.agg_heads, agg_residual=not args.no_agg_residual,
-                         action_skip=args.action_skip, dyn_on_ct=not args.dyn_on_zt).to(device)
+                         agg_gate=args.agg_gate, agg_action_cond=args.agg_action_cond,
+                         dyn_on_ct=not args.dyn_on_zt).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -277,7 +298,7 @@ def main():
     # ---- data ----
     frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
                                           frameskip, max_eps=max_eps)
-    Frames, A_flat, t_gidx, maxh, ep_base = flatten_for_training(
+    Frames, A_flat, t_gidx, maxh, ep_base, A_frame = flatten_for_training(
         frame_list, act_list, "cpu")
     del frame_list
     n_samples = t_gidx.shape[0]
@@ -292,9 +313,9 @@ def main():
           f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
-    train_ds = WindowPairDataset(Frames, A_flat, t_gidx, maxh, ep_base, train_idx,
+    train_ds = WindowPairDataset(Frames, A_flat, t_gidx, maxh, ep_base, A_frame, train_idx,
                                  args.H_max, args.window, args.ablate_horizon)
-    val_ds = WindowPairDataset(Frames, A_flat, t_gidx, maxh, ep_base, val_idx,
+    val_ds = WindowPairDataset(Frames, A_flat, t_gidx, maxh, ep_base, A_frame, val_idx,
                                args.H_max, args.window, args.ablate_horizon)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
@@ -330,8 +351,8 @@ def main():
         model="lewam_unified", z_dim=192, action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         window=args.window, agg_depth=args.agg_depth, agg_heads=args.agg_heads,
-        agg_residual=not args.no_agg_residual, action_skip=args.action_skip,
-        dyn_on_ct=not args.dyn_on_zt,
+        agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
+        agg_action_cond=args.agg_action_cond, dyn_on_ct=not args.dyn_on_zt,
         H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
@@ -365,11 +386,16 @@ def main():
         model.train()
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
 
-        for trip, a_t, h_norm in train_loader:
+        for trip, a_t, h_norm, a_prev, a_prev_mask in train_loader:
             n = trip.shape[0]
             trip = trip.to(device, non_blocking=True)
             a_t = a_t.to(device, non_blocking=True).float()
             h_norm = h_norm.to(device, non_blocking=True).float()
+            if model.agg_action_cond:
+                a_prev = a_prev.to(device, non_blocking=True).float()
+                a_prev_mask = a_prev_mask.to(device, non_blocking=True)
+            else:
+                a_prev = a_prev_mask = None
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 window, z_g, z_n = encode_split(trip, n)
@@ -379,7 +405,7 @@ def main():
                 z_t_f = window_f[:, -1]  # current-frame latent (for SIGReg)
 
                 # no stop-grad: the encoder also learns from the dynamics target
-                a_pred, z_n_pred = model(window_f, z_g_f, h_norm, a_t)
+                a_pred, z_n_pred = model(window_f, z_g_f, h_norm, a_t, a_prev, a_prev_mask)
                 loss_act = F.mse_loss(a_pred, a_t)
                 loss_dyn = F.mse_loss(z_n_pred, z_n_f)
 
@@ -392,7 +418,7 @@ def main():
                 # consistency: the predicted action through dynamics should reach z_n
                 loss_cyc = torch.tensor(0.0, device=device)
                 if args.w_cyc > 0:
-                    c_t = model.aggregate(window_f)
+                    c_t = model.aggregate(window_f, a_prev, a_prev_mask)
                     dyn_in = c_t if model.dyn_on_ct else z_t_f
                     z_n_cyc = model.dynamics(dyn_in, a_pred, z_g_f)
                     loss_cyc = F.mse_loss(z_n_cyc, z_n_f.detach())
@@ -415,16 +441,21 @@ def main():
         model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
-            for trip, a_t, h_norm in val_loader:
+            for trip, a_t, h_norm, a_prev, a_prev_mask in val_loader:
                 n = trip.shape[0]
                 trip = trip.to(device, non_blocking=True)
                 a_t = a_t.to(device, non_blocking=True).float()
                 h_norm = h_norm.to(device, non_blocking=True).float()
+                if model.agg_action_cond:
+                    a_prev = a_prev.to(device, non_blocking=True).float()
+                    a_prev_mask = a_prev_mask.to(device, non_blocking=True)
+                else:
+                    a_prev = a_prev_mask = None
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     window, z_g, z_n = encode_split(trip, n)
                     window_f, z_g_f, z_n_f = window.float(), z_g.float(), z_n.float()
-                    a_pred, z_n_pred = model(window_f, z_g_f, h_norm, a_t)
+                    a_pred, z_n_pred = model(window_f, z_g_f, h_norm, a_t, a_prev, a_prev_mask)
                     loss_act = F.mse_loss(a_pred, a_t)
                     loss_dyn = F.mse_loss(z_n_pred, z_n_f)
 

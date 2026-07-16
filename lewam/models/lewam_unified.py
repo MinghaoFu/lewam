@@ -4,48 +4,63 @@ seq's failure mode (a deep predictor entangled with dynamics, or interleaved act
 See docs/LEWAM_UNIFIED_HANDOFF.md Part 2.
 
   pixels_{t-k..t} -> encoder -> [z_{t-k}, ..., z_t]
-  c_t = z_t + Aggr([z_{t-k..t}])                # shallow causal aggregator, ZERO-INIT residual
-  a_pred = gc_head(state, z_goal, h_norm)       # state = c_t  (or [z_t, c_t] if action_skip)
-  z_pred = dynamics(c_t, a_t, z_goal)           # off the SHARED c_t (or z_t if dyn_on_ct=False)
+  c_t = z_t + g(z_t) * Aggr([z_{t-k..t}])       # shallow causal aggregator, ZERO-INIT residual
+  a_pred = gc_head(c_t, z_goal, h_norm)          # off the shared c_t
+  z_pred = dynamics(c_t, a_t, z_goal)            # off the SHARED c_t (or z_t if dyn_on_zt)
 
-ONE flexible model spans a family of ablation arms, ALL present so every checkpoint strict-loads
-under the single eval adapter (gip.LeWAMUnifiedPolicy). The architecture is fully determined by
-the config the trainer writes, and the loader rebuilds from it. The arms (config flags):
+The action head reads c_t, which is `z_t + gate*Aggr(win)` (residual) or `Aggr(win)`
+(no-residual) -- i.e. the residual flag IS the "include the raw z_t read" lever, and the
+aggregator is always used. dynamics reads the same shared c_t (unification); `dyn_on_zt`
+reverts it to the split's raw-z_t dynamics (a labeled control).
+
+ONE flexible model spans a family of ablation arms, ALL present so every checkpoint
+strict-loads under the single eval adapter (gip.LeWAMUnifiedPolicy); the architecture is fully
+determined by the config the trainer writes, and the loader rebuilds from it. Arms (flags):
   * window        W: temporal context length (1 = no context / split-like control).
   * agg_depth     causal-transformer depth of the aggregator (keep SHALLOW: 1-2).
   * agg_residual  c_t = z_t + Aggr (residual, zero-init -> boots as the split) vs c_t = Aggr.
-  * action_skip   action head reads [z_t, c_t] (explicit raw-z_t skip) vs just c_t.
-  * dyn_on_ct     dynamics reads the shared c_t (more unified) vs raw z_t (action-only agg).
+  * agg_gate      input-dependent sigmoid gate on the residual correction (still boots as split).
+  * agg_action_cond  each window token z_tau conditions (AdaLN, ConditionalBlock) on the
+                  embedded PREVIOUS action a_{tau-1} (learnable null-action at episode start);
+                  actions enter as CONDITIONING, not as sequence tokens (no eval covariate
+                  shift from action tokens, no doubled sequence length).
+  * dyn_on_ct     dynamics reads the shared c_t (more unified) vs raw z_t (= split dynamics).
 
 `GCHead`/`GoalCondDynamics` are imported from lewam_split so the heads match the split's; the
-only new component is the aggregator (and, for action_skip, a wider gc_head input).
+only new module is the aggregator (+ its optional action embedder / null-action / gate).
 """
 
 import torch
 from torch import nn
 
-from lewam.models.module import Block, ViTEncoder
+from lewam.models.module import Block, ConditionalBlock, ViTEncoder
 from lewam.models.lewam_split import GCHead, GoalCondDynamics
 
 
 class StateWindowAggregator(nn.Module):
     """Shallow causal transformer over a fixed-length window of state latents
-    [z_{t-k}, ..., z_t] -> an output at the last position. A learned positional embedding is
-    added over the (fixed) window positions; blocks are causal; only the LAST position (the
-    current frame) is read out. With `zero_init` the output projection is zero-initialized so
-    the residual model boots as the single-frame split (c_t == z_t at init)."""
+    [z_{t-k}, ..., z_t] -> a raw correction at the last position. A learned positional embedding
+    is added over the (fixed) window positions; blocks are causal; only the LAST position (the
+    current frame) is read out. With `zero_init` the output projection is zero-initialized so a
+    residual model boots as the single-frame split (correction == 0 -> c_t == z_t at init).
+
+    If `action_cond`, each token z_tau is AdaLN-conditioned (ConditionalBlock) on the embedded
+    PREVIOUS action a_{tau-1}; positions with no valid previous action (episode start / left-pad)
+    use a learnable null-action embedding. Actions are CONDITIONING here, never sequence tokens."""
 
     def __init__(self, z_dim=192, window=8, depth=2, heads=4, dim_head=48,
-                 mlp_dim=None, dropout=0.0, zero_init=True):
+                 mlp_dim=None, dropout=0.0, zero_init=True, action_cond=False, action_dim=25):
         super().__init__()
         self.window = int(window)
         self.z_dim = int(z_dim)
+        self.action_cond = bool(action_cond)
         mlp_dim = mlp_dim or 4 * z_dim
         self.pos_emb = nn.Parameter(torch.zeros(1, self.window, z_dim))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
+        block_cls = ConditionalBlock if self.action_cond else Block
         self.blocks = nn.ModuleList([
-            Block(z_dim, heads=heads, dim_head=dim_head, mlp_dim=mlp_dim,
-                  dropout=dropout, causal=True)
+            block_cls(z_dim, heads=heads, dim_head=dim_head, mlp_dim=mlp_dim,
+                      dropout=dropout, causal=True)
             for _ in range(int(depth))
         ])
         self.norm = nn.LayerNorm(z_dim)
@@ -53,12 +68,25 @@ class StateWindowAggregator(nn.Module):
         if zero_init:
             nn.init.zeros_(self.out_proj.weight)  # corr==0 at init -> residual c_t == z_t
             nn.init.zeros_(self.out_proj.bias)
+        if self.action_cond:
+            self.action_embed = nn.Sequential(
+                nn.Linear(action_dim, z_dim), nn.SiLU(), nn.Linear(z_dim, z_dim))
+            self.null_action = nn.Parameter(torch.zeros(z_dim))
 
-    def forward(self, window):
-        """window: (B, W, D) state latents, oldest..current. Returns (B, D) at last position."""
+    def forward(self, window, a_prev=None, a_prev_mask=None):
+        """window: (B, W, D) oldest..current. a_prev: (B, W, action_dim) previous-action blocks
+        aligned to each token (only used if action_cond); a_prev_mask: (B, W) bool, False where
+        there is no valid previous action (-> null-action). Returns (B, D) at the last position."""
         x = window + self.pos_emb[:, : window.shape[1]]
-        for blk in self.blocks:
-            x = blk(x)
+        if self.action_cond:
+            cond = self.action_embed(a_prev)                              # (B, W, D)
+            cond = torch.where(a_prev_mask.unsqueeze(-1), cond,
+                               self.null_action.to(cond.dtype))           # null where invalid
+            for blk in self.blocks:
+                x = blk(x, cond)
+        else:
+            for blk in self.blocks:
+                x = blk(x)
         return self.out_proj(self.norm(x[:, -1]))
 
 
@@ -68,22 +96,27 @@ class LeWAMUnified(nn.Module):
 
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, window=8, agg_depth=2,
-                 agg_heads=4, agg_residual=True, action_skip=False, dyn_on_ct=True):
+                 agg_heads=4, agg_residual=True, agg_gate=False, agg_action_cond=False,
+                 dyn_on_ct=True):
         super().__init__()
         self.window = int(window)
         self.agg_residual = bool(agg_residual)
-        self.action_skip = bool(action_skip)
+        self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
+        self.agg_action_cond = bool(agg_action_cond)
         self.dyn_on_ct = bool(dyn_on_ct)
         self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden)
         self.aggregator = StateWindowAggregator(
             z_dim=embed_dim, window=window, depth=agg_depth, heads=agg_heads,
-            dim_head=max(embed_dim // agg_heads, 1), zero_init=self.agg_residual)
-        # action head reads [z_t, c_t] (2*embed_dim state) if action_skip else c_t (embed_dim)
-        act_state_dim = 2 * embed_dim if self.action_skip else embed_dim
+            dim_head=max(embed_dim // agg_heads, 1), zero_init=self.agg_residual,
+            action_cond=self.agg_action_cond, action_dim=action_dim)
+        if self.agg_gate:
+            # input-dependent sigmoid gate on the correction; bias zero-init -> g == 0.5 at init.
+            self.gate_proj = nn.Linear(embed_dim, embed_dim)
+            nn.init.zeros_(self.gate_proj.bias)
         self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
-                              hidden_dim=hidden_dim, dropout=dropout, state_dim=act_state_dim)
+                              hidden_dim=hidden_dim, dropout=dropout)
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
                                          hidden_dim=hidden_dim)
 
@@ -91,26 +124,28 @@ class LeWAMUnified(nn.Module):
         """pixels: (N, 3, H, W) -> (N, embed_dim) cls latent."""
         return self.encoder(pixels)
 
-    def aggregate(self, window):
-        """window: (B, W, embed_dim) state latents (last = current) -> c_t: (B, embed_dim)."""
-        out = self.aggregator(window)
-        return window[:, -1] + out if self.agg_residual else out
+    def aggregate(self, window, a_prev=None, a_prev_mask=None):
+        """window: (B, W, embed_dim) (last = current) -> c_t: (B, embed_dim)."""
+        u = self.aggregator(window, a_prev, a_prev_mask)
+        if not self.agg_residual:
+            return u
+        z_t = window[:, -1]
+        if self.agg_gate:
+            u = torch.sigmoid(self.gate_proj(z_t)) * u
+        return z_t + u
 
-    def _act_state(self, window, c_t):
-        """State vector fed to gc_head: [z_t, c_t] (action_skip) or c_t."""
-        return torch.cat([window[:, -1], c_t], dim=-1) if self.action_skip else c_t
+    def gc_action(self, window, z_goal, h_norm, a_prev=None, a_prev_mask=None):
+        """Reactive action from a state window. Encapsulates aggregate() so the eval adapter is
+        arm-agnostic. window: (B, W, embed_dim)."""
+        c_t = self.aggregate(window, a_prev, a_prev_mask)
+        return self.gc_head(c_t, z_goal, h_norm)
 
-    def gc_action(self, window, z_goal, h_norm):
-        """Reactive action from a state window. Encapsulates aggregate + skip-assembly so the
-        eval adapter is arm-agnostic. window: (B, W, embed_dim)."""
-        c_t = self.aggregate(window)
-        return self.gc_head(self._act_state(window, c_t), z_goal, h_norm)
-
-    def forward(self, window, z_goal, h_norm, a_t):
-        """window: (B, W, embed_dim) (last = current); z_goal: (B, embed_dim);
-        h_norm: (B,); a_t: (B, action_dim). Returns (a_pred, z_pred)."""
-        c_t = self.aggregate(window)
-        a_pred = self.gc_head(self._act_state(window, c_t), z_goal, h_norm)
+    def forward(self, window, z_goal, h_norm, a_t, a_prev=None, a_prev_mask=None):
+        """window: (B, W, embed_dim) (last = current); z_goal: (B, embed_dim); h_norm: (B,);
+        a_t: (B, action_dim); a_prev/a_prev_mask: previous-action conditioning (agg_action_cond).
+        Returns (a_pred, z_pred)."""
+        c_t = self.aggregate(window, a_prev, a_prev_mask)
+        a_pred = self.gc_head(c_t, z_goal, h_norm)
         dyn_in = c_t if self.dyn_on_ct else window[:, -1]
         z_pred = self.dynamics(dyn_in, a_t, z_goal)
         return a_pred, z_pred
