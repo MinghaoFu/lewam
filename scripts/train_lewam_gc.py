@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -37,6 +38,26 @@ import stable_worldmodel as swm
 from lewam.utils import get_img_preprocessor, get_column_normalizer
 from lewam.models.module import SIGReg
 from lewam.models.lewam_split import LeWAMSplit
+
+
+def durable_sync(files, dst_dir):
+    """Mirror files into dst_dir (e.g. an HDFS mount) so a checkpoint survives the loss of
+    the worker's ephemeral local disk. Writes to a sibling .tmp then os.replace, so a crash
+    mid-copy can't leave a truncated checkpoint. Best-effort: never raises into training."""
+    if not dst_dir:
+        return
+    try:
+        dst = Path(dst_dir)
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            f = Path(f)
+            if not f.exists():
+                continue
+            tmp = dst / (f.name + ".tmp")
+            shutil.copyfile(f, tmp)
+            os.replace(tmp, dst / f.name)
+    except Exception as e:
+        print(f"[lewam-gc] WARN durable ckpt sync -> {dst_dir} failed: {e}", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +190,10 @@ def main():
     ap.add_argument("--keys_to_load", type=str, default="pixels,action,observation")
     ap.add_argument("--warmup_epochs", type=int, default=10)
     ap.add_argument("--run_dir", type=str, default=None)
+    ap.add_argument("--ckpt_sync_dir", type=str, default=None,
+                    help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into "
+                         "on each improvement, so losing the worker's ephemeral disk never "
+                         "costs the run. run_dir stays the fast local write target.")
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
     ap.add_argument("--w_reg", type=float, default=0.04)
@@ -289,6 +314,7 @@ def main():
         dynamics_lr=args.dynamics_lr,
     )
     (run_dir / "lewam_gc_config.json").write_text(json.dumps(cfg_out, indent=2))
+    durable_sync([run_dir / "lewam_gc_config.json"], args.ckpt_sync_dir)
 
     # ---- training loop ----
     best_val = float("inf")
@@ -403,6 +429,10 @@ def main():
             best_val = combined_val
             torch.save(full_sd, run_dir / "lewam_gc_best.pt")
             torch.save(model.gc_head.state_dict(), run_dir / "gc_head_best.pt")
+            # mirror the eval-relevant best ckpt to durable storage the moment it improves
+            durable_sync([run_dir / "lewam_gc_config.json",
+                          run_dir / "lewam_gc_best.pt",
+                          run_dir / "gc_head_best.pt"], args.ckpt_sync_dir)
 
     print(f"[lewam-gc] DONE  best_val={best_val:.5f}  saved -> {run_dir}", flush=True)
 
