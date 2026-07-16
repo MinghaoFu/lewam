@@ -2,6 +2,34 @@
 
 Context for a fresh session picking up this work. Written thorough on purpose (project rule 9).
 
+## SESSION 2 UPDATE (2026-07-16) — READ FIRST
+
+**Done + committed/pushed on `lewam-seq`:** `8fd7bf5` eval adapter (gip.py `LeWAMSeqPolicy` + `load_lewam_seq_model`, `eval_gip.py` modes `seq_policy`/`seq_cem`); `5fc53f6` `scripts/eval_lewam_seq.sh` + results; `da8f8c7` **per-head goal-dropout** (`--goal_dropout_act` default 0 = policy always-GC, `--goal_dropout_dyn` default 0.5; legacy `--goal_dropout_p` shim); `bc5899d` doc; `f50b66f` **`+gip_eval.history_size` knob**.
+
+**All 4 seq tasks trained twice:** goal_dropout 0.5 (`SEQ_BREADTH` tworoom/cube stream, `SEQ_BREADTH2` pusht/reacher preload) AND always-GC fix (`SEQ_GDFIX`, all 4, preload). Ckpts at `ckpts/lewam_gc_repro/{SEQ_BREADTH,SEQ_BREADTH2,SEQ_GDFIX}/ckpts_live/<task>_seq/`. All eval logs + `eval_heartbeat.log` in `.../SEQ_EVAL/`.
+
+**HEADLINE (seq_policy, 3 seeds N=50):**
+| task | 0.5-baseline | fixed(act=0) | split ref |
+|---|---|---|---|
+| tworoom | 94 | **100** | 100 |
+| cube | 80 | **92** | 100 |
+| pusht | 69 | **61** | 88 |
+| reacher | 41 | **37** | 98 |
+The fix bridged tworoom (fully) + cube (mostly, −8) but NOT pusht/reacher. **Gap grows with task precision.** Root of the fix: shared `goal_dropout_p` masked one `z_goal` into both heads → policy head undertrained on the goal at 0.5.
+
+**seq_cem is exploitable** (not a tuning issue): tworoom-fixed 79% @256/3/32 but WORSE 62% @300/10/30 (LeWM's knobs). More optimization → worse ⇒ gameable BC-shaped latent. seq_policy is the path.
+**history_size:** tworoom-fixed HS1=96, HS≥2=100 (helps, saturates at 2, no fragility). cube flat, pusht rises→HS4, reacher-0.5 peaks HS2 then declines (mild covariate shift). reacher-fixed HS{1,2,4,8}=27/30/37/37 (all ≪98).
+**BN-in-projector** (`ViTEncoder.projector` uses `BatchNorm1d`, intentional for SIGReg) → adapter forces `model.eval()`. tworoom dyn train/val gap closed by ep50 (val_dyn 0.009).
+
+**⚠️ REACHER INVESTIGATION — IN PROGRESS, DO NOT CONCLUDE YET.** seq reacher=37 vs split=98. Ruled out as non-architectural (all VERIFIED identical seq-vs-split): action z-scoring, goal/horizon sampling, image preproc, ViT-tiny encoder, frameskip/block dims (raw2×fs5=10), 50 epochs, data (reacher = 10k eps × 40 obs-frames, 297k windows, none dropped). Eval is FAITHFUL (`get_action`==`forward` bit-for-bit, via `seq_evalcheck.sh`). Per-position probe (`seq_pos_probe.sh`): seq reacher decision-frame train_act 0.62 (cube 0.08). Module refactor found (`module.py` dropped the affine LayerNorm inside `FeedForward`+`Attention` that `main`/`lewm.py` had — old=redundant double-norm, new=correct single pre-norm) but that's an INTENTIONAL cleanup, NOT the cause (user confirmed; old modules live in `lewam/models/lewm.py`, `main` = previous impl).
+- **RUNNING TEST (the current thread):** retrain the CURRENT split (`train_lewam_gc`, current modules) on tworoom + reacher → does it reproduce ~100/98? Dir `ckpts/lewam_gc_repro/SPLIT_RETRAIN/` (`heartbeat.log`, `hb_<task>.log`, `train_<task>.log`), entry `split_traineval.sh <task> <dataset> <gpu> [maxeps]`. tworoom on 996941 GPU0, reacher on 997135 GPU0 `--max_eps 8000` (alone, to dodge the flatten-OOM). **First action next session: read the split reacher SR + train_act.**
+- **KEY REFRAME to confirm (HOLD):** split reacher ep10 train_act=0.975 — HIGH, ≈ the seq's. So reacher action-MSE is inherently high for BOTH architectures (like tworoom: high action-loss, still 100 SR). If split reacher → ~98 with train_act ~0.8–0.9, then the seq's 37 is **NOT a fitting problem** — it's **eval/execution** (the seq rolls the action head through the transformer predictor even at HS=1; the split reads its head off raw `z_t` directly). If so, "seq underfits reacher" is the WRONG diagnosis and the fix is in the rollout path, not the training.
+- **Candidate fixes to test after the verdict:** typed attention (action head attends to state tokens only — targets the noisy-action-token corruption; PyTorch SDPA/`attn_mask` handles it natively, 16 tokens so no kernel work); residual-skip (action head off raw `z_t`, ≈ the split — a success = drop the seq policy path); MSE head suspect for precise tasks → try `GMMHead`/`DiffusionHead` (exist in module.py, `--action_head` reserved).
+
+**OPS gotchas (learned the hard way):** `mlx worker login <id> -- bash <hdfs_script> <args>` — the PLAIN form (NOT `bash -c "..."` → hits a missing `/opt/tiger/mlx_deploy/mlxrc` and the script never runs). Set `CUDA_VISIBLE_DEVICES` INSIDE the script (env doesn't propagate through login). Script args containing `|` get shell-interpreted remotely → use `:` as delimiter. `train_lewam_gc` LOST the flatten OOM-fix in the merge → `torch.cat` of all frames doubles RAM (reacher 121→242 GB, OOM-kills rc=137); use `--max_eps` or re-add the per-episode-list-index fix. Co-locate evals on the training workers' free GPUs (both 996941 + 997135 are up, 2×A100-80G, 495 GB). Helper scripts on HDFS `code/`: `seq_eval.sh` `<task> <dataset_h5> <mode> <tag> <ckpt_src> [gpu] [cem_s cem_i cem_e] [hist]`, `seq_hs_sweep.sh`, `seq_hs_multi.sh`, `split_traineval.sh`, `seq_evalcheck.sh`, `seq_pos_probe.sh`, `seq_gdfix.sh`. Read progress from HDFS heartbeat files, don't re-derive.
+
+---
+
 ## Machine / repo / branches
 - Running ON dev machine `minghao4` (user 傅明浩 / minghao.fu / tiger), direct local access. Repo `/home/tiger/lewam`.
 - Active worktree: `/home/tiger/lewam/.claude/worktrees/lewam-gc-preload-fix` (this is where all edits happened; despite the name it currently sits on branch **`lewam-seq`**).
