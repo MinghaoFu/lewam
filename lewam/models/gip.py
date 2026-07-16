@@ -195,6 +195,43 @@ def load_lewam_seq_model(run_name, which="best"):
     return model, cfg
 
 
+def load_lewam_split_model(run_name, which="best"):
+    """Load a trained LeWAM-Split model (lewam.models.lewam_split.LeWAMSplit) + its
+    config, both written by scripts/train_lewam_gc.py.
+
+    Reads checkpoints/<run_name>/lewam_gc_config.json (arch dims + action z-score
+    stats: action_mean/std, frameskip, action_raw_dim) and lewam_gc_best.pt (or
+    lewam_gc_latest.pt when which='latest' or best is absent). The checkpoint is the
+    full model state_dict (encoder./gc_head./dynamics. prefixes), so it loads strict.
+    Returns (model, cfg). This is the direct reactive-GC eval path for the split model;
+    it does NOT go through the frozen-LeWM/JEPA rebuild (load_gcidm_model), whose
+    projector no longer matches module.ViTEncoder's."""
+    from lewam.models.lewam_split import LeWAMSplit
+
+    cache = Path(get_cache_dir(sub_folder="checkpoints"))
+    run_dir = cache / run_name
+    cfg = json.loads((run_dir / "lewam_gc_config.json").read_text())
+    ckpt = run_dir / ("lewam_gc_latest.pt" if which == "latest" else "lewam_gc_best.pt")
+    if not ckpt.exists():
+        ckpt = run_dir / "lewam_gc_latest.pt"
+    assert ckpt.exists(), f"no lewam_gc_*.pt checkpoint in {run_dir}"
+    sd = torch.load(ckpt, map_location="cpu")
+    # infer the projector width from the checkpoint so older ckpts (wider projector)
+    # load into the current ViTEncoder without a config field.
+    proj_w = sd.get("encoder.projector.net.0.weight")
+    proj_hidden = int(proj_w.shape[0]) if proj_w is not None else None
+    model = LeWAMSplit(
+        embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
+        hidden_dim=int(cfg["hidden_dim"]), img_size=224,
+        dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
+    )
+    res = model.load_state_dict(sd, strict=True)
+    print(f"[SPLIT] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
+          f"(raw {cfg['action_raw_dim']}x{cfg['frameskip']}) H_max={cfg['H_max']} "
+          f"missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
+    return model, cfg
+
+
 def attach_intention_actor(model, history_size=3, goal_conditioned=False):
     """Make a GIP model satisfy the Actionable protocol so CEM warm-starts from
     the intention. Binds get_action(info, horizon, prefix_actions) onto the
@@ -651,6 +688,103 @@ class LeWAMSeqPolicy(BasePolicy):
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
+# LeWAM-Split eval adapter (mode: split_policy = reactive one-step goal-conditioned)
+class LeWAMSplitPolicy(BasePolicy):
+    """Eval adapter for LeWAM-Split (lewam.models.lewam_split.LeWAMSplit), the split
+    goal-conditioned model trained by scripts/train_lewam_gc.py. Reactive one-step GC
+    policy (mode=split_policy) -- structurally identical to GCIDMPolicy, but reading the
+    split model's OWN encoder + gc_head instead of a frozen LeWM + separate GCIDMHead:
+
+      z_t   = model.encode(current pixels)          # (R, D) cls latent (projector applied)
+      z_goal= model.encode(goal pixels)             # (R, D)
+      h     = remaining horizon in OBS-steps (init horizon0 = goal_offset/frameskip,
+              decremented per replan, clamped >=1, normalized min(h,H_max)/H_max)
+      a     = model.gc_head(z_t, z_goal, h_norm)    # (R, block_dim) z-scored action block
+
+    The z-scored block is un-z-scored with the model's OWN stats (action_mean/std,
+    frameskip, action_raw_dim from lewam_gc_config.json -- the exact inverse of the
+    trainer's per-raw-dim z-score), unstacked into `action_block` env actions, and
+    executed before re-observing. It ignores process['action'] (un-norm handled
+    internally, so no double-normalization). NO CEM, NO WM rollout. model.eval() is
+    forced (BatchNorm in the ViT projector). This is the head-off-raw-z_t reactive
+    baseline the seq policy's AR rollout is compared against."""
+
+    def __init__(self, model, cfg, action_block, action_dim, horizon0=None,
+                 H_max=50, process=None, transform=None, ablate_horizon=False, **kw):
+        super().__init__(**kw)
+        self.type = "lewam_split_policy"
+        self.model = model.eval()  # BN-in-projector -> eval() = deterministic running stats
+        self.cfg = cfg
+        self.frameskip = int(cfg["frameskip"])
+        self.raw_adim = int(cfg["action_raw_dim"])
+        self.block_dim = int(cfg["action_dim"])           # frameskip * raw_adim
+        self.action_block = int(action_block)
+        self.action_dim = int(action_dim)                 # per-step raw dim = raw_adim
+        self.H_max = int(cfg.get("H_max", H_max))
+        self.horizon0 = float(horizon0) if horizon0 is not None else float(self.H_max)
+        self.ablate_horizon = bool(ablate_horizon)
+        self.transform = transform or {}
+        self.process = {}                                 # action un-norm handled internally
+        dev = next(model.parameters()).device
+        self._amean = torch.tensor(cfg["action_mean"], dtype=torch.float32, device=dev)  # (raw_adim,)
+        self._astd = torch.tensor(cfg["action_std"], dtype=torch.float32, device=dev).clamp_min(1e-6)
+        self._action_buffer = None
+        self._steps_left = None  # per-env remaining obs-steps
+
+    def set_env(self, env):
+        self.env = env
+        n = getattr(env, "num_envs", 1)
+        self._action_buffer = [deque() for _ in range(n)]
+        self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kw):
+        info_dict = self._prepare_info(info_dict)
+        n = self.env.num_envs
+        dev = next(self.model.parameters()).device
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(n)]
+            self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(n):
+                if flush[i]:
+                    self._action_buffer[i].clear()
+                    self._steps_left[i] = self.horizon0  # reset countdown for the new episode
+
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
+
+        replan = [i for i in range(n) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            px = info_dict["pixels"][replan]
+            assert "goal" in info_dict, "LeWAM-Split eval needs info_dict['goal'] (goal-reaching)"
+            gpx = info_dict["goal"][replan]
+            gpx = gpx[:, -1] if gpx.ndim == 5 else gpx  # (R,C,H,W) single goal frame
+            cpx = px[:, -1] if px.ndim == 5 else px     # (R,C,H,W) current frame
+            z_t = self.model.encode(cpx.to(dev).float())   # (R, D)
+            z_g = self.model.encode(gpx.to(dev).float())   # (R, D)
+            steps = np.maximum(self._steps_left[replan], 1.0)
+            h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                  device=dev, dtype=torch.float32)
+            if self.ablate_horizon:
+                h_norm = torch.zeros_like(h_norm)
+            z_blk = self.model.gc_head(z_t, z_g, h_norm)   # (R, block_dim) z-scored
+            raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
+                   * self._astd + self._amean)             # un-z-score per raw dim
+            raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
+            for row, i in enumerate(replan):
+                self._action_buffer[i].extend(raw[row])
+                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)  # one obs-step consumed
+
+        action = torch.full((n, self.action_dim), float("nan"))
+        for i in range(n):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
 # policy factory (the one config switch)
 def build_policy(cfg, model, adim, process, transform):
     """Dispatch on cfg.gip_eval.mode -> a configured policy."""
@@ -677,6 +811,22 @@ def build_policy(cfg, model, adim, process, transform):
             cem_samples=int(ge.get("cem_samples", 256)), cem_iters=int(ge.get("cem_iters", 3)),
             cem_elites=int(ge.get("cem_elites", 32)),
             history_size=(int(ge["history_size"]) if ge.get("history_size") else None),
+        )
+
+    # mode=split_policy: LeWAM-Split adapter. `model` is a loaded LeWAMSplit with its config
+    # attached as model._split_cfg (done in eval_gip.py). Reactive one-step GC, no CEM.
+    if mode == "split_policy":
+        ge = cfg.get("gip_eval", {})
+        split_cfg = getattr(model, "_split_cfg")
+        horizon0 = ge.get("horizon0", None)
+        if horizon0 is None:
+            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+        return LeWAMSplitPolicy(
+            model=model, cfg=split_cfg, action_block=action_block,
+            action_dim=adim // action_block, horizon0=float(horizon0),
+            H_max=int(ge.get("horizon_H_max", split_cfg.get("H_max", 50))),
+            process=process, transform=transform,
+            ablate_horizon=bool(ge.get("ablate_horizon", split_cfg.get("ablate_horizon", False))),
         )
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.

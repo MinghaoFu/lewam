@@ -399,8 +399,8 @@ class DiffusionHead(nn.Module):
 class ViTEncoder(nn.Module):
     """ViT encoder + projector"""
 
-    def __init__(self, img_size=224, size="tiny", output_type="cls", 
-                output_dim=192, proj_mlp_scale=4):
+    def __init__(self, img_size=224, size="tiny", output_type="cls",
+                output_dim=192, proj_mlp_scale=4, proj_hidden=None):
         super().__init__()
         self.output_type = output_type
 
@@ -410,8 +410,10 @@ class ViTEncoder(nn.Module):
         # maps to representation space using a MLP with Batch Normalization.
         # necessary because the final ViT layer applies Layer Normalization, which prevents
         # SIGReg being optimized effectively.
+        # proj_hidden overrides proj_mlp_scale*output_dim -- lets an eval loader rebuild an
+        # older checkpoint whose projector width differs from the current default.
         self.projector = MLP(input_dim=mlp_in, output_dim=output_dim,
-                             hidden_dim=proj_mlp_scale * output_dim,
+                             hidden_dim=(proj_hidden if proj_hidden else proj_mlp_scale * output_dim),
                              norm_fn=nn.BatchNorm1d, norm_first=False)
 
     def forward(self, pixels):

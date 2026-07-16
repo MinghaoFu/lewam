@@ -57,6 +57,14 @@ def run(cfg: DictConfig):
         model._seq_cfg = seq_cfg
         adim = int(seq_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform)
+    elif mode == "split_policy":
+        # LeWAM-Split: its own loader + config; adim = the model's z-scored action block dim.
+        model, split_cfg = gip.load_lewam_split_model(cfg.policy, which=cfg.get("seq_which", "best"))
+        model = model.to("cuda").eval()
+        model.requires_grad_(False)
+        model._split_cfg = split_cfg
+        adim = int(split_cfg["action_dim"])
+        policy = gip.build_policy(cfg, model, adim, process, transform)
     else:
         model, adim = gip.load_gip_model(cfg.policy, epoch=cfg.get("ckpt_epoch", None))
         model = model.to("cuda").eval()

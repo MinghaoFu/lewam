@@ -65,10 +65,11 @@ class LeWAMSplit(nn.Module):
     latent: `gc_head` (action) and `dynamics` (next-latent prediction)."""
 
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
-                 img_size=224, dropout=0.1):
+                 img_size=224, dropout=0.1, proj_hidden=None):
         super().__init__()
         self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
-                                  output_dim=embed_dim, img_size=img_size)
+                                  output_dim=embed_dim, img_size=img_size,
+                                  proj_hidden=proj_hidden)
         self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
                               hidden_dim=hidden_dim, dropout=dropout)
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
