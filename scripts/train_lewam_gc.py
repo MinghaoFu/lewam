@@ -72,18 +72,29 @@ def preload_frames(base, img_t, act_mean, act_std, frameskip, max_eps=None):
 
 
 def flatten_for_training(frame_list, act_list, device):
-    """Build flat Frames tensor + per-sample index (t, action, max horizon, ep base)."""
-    offsets, Fs = [], []
-    off = 0
+    """Build flat Frames tensor + per-sample index (t, action, max horizon, ep base).
+
+    Copies each episode into a single pre-allocated tensor and frees the source episode
+    as it goes, so peak RAM stays ~1x the frames. (torch.cat over the whole list would
+    hold source+dest simultaneously and transiently double it -> OOM on big datasets like
+    reacher/cube on a memory-capped node.) Numerically identical to the cat version."""
+    offsets, off = [], 0
     for f in frame_list:
         offsets.append(off)
-        Fs.append(f)
         off += f.shape[0]
-    Frames = torch.cat(Fs, dim=0).to(device)
+    total = off
+    C, H, W = frame_list[0].shape[1:]
+    Frames = torch.empty((total, C, H, W), dtype=frame_list[0].dtype)
+    for ep in range(len(frame_list)):
+        f = frame_list[ep]
+        Frames[offsets[ep]:offsets[ep] + f.shape[0]].copy_(f)
+        frame_list[ep] = None  # free the source episode tensor incrementally
+    if device != "cpu":
+        Frames = Frames.to(device)
     t_gidx, maxh_list, ep_base_list, A = [], [], [], []
     for ep, a in enumerate(act_list):
         n_obs = a.shape[0]
-        n_fr = frame_list[ep].shape[0]
+        n_fr = (offsets[ep + 1] if ep + 1 < len(offsets) else total) - offsets[ep]
         base = offsets[ep]
         last = n_fr - 1
         n_valid = min(n_obs, n_fr - 1)
