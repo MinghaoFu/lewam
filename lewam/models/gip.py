@@ -842,6 +842,9 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
     are inherited from LeWAMSplitPolicy."""
 
     def __init__(self, model, cfg, *a, **kw):
+        # ctx_cap>0 -> aggregate only the LAST k cached latents (a sliding context window), for the
+        # context ablation. 0 = full causal history from episode start (default eval behaviour).
+        self.ctx_cap = int(kw.pop("ctx_cap", 0))
         super().__init__(model, cfg, *a, **kw)
         self.type = "lewam_unified_policy"
         self.action_cond = bool(cfg.get("agg_action_cond", False))
@@ -896,6 +899,8 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
                 self._lat_buf[i].append(z_new[row])
                 self._pblk_buf[i].append(self._last_blk[i])        # None at start -> null
             lens = [len(self._lat_buf[i]) for i in replan]
+            if self.ctx_cap and self.ctx_cap > 0:
+                lens = [min(l, self.ctx_cap) for l in lens]        # context ablation: last-k window
             Lmax = max(lens)
             R, Dd = len(replan), z_new.shape[-1]
             # pad the growing histories to Lmax (pads at the END; causal -> never seen by earlier
@@ -903,13 +908,18 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             seq = torch.zeros(R, Lmax, Dd, device=dev)
             for row, i in enumerate(replan):
                 buf = torch.stack(self._lat_buf[i], dim=0)         # (L_i, D)
+                if self.ctx_cap and self.ctx_cap > 0:
+                    buf = buf[-self.ctx_cap:]                       # keep only the last k latents
                 seq[row, : buf.shape[0]] = buf
             a_prev = a_prev_mask = None
             if self.action_cond:
                 a_prev = torch.zeros(R, Lmax, self.block_dim, device=dev)
                 a_prev_mask = torch.zeros(R, Lmax, dtype=torch.bool, device=dev)
                 for row, i in enumerate(replan):
-                    for k, blk in enumerate(self._pblk_buf[i]):
+                    pblk = self._pblk_buf[i]
+                    if self.ctx_cap and self.ctx_cap > 0:
+                        pblk = pblk[-self.ctx_cap:]                 # align with the capped latents
+                    for k, blk in enumerate(pblk):
                         if blk is not None:
                             a_prev[row, k] = blk.to(dev)
                             a_prev_mask[row, k] = True
@@ -996,6 +1006,7 @@ def build_policy(cfg, model, adim, process, transform):
             H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
             process=process, transform=transform,
             ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
+            ctx_cap=int(ge.get("ctx_cap", 0)),
         )
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
