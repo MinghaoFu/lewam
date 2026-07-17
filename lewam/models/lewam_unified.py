@@ -24,7 +24,9 @@ determined by the config the trainer writes, and the loader rebuilds from it. Ar
                   embedded PREVIOUS action a_{tau-1} (learnable null-action at episode start);
                   actions enter as CONDITIONING, not as sequence tokens (no eval covariate
                   shift from action tokens, no doubled sequence length).
-  * dyn_on_ct     dynamics reads the shared c_t (more unified) vs raw z_t (= split dynamics).
+
+Both read-outs share c_t (the unification): the action head reads it, and the dynamics head
+reads it too.
 
 `GCHead`/`GoalCondDynamics` are imported from lewam_split so the heads match the split's; the
 only new module is the aggregator (+ its optional action embedder / null-action / gate).
@@ -33,7 +35,7 @@ only new module is the aggregator (+ its optional action embedder / null-action 
 import torch
 from torch import nn
 
-from lewam.models.module import Block, ConditionalBlock, ViTEncoder
+from lewam.models.module import MLP, Block, ConditionalBlock, ViTEncoder
 from lewam.models.lewam_split import GCHead, GoalCondDynamics
 
 
@@ -69,8 +71,7 @@ class StateWindowAggregator(nn.Module):
             nn.init.zeros_(self.out_proj.weight)  # corr==0 at init -> residual c_t == z_t
             nn.init.zeros_(self.out_proj.bias)
         if self.action_cond:
-            self.action_embed = nn.Sequential(
-                nn.Linear(action_dim, z_dim), nn.SiLU(), nn.Linear(z_dim, z_dim))
+            self.action_embed = MLP(action_dim, z_dim, z_dim, act_fn=nn.SiLU)
             self.null_action = nn.Parameter(torch.zeros(z_dim))
 
     def forward(self, window, a_prev=None, a_prev_mask=None):
@@ -96,14 +97,12 @@ class LeWAMUnified(nn.Module):
 
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, window=8, agg_depth=2,
-                 agg_heads=4, agg_residual=True, agg_gate=False, agg_action_cond=False,
-                 dyn_on_ct=True):
+                 agg_heads=4, agg_residual=True, agg_gate=False, agg_action_cond=False):
         super().__init__()
         self.window = int(window)
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
         self.agg_action_cond = bool(agg_action_cond)
-        self.dyn_on_ct = bool(dyn_on_ct)
         self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden)
@@ -146,6 +145,5 @@ class LeWAMUnified(nn.Module):
         Returns (a_pred, z_pred)."""
         c_t = self.aggregate(window, a_prev, a_prev_mask)
         a_pred = self.gc_head(c_t, z_goal, h_norm)
-        dyn_in = c_t if self.dyn_on_ct else window[:, -1]
-        z_pred = self.dynamics(dyn_in, a_t, z_goal)
+        z_pred = self.dynamics(c_t, a_t, z_goal)  # shared c_t feeds the dynamics too
         return a_pred, z_pred

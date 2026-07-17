@@ -231,9 +231,6 @@ def main():
                     help="condition each window token z_tau (AdaLN) on the embedded previous "
                          "action a_{tau-1} (learnable null-action at episode start); actions "
                          "enter as conditioning, NOT sequence tokens")
-    ap.add_argument("--dyn_on_zt", action="store_true",
-                    help="dynamics reads raw z_t instead of the shared c_t (= split dynamics; "
-                         "labeled control, the aggregator is otherwise always used)")
     # loss weights
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
@@ -283,8 +280,8 @@ def main():
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          window=args.window, agg_depth=args.agg_depth,
                          agg_heads=args.agg_heads, agg_residual=not args.no_agg_residual,
-                         agg_gate=args.agg_gate, agg_action_cond=args.agg_action_cond,
-                         dyn_on_ct=not args.dyn_on_zt).to(device)
+                         agg_gate=args.agg_gate,
+                         agg_action_cond=args.agg_action_cond).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -352,7 +349,7 @@ def main():
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         window=args.window, agg_depth=args.agg_depth, agg_heads=args.agg_heads,
         agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
-        agg_action_cond=args.agg_action_cond, dyn_on_ct=not args.dyn_on_zt,
+        agg_action_cond=args.agg_action_cond,
         H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
@@ -419,8 +416,7 @@ def main():
                 loss_cyc = torch.tensor(0.0, device=device)
                 if args.w_cyc > 0:
                     c_t = model.aggregate(window_f, a_prev, a_prev_mask)
-                    dyn_in = c_t if model.dyn_on_ct else z_t_f
-                    z_n_cyc = model.dynamics(dyn_in, a_pred, z_g_f)
+                    z_n_cyc = model.dynamics(c_t, a_pred, z_g_f)
                     loss_cyc = F.mse_loss(z_n_cyc, z_n_f.detach())
                     loss = loss + args.w_cyc * loss_cyc
 
