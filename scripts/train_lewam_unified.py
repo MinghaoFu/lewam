@@ -385,7 +385,11 @@ def main():
         m = valid.unsqueeze(-1).float()
         nval = valid.sum().clamp(min=1)
         loss_act = ((a_pred - actions) ** 2 * m).sum() / (nval * actions.shape[-1])
-        loss_dyn = ((z_pred - next_tgt) ** 2 * m).sum() / (nval * D)
+        # STOP-GRAD the dynamics TARGET (JEPA anti-collapse): without it, the encoder minimizes dyn
+        # by making consecutive latents trivially predictable (dyn->0) -> representation collapse ->
+        # the action can't be learned (act stuck ~1.0). The encoder is still shaped by dynamics
+        # through the INPUT c_t; only the target z_{t+1} is detached.
+        loss_dyn = ((z_pred - next_tgt.detach()) ** 2 * m).sum() / (nval * D)
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)
