@@ -259,6 +259,7 @@ def load_lewam_unified_model(run_name, which="best"):
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
         window=int(cfg["window"]), agg_depth=int(cfg["agg_depth"]),
         agg_heads=int(cfg.get("agg_heads", 4)),
+        agg_max_len=int(cfg.get("agg_max_len", 128)),
         agg_residual=bool(cfg.get("agg_residual", True)),
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),

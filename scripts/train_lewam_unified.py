@@ -221,6 +221,9 @@ def main():
     ap.add_argument("--agg_depth", type=int, default=2,
                     help="causal-transformer depth of the aggregator (keep SHALLOW: 1-2)")
     ap.add_argument("--agg_heads", type=int, default=4)
+    ap.add_argument("--agg_max_len", type=int, default=128,
+                    help="positional-embedding capacity of the causal aggregator (>= window; "
+                         ">= the longest sequence a future seq-parallel trainer will feed)")
     ap.add_argument("--no_agg_residual", action="store_true",
                     help="c_t = Aggr(window) instead of z_t + Aggr(window) (drops the zero-init "
                          "residual that boots the model as the split)")
@@ -280,8 +283,8 @@ def main():
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          window=args.window, agg_depth=args.agg_depth,
                          agg_heads=args.agg_heads, agg_residual=not args.no_agg_residual,
-                         agg_gate=args.agg_gate,
-                         agg_action_cond=args.agg_action_cond).to(device)
+                         agg_gate=args.agg_gate, agg_action_cond=args.agg_action_cond,
+                         agg_max_len=args.agg_max_len).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -348,8 +351,8 @@ def main():
         model="lewam_unified", z_dim=192, action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         window=args.window, agg_depth=args.agg_depth, agg_heads=args.agg_heads,
-        agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
-        agg_action_cond=args.agg_action_cond,
+        agg_max_len=args.agg_max_len, agg_residual=not args.no_agg_residual,
+        agg_gate=args.agg_gate, agg_action_cond=args.agg_action_cond,
         H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
@@ -415,7 +418,7 @@ def main():
                 # consistency: the predicted action through dynamics should reach z_n
                 loss_cyc = torch.tensor(0.0, device=device)
                 if args.w_cyc > 0:
-                    c_t = model.aggregate(window_f, a_prev, a_prev_mask)
+                    c_t = model.aggregate(window_f, a_prev, a_prev_mask)[:, -1]  # last position
                     z_n_cyc = model.dynamics(c_t, a_pred, z_g_f)
                     loss_cyc = F.mse_loss(z_n_cyc, z_n_f.detach())
                     loss = loss + args.w_cyc * loss_cyc
