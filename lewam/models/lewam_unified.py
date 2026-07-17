@@ -105,8 +105,8 @@ class LeWAMUnified(nn.Module):
     feeding both the goal-conditioned action head and the goal-conditioned dynamics."""
 
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
-                 img_size=224, dropout=0.1, proj_hidden=None, agg_depth=2,
-                 agg_heads=4, agg_residual=True, agg_gate=False, agg_action_cond=False):
+                 img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
+                 agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False):
         super().__init__()
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual

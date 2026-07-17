@@ -187,9 +187,9 @@ def collate_pad(batch):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch_size", type=int, default=64,
-                    help="trajectories per batch (each ~H_max decision points -> effective "
-                         "batch is much larger)")
+    ap.add_argument("--batch_size", type=int, default=128,
+                    help="trajectories per batch (each carries up to H_max decision points, so the "
+                         "effective decision-point batch is much larger; raise/lower per GPU mem)")
     ap.add_argument("--encoder_lr", type=float, default=1e-4)
     ap.add_argument("--head_lr", type=float, default=3e-4)
     ap.add_argument("--dynamics_lr", type=float, default=3e-4)
@@ -212,12 +212,12 @@ def main():
                     help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into on "
                          "each improvement, so losing the worker's ephemeral disk never costs the run.")
     # unified-specific (ablation arms; ALL present so every ckpt strict-loads under one adapter)
-    ap.add_argument("--agg_depth", type=int, default=2,
-                    help="causal-transformer depth of the aggregator (keep SHALLOW: 1-2)")
+    ap.add_argument("--agg_depth", type=int, default=4,
+                    help="causal-transformer depth of the aggregator")
     ap.add_argument("--agg_heads", type=int, default=4)
-    ap.add_argument("--no_agg_residual", action="store_true",
-                    help="c = Aggr(z) instead of z + Aggr(z) (drops the zero-init residual that "
-                         "boots the model as the split)")
+    ap.add_argument("--agg_residual", action="store_true",
+                    help="c = z + Aggr(z) with a ZERO-INIT correction (boots as the split, "
+                         "identity at init); off (default) = c = Aggr(z), no residual")
     ap.add_argument("--agg_gate", action="store_true",
                     help="input-dependent sigmoid gate on the residual correction "
                          "(c = z + g(z)*Aggr(z); still boots as split). residual only.")
@@ -271,7 +271,7 @@ def main():
     model = LeWAMUnified(embed_dim=192, action_dim=action_block_dim,
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          agg_depth=args.agg_depth, agg_heads=args.agg_heads,
-                         agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
+                         agg_residual=args.agg_residual, agg_gate=args.agg_gate,
                          agg_action_cond=args.agg_action_cond).to(device)
     sigreg = SIGReg().to(device)
 
@@ -335,7 +335,7 @@ def main():
         model="lewam_unified", z_dim=192, action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
-        agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
+        agg_residual=args.agg_residual, agg_gate=args.agg_gate,
         agg_action_cond=args.agg_action_cond,
         H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,

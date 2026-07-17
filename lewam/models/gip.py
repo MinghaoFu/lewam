@@ -258,7 +258,7 @@ def load_lewam_unified_model(run_name, which="best"):
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
         agg_depth=int(cfg["agg_depth"]), agg_heads=int(cfg.get("agg_heads", 4)),
-        agg_residual=bool(cfg.get("agg_residual", True)),
+        agg_residual=bool(cfg.get("agg_residual", False)),
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
     )
