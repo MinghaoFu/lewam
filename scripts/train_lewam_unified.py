@@ -177,6 +177,10 @@ def collate_pad(batch):
     actions = torch.zeros((B, Lmax, adim), dtype=batch[0][1].dtype)
     for i, (fr, ac, h) in enumerate(batch):
         frames[i, : h + 1] = fr
+        if h + 1 <= Lmax:
+            frames[i, h + 1:] = fr[-1]   # pad with a REAL frame (repeat the endpoint), NOT zeros:
+                                         # the ViT projector has a BatchNorm, so zero-padding frames
+                                         # would corrupt the batch statistics and the real latents.
         actions[i, : h] = ac
     return frames, actions, lengths
 
@@ -385,22 +389,17 @@ def main():
         m = valid.unsqueeze(-1).float()
         nval = valid.sum().clamp(min=1)
         loss_act = ((a_pred - actions) ** 2 * m).sum() / (nval * actions.shape[-1])
-        # STOP-GRAD the dynamics TARGET (JEPA anti-collapse): without it, the encoder minimizes dyn
-        # by making consecutive latents trivially predictable (dyn->0) -> representation collapse ->
-        # the action can't be learned (act stuck ~1.0). The encoder is still shaped by dynamics
-        # through the INPUT c_t; only the target z_{t+1} is detached.
-        loss_dyn = ((z_pred - next_tgt.detach()) ** 2 * m).sum() / (nval * D)
+        loss_dyn = ((z_pred - next_tgt) ** 2 * m).sum() / (nval * D)   # no stop-grad (like seq/split)
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)
             z_cyc = model.dynamics(c.reshape(B * Lmax, D), a_pred.reshape(B * Lmax, -1),
                                    goal_bc.reshape(B * Lmax, D)).reshape(B, Lmax, D)
             loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * m).sum() / (nval * D)
-        # SIGReg anti-collapse: feed INDEPENDENT latents (one per trajectory = the fresh-start
-        # latents), like the split's z_t. Feeding all valid latents (consecutive, correlated
-        # trajectory frames) makes SIGReg read a false "collapse" and blow up (reg~200), drowning
-        # the action loss. SIGReg uses random 1-D projections so B(=batch) samples suffice.
-        loss_reg = sigreg(states[:, 0].unsqueeze(0)) if train else torch.zeros((), device=device)
+        # SIGReg anti-collapse over ALL valid state latents (like the seq trainer's
+        # sigreg(z.reshape(-1,D))). The earlier reg~200 blow-up was a symptom of the BatchNorm-
+        # padding bug corrupting the latents, not a reason to sub-sample.
+        loss_reg = sigreg(states[valid].unsqueeze(0)) if train else torch.zeros((), device=device)
         return loss_act, loss_dyn, loss_reg, loss_cyc, int(nval.item())
 
     # ---- training loop ----
