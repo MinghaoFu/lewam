@@ -2,33 +2,34 @@
 and moved CLOSER to a unified predictor, without re-introducing the seq's failure mode (a deep
 predictor entangled with dynamics, or interleaved action tokens). See docs/LEWAM_UNIFIED_HANDOFF.
 
-  pixels_0..t -> encoder -> [z_0, ..., z_t]
-  [c_0..c_t] = [z_0..z_t] + g(z)*Aggr([z_0..z_t])    # causal aggregator, per-position, ZERO-INIT residual
-  a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)      # off the shared c
-  z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)     # off the SHARED c
+  pixels_t..goal -> encoder -> [z_t, ..., z_goal]
+  [c_t..c_{goal-1}] = z + g(z)*Aggr(z)               # causal aggregator, per-position, ZERO-INIT residual
+  a_pred_tau = gc_head(c_tau, z_goal, h_tau)          # goal = z[-1] of the trajectory (shared)
+  z_pred_tau = dynamics(c_tau, a_tau, z_goal)         # off the SHARED c
 
-The aggregator is a CAUSAL Transformer over the state-latent sequence: one pass emits a context
-latent c_tau at EVERY position (position tau attends only to z_{<=tau}), so it trains
-sequence-parallel. c_tau = z_tau + g*Aggr(...) (residual, zero-init -> boots as the split at every
-position, preserving the endgame-precise direct read of z_tau). dynamics reads the same shared c
-(the unification). Action history, if enabled, enters as AdaLN CONDITIONING on the previous action
-a_{tau-1} (ConditionalBlock), never as sequence tokens -> no doubled length, no action-token eval
-covariate shift; a_tau is never an aggregator input -> no leak.
+The aggregator is a CAUSAL Transformer over the state-latent sequence (sinusoidal positions): one
+pass emits a context latent c_tau at EVERY position (position tau attends only to z_{<=tau}), so it
+trains sequence-parallel. c_tau = z_tau + g*Aggr(...) (residual, zero-init -> boots as the split at
+every position, preserving the endgame-precise direct read of z_tau). dynamics reads the same
+shared c (the unification). Action history, if enabled, enters as AdaLN CONDITIONING on the previous
+action a_{tau-1} (ConditionalBlock), never as sequence tokens -> no doubled length, no action-token
+eval covariate shift; a_tau is never an aggregator input -> no leak.
 
 Two entry points:
   * forward_seq(seq, z_goal, h, a_t, ...) -> (a_pred[B,L,.], z_pred[B,L,.]) : per-position, the
     sequence-parallel TRAINING path (supervise every position from one causal pass).
-  * forward/gc_action(seq, z_goal, h, ...) : LAST-position readout, the reactive EVAL path (and the
-    current single-decision-point trainer). gc_action is arm-agnostic (hides aggregate + action-cond).
+  * gc_action(seq, z_goal, h, ...) : LAST-position readout, the reactive EVAL path (arm-agnostic;
+    hides aggregate + action-cond).
 
 ONE flexible model spans all ablation arms (all present so every checkpoint strict-loads under the
 single eval adapter); the config the trainer writes fully determines the architecture. Flags:
-  window (context length fed to the model), agg_depth, agg_heads, agg_residual, agg_gate,
-  agg_action_cond, agg_max_len (positional-embedding capacity).
+  agg_depth, agg_heads, agg_residual, agg_gate, agg_action_cond.
 
 `GCHead`/`GoalCondDynamics` are imported from lewam_split so the heads match the split's; the only
 new module is the aggregator (+ its optional action embedder / null-action / gate).
 """
+
+import math
 
 import torch
 from torch import nn
@@ -37,25 +38,35 @@ from lewam.models.module import MLP, Block, ConditionalBlock, ViTEncoder
 from lewam.models.lewam_split import GCHead, GoalCondDynamics
 
 
+def sinusoidal_position_encoding(length, dim, device, dtype):
+    """Standard transformer sinusoidal positional encoding -> (length, dim). No parameters and no
+    max-length cap (works for any sequence length; positions are absolute from the sequence start,
+    which is a fresh start == the eval episode start)."""
+    pos = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)   # (L,1)
+    div = torch.exp(torch.arange(0, dim, 2, device=device, dtype=torch.float32)
+                    * (-math.log(10000.0) / dim))                                  # (dim/2,)
+    pe = torch.zeros(length, dim, device=device, dtype=torch.float32)
+    pe[:, 0::2] = torch.sin(pos * div)
+    pe[:, 1::2] = torch.cos(pos * div)
+    return pe.to(dtype)
+
+
 class CausalStateAggregator(nn.Module):
     """Causal Transformer over a state-latent sequence [z_0..z_t] -> a per-position raw correction
-    [B, L, D] (position tau depends only on z_{<=tau}). A learned absolute positional embedding
-    (capacity `max_len`) is added; blocks are causal. With `zero_init` the output projection is
-    zero-initialized so a residual model boots as the single-frame split (correction == 0 at init).
+    [B, L, D] (position tau depends only on z_{<=tau}). Sinusoidal positional encoding; blocks are
+    causal. With `zero_init` the output projection is zero-initialized so a residual model boots as
+    the single-frame split (correction == 0 at init).
 
     If `action_cond`, each token z_tau is AdaLN-conditioned (ConditionalBlock) on the embedded
-    PREVIOUS action a_{tau-1}; positions with no valid previous action (episode start / left-pad)
-    use a learnable null-action embedding. Actions are CONDITIONING here, never sequence tokens."""
+    PREVIOUS action a_{tau-1}; positions with no valid previous action (sequence start) use a
+    learnable null-action embedding. Actions are CONDITIONING here, never sequence tokens."""
 
-    def __init__(self, z_dim=192, max_len=128, depth=2, heads=4, dim_head=48,
+    def __init__(self, z_dim=192, depth=2, heads=4, dim_head=48,
                  mlp_dim=None, dropout=0.0, zero_init=True, action_cond=False, action_dim=25):
         super().__init__()
         self.z_dim = int(z_dim)
-        self.max_len = int(max_len)
         self.action_cond = bool(action_cond)
         mlp_dim = mlp_dim or 4 * z_dim
-        self.pos_emb = nn.Parameter(torch.zeros(1, self.max_len, z_dim))
-        nn.init.trunc_normal_(self.pos_emb, std=0.02)
         block_cls = ConditionalBlock if self.action_cond else Block
         self.blocks = nn.ModuleList([
             block_cls(z_dim, heads=heads, dim_head=dim_head, mlp_dim=mlp_dim,
@@ -76,8 +87,7 @@ class CausalStateAggregator(nn.Module):
         (used iff action_cond); a_prev_mask: (B, L) bool, False -> null-action.
         Returns the raw correction at EVERY position: (B, L, D)."""
         L = seq.shape[1]
-        assert L <= self.max_len, f"seq len {L} exceeds agg_max_len {self.max_len}"
-        x = seq + self.pos_emb[:, :L]
+        x = seq + sinusoidal_position_encoding(L, self.z_dim, seq.device, seq.dtype).unsqueeze(0)
         if self.action_cond:
             cond = self.action_embed(a_prev)                              # (B, L, D)
             cond = torch.where(a_prev_mask.unsqueeze(-1), cond,
@@ -95,11 +105,9 @@ class LeWAMUnified(nn.Module):
     feeding both the goal-conditioned action head and the goal-conditioned dynamics."""
 
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
-                 img_size=224, dropout=0.1, proj_hidden=None, window=8, agg_depth=2,
-                 agg_heads=4, agg_residual=True, agg_gate=False, agg_action_cond=False,
-                 agg_max_len=128):
+                 img_size=224, dropout=0.1, proj_hidden=None, agg_depth=2,
+                 agg_heads=4, agg_residual=True, agg_gate=False, agg_action_cond=False):
         super().__init__()
-        self.window = int(window)
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
         self.agg_action_cond = bool(agg_action_cond)
@@ -107,7 +115,7 @@ class LeWAMUnified(nn.Module):
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden)
         self.aggregator = CausalStateAggregator(
-            z_dim=embed_dim, max_len=agg_max_len, depth=agg_depth, heads=agg_heads,
+            z_dim=embed_dim, depth=agg_depth, heads=agg_heads,
             dim_head=max(embed_dim // agg_heads, 1), zero_init=self.agg_residual,
             action_cond=self.agg_action_cond, action_dim=action_dim)
         if self.agg_gate:
@@ -152,12 +160,3 @@ class LeWAMUnified(nn.Module):
         seq: (B,L,D); z_goal: (B,D); h_norm: (B,). Returns a_pred: (B, action_dim)."""
         c_last = self.aggregate(seq, a_prev, a_prev_mask)[:, -1]          # (B,D)
         return self.gc_head(c_last, z_goal, h_norm)
-
-    def forward(self, seq, z_goal, h_norm, a_t, a_prev=None, a_prev_mask=None):
-        """LAST-position readout (the single-decision-point path used by the current trainer/eval).
-        seq: (B,L,D); z_goal: (B,D); h_norm: (B,); a_t: (B,action_dim). Returns (a_pred, z_pred)
-        at the current (last) position."""
-        c_last = self.aggregate(seq, a_prev, a_prev_mask)[:, -1]          # (B,D)
-        a_pred = self.gc_head(c_last, z_goal, h_norm)
-        z_pred = self.dynamics(c_last, a_t, z_goal)                       # shared c feeds dynamics too
-        return a_pred, z_pred

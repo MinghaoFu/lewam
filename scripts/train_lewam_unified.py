@@ -1,20 +1,23 @@
-# LeWAM-Unified: the split (goal-conditioned action head + goal-conditioned dynamics)
-# given a short TEMPORAL state-window and one SHARED context latent feeding both heads.
+# LeWAM-Unified: the split (goal-conditioned action head + goal-conditioned dynamics) trained
+# SEQUENCE-PARALLEL over a start->goal trajectory, with ONE shared context latent per position.
 #
-#   pixels_{t-k..t} -> encoder -> [z_{t-k}..z_t]
-#   c_t = z_t + Aggr([z_{t-k..t}])                # shallow causal aggregator, ZERO-INIT residual
-#   a_pred = gc_head(c_t, z_goal, h)              # SAME head as the split, off the shared c_t
-#   z_pred = dynamics(c_t, a_t, z_goal)           # SAME dynamics, off the shared c_t
+#   sample a start t + goal distance h~U[1,H_max] (clamped to the episode tail);
+#   trajectory frames [t .. t+h] -> encoder -> [z_0 .. z_h]   (ONE encode)
+#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator, per position
+#   a_pred_tau = gc_head(c_tau, z_goal, h_tau)               # z_goal = z_h (endpoint, shared)
+#   z_pred_tau = dynamics(c_tau, a_tau, z_goal)              # target z_{tau+1}
 #
-#   L = w_act*MSE(a_pred, a_t) + w_dyn*MSE(z_pred, z_next) + w_reg*SIGReg(z_t)
-#       + w_cyc*MSE(dynamics(c_t, a_pred, z_g), sg(z_next))
+#   L = w_act*MSE(a_pred, a) + w_dyn*MSE(z_pred, z[1:]) + w_reg*SIGReg(z) + w_cyc*consistency
+#       (all per-position, masked to the valid (non-pad) positions)
 #
-# Forked from scripts/train_lewam_gc.py (LeWAMSplit trainer): same data/optim/loss, the only
-# additions are the STATE WINDOW (each sample carries [z_{t-k..t}, goal, next] instead of
-# [t, goal, next]) and the aggregator param group. See docs/LEWAM_UNIFIED_HANDOFF.md.
+# Forked from train_lewam_gc.py: preload/flatten/optim/schedule/ckpt-sync are unchanged; the only
+# new pieces are (a) the dataset samples a start->goal TRAJECTORY, (b) a padding collate for
+# variable-length trajectories, (c) the loss is per-position (masked) instead of one-step. The goal
+# is z[-1] of the trajectory (no separate goal encode); dynamics targets are z[1:]. Each start is a
+# FRESH start (no prior history), matching the eval episode start -- so no warmup/prefix.
 #
 #   python scripts/train_lewam_unified.py --dataset_name reacher.h5 \
-#       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --window 8 --agg_depth 2 \
+#       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --agg_depth 2 \
 #       --ckpt_sync_dir /mnt/hdfs/.../reacher_lewam_unified
 import argparse
 import json
@@ -94,7 +97,7 @@ def preload_frames(base, img_t, act_mean, act_std, frameskip, max_eps=None):
 
 
 def flatten_for_training(frame_list, act_list, device):
-    """Build flat Frames tensor + per-sample index (t, action, max horizon, ep base).
+    """Build flat Frames tensor + a per-FRAME action tensor + per-start index (t, max horizon).
     Preallocate + free-as-you-go so peak RAM stays ~1x the frames (torch.cat would double it)."""
     offsets, off = [], 0
     for f in frame_list:
@@ -109,12 +112,12 @@ def flatten_for_training(frame_list, act_list, device):
         frame_list[ep] = None  # free the source episode tensor incrementally
     if device != "cpu":
         Frames = Frames.to(device)
-    # per-FRAME action block: A_frame[base+t] = a[t] (the action AT obs-step t, i.e. the action
-    # that led INTO frame t+1). Used by agg_action_cond to look up each window token's previous
-    # action a_{tau-1} = A_frame[frame-1]. Zero elsewhere (never read where the mask is False).
+    # A_frame[base+t] = action block AT obs-step t (== the action that led INTO frame t+1). Zero at
+    # the episode's last frame. t_gidx = valid START frames; maxh = frames from the start to the
+    # episode end (the max goal distance sampleable from that start).
     adim = act_list[0].shape[1]
     A_frame = torch.zeros((total, adim), dtype=act_list[0].dtype)
-    t_gidx, maxh_list, ep_base_list, A = [], [], [], []
+    t_gidx, maxh_list = [], []
     for ep, a in enumerate(act_list):
         n_obs = a.shape[0]
         n_fr = (offsets[ep + 1] if ep + 1 < len(offsets) else total) - offsets[ep]
@@ -124,68 +127,58 @@ def flatten_for_training(frame_list, act_list, device):
         n_valid = min(n_obs, n_fr - 1)
         for t in range(n_valid):
             t_gidx.append(base + t)
-            maxh_list.append(last - t)
-            ep_base_list.append(base)
-            A.append(a[t])
-    return (Frames,
-            torch.stack(A, dim=0),
+            maxh_list.append(last - t)   # frames from t to the episode end
+    return (Frames, A_frame,
             torch.tensor(t_gidx, dtype=torch.long),
-            torch.tensor(maxh_list, dtype=torch.long),
-            torch.tensor(ep_base_list, dtype=torch.long),
-            A_frame)
+            torch.tensor(maxh_list, dtype=torch.long))
 
 
 # --------------------------------------------------------------------------- #
-# Windowed sample Dataset. Each sample carries the last W state frames (clamped  #
-# to the episode start, left-padded by repeating the first frame = causal        #
-# padding), plus the goal (t+h) and dynamics-target (t+1) frames. Sampling:      #
-# h ~ U[1, H_max] clamped to the episode tail. Mirrors the eval buffer, which     #
-# left-pads the first W-1 obs-steps of an episode with the episode's first frame. #
+# Trajectory Dataset: each item is a start->goal sub-trajectory. Sample h~U[1,H_max] clamped to    #
+# the episode tail; return frames [t .. t+h] (h+1 frames) + the z-scored action blocks a_t..a_{t+h-1}#
+# + the length h. The goal is the trajectory endpoint (z[-1]); dynamics targets are z[1:]; horizons #
+# per position run h..1. A fresh start (no prior history) matches the eval episode start.           #
 # --------------------------------------------------------------------------- #
-class WindowPairDataset(Dataset):
-    def __init__(self, frames, a_flat, t_gidx, maxh, ep_base, a_frame, indices, h_max,
-                 window, ablate_horizon):
+class SeqTrajDataset(Dataset):
+    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max):
         self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only
-        self.a_flat = a_flat          # [M,adim] fp16, CPU  action AT sample step t
-        self.t_gidx = t_gidx          # [M] long  global frame index of t
-        self.maxh = maxh              # [M] long  max horizon (frames to episode end)
-        self.ep_base = ep_base        # [M] long  global index of the episode's first frame
-        self.a_frame = a_frame        # [N,adim] fp16  per-frame action block (for agg_action_cond)
+        self.a_frame = a_frame        # [N,adim] fp16, CPU  per-frame action block
+        self.t_gidx = t_gidx          # [M] long  valid start frames
+        self.maxh = maxh              # [M] long  frames from start to episode end
         self.indices = indices        # [K] long  train or val subset
         self.h_max = int(h_max)
-        self.window = int(window)
-        self.ablate_horizon = bool(ablate_horizon)
 
     def __len__(self):
         return self.indices.numel()
 
     def __getitem__(self, i):
         idx = int(self.indices[i])
-        ti = int(self.t_gidx[idx])
+        t = int(self.t_gidx[idx])
         mh = int(self.maxh[idx])
-        base = int(self.ep_base[idx])
         h = int(torch.randint(1, self.h_max + 1, (1,)).item())
-        if h > mh:
-            h = mh
+        h = min(h, mh)
         if h < 1:
             h = 1
-        gi = ti + h
-        ni = ti + 1  # == min(ti+1, ti+mh) since mh >= 1
-        W = self.window
-        start = ti - (W - 1)
-        # window oldest..current; left-pad by clamping to the episode's first frame
-        frame_idx = [max(base, start + j) for j in range(W)]
-        win = [self.frames[f] for f in frame_idx]
-        # previous-action per token: a_{f-1} = A_frame[f-1], valid iff f > base (else null via mask)
-        a_prev = torch.stack(
-            [self.a_frame[f - 1] if f > base else torch.zeros_like(self.a_frame[0])
-             for f in frame_idx], dim=0)                       # [W, adim]
-        a_prev_mask = torch.tensor([f > base for f in frame_idx], dtype=torch.bool)  # [W]
-        # stack [win_0..win_{W-1}, goal, next] -> collate -> [B, W+2, 3, H, W]; fp16 halves H2D bytes
-        trip = torch.stack(win + [self.frames[gi], self.frames[ni]], dim=0)
-        a_t = self.a_flat[idx]
-        h_norm = 0.0 if self.ablate_horizon else min(h, self.h_max) / self.h_max
-        return trip, a_t, h_norm, a_prev, a_prev_mask
+        frames = self.frames[t:t + h + 1]     # (h+1, 3, H, W)  z_0..z_h (z_h = goal)
+        actions = self.a_frame[t:t + h]       # (h, adim)       a_t..a_{t+h-1}
+        return frames, actions, h
+
+
+def collate_pad(batch):
+    """Pad variable-length trajectories to the batch's max length. Returns
+    frames (B, Lmax+1, 3, H, W), actions (B, Lmax, adim), lengths (B,). Pad frames/actions are
+    zeros and are masked out of the loss by `lengths` in the loop."""
+    lengths = torch.tensor([b[2] for b in batch], dtype=torch.long)
+    Lmax = int(lengths.max().item())
+    C, H, W = batch[0][0].shape[1:]
+    adim = batch[0][1].shape[1]
+    B = len(batch)
+    frames = torch.zeros((B, Lmax + 1, C, H, W), dtype=batch[0][0].dtype)
+    actions = torch.zeros((B, Lmax, adim), dtype=batch[0][1].dtype)
+    for i, (fr, ac, h) in enumerate(batch):
+        frames[i, : h + 1] = fr
+        actions[i, : h] = ac
+    return frames, actions, lengths
 
 
 # --------------------------------------------------------------------------- #
@@ -194,13 +187,17 @@ class WindowPairDataset(Dataset):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--batch_size", type=int, default=64,
+                    help="trajectories per batch (each ~H_max decision points -> effective "
+                         "batch is much larger)")
     ap.add_argument("--encoder_lr", type=float, default=1e-4)
     ap.add_argument("--head_lr", type=float, default=3e-4)
     ap.add_argument("--dynamics_lr", type=float, default=3e-4)
     ap.add_argument("--agg_lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--H_max", type=int, default=50)
+    ap.add_argument("--H_max", type=int, default=50,
+                    help="max goal distance in OBS-STEPS (frames are 1-per-obs-step, post-frameskip; "
+                         "NOT divided by frameskip); == the max trajectory length sampled")
     ap.add_argument("--hidden_dim", type=int, default=512)
     ap.add_argument("--img_size", type=int, default=224)
     ap.add_argument("--seed", type=int, default=3072)
@@ -212,33 +209,25 @@ def main():
     ap.add_argument("--warmup_epochs", type=int, default=10)
     ap.add_argument("--run_dir", type=str, default=None)
     ap.add_argument("--ckpt_sync_dir", type=str, default=None,
-                    help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into "
-                         "on each improvement, so losing the worker's ephemeral disk never "
-                         "costs the run. run_dir stays the fast local write target.")
+                    help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into on "
+                         "each improvement, so losing the worker's ephemeral disk never costs the run.")
     # unified-specific (ablation arms; ALL present so every ckpt strict-loads under one adapter)
-    ap.add_argument("--window", type=int, default=8,
-                    help="state-window length W (# frames incl. current); 1 = no temporal context")
     ap.add_argument("--agg_depth", type=int, default=2,
                     help="causal-transformer depth of the aggregator (keep SHALLOW: 1-2)")
     ap.add_argument("--agg_heads", type=int, default=4)
-    ap.add_argument("--agg_max_len", type=int, default=128,
-                    help="positional-embedding capacity of the causal aggregator (>= window; "
-                         ">= the longest sequence a future seq-parallel trainer will feed)")
     ap.add_argument("--no_agg_residual", action="store_true",
-                    help="c_t = Aggr(window) instead of z_t + Aggr(window) (drops the zero-init "
-                         "residual that boots the model as the split)")
+                    help="c = Aggr(z) instead of z + Aggr(z) (drops the zero-init residual that "
+                         "boots the model as the split)")
     ap.add_argument("--agg_gate", action="store_true",
                     help="input-dependent sigmoid gate on the residual correction "
-                         "(c_t = z_t + g(z_t)*Aggr; still boots as split). residual only.")
+                         "(c = z + g(z)*Aggr(z); still boots as split). residual only.")
     ap.add_argument("--agg_action_cond", action="store_true",
-                    help="condition each window token z_tau (AdaLN) on the embedded previous "
-                         "action a_{tau-1} (learnable null-action at episode start); actions "
-                         "enter as conditioning, NOT sequence tokens")
+                    help="condition each token z_tau (AdaLN) on the embedded previous action "
+                         "a_{tau-1} (null-action at the sequence start); conditioning, NOT tokens")
     # loss weights
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
     ap.add_argument("--w_reg", type=float, default=0.04)
-    ap.add_argument("--ablate_horizon", action="store_true")
     ap.add_argument("--ablate_dynamics", action="store_true",
                     help="disable dynamics loss (w_dyn=0), keep gc_head only")
     ap.add_argument("--w_cyc", type=float, default=0.0,
@@ -281,10 +270,9 @@ def main():
     # ---- build model ----
     model = LeWAMUnified(embed_dim=192, action_dim=action_block_dim,
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
-                         window=args.window, agg_depth=args.agg_depth,
-                         agg_heads=args.agg_heads, agg_residual=not args.no_agg_residual,
-                         agg_gate=args.agg_gate, agg_action_cond=args.agg_action_cond,
-                         agg_max_len=args.agg_max_len).to(device)
+                         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
+                         agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
+                         agg_action_cond=args.agg_action_cond).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -293,37 +281,33 @@ def main():
     n_dyn = sum(p.numel() for p in model.dynamics.parameters())
     print(f"[lewam-uni] encoder={n_enc/1e6:.2f}M  agg={n_agg/1e6:.2f}M  gc_head={n_head/1e6:.2f}M  "
           f"dynamics={n_dyn/1e6:.2f}M  total={(n_enc+n_agg+n_head+n_dyn)/1e6:.2f}M  "
-          f"window={args.window} agg_depth={args.agg_depth}", flush=True)
+          f"agg_depth={args.agg_depth} action_cond={args.agg_action_cond}", flush=True)
 
     # ---- data ----
     frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
                                           frameskip, max_eps=max_eps)
-    Frames, A_flat, t_gidx, maxh, ep_base, A_frame = flatten_for_training(
-        frame_list, act_list, "cpu")
+    Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
     del frame_list
-    n_samples = t_gidx.shape[0]
-    print(f"[lewam-uni] frames={Frames.shape} samples={n_samples}", flush=True)
+    n_starts = t_gidx.shape[0]
+    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
-    perm = torch.randperm(n_samples, generator=g)
-    n_val = int(round((1 - args.train_split) * n_samples))
+    perm = torch.randperm(n_starts, generator=g)
+    n_val = int(round((1 - args.train_split) * n_starts))
     val_idx = perm[:n_val]
     train_idx = perm[n_val:]
     print(f"[lewam-uni] train={train_idx.numel()} val={val_idx.numel()} "
           f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
-    train_ds = WindowPairDataset(Frames, A_flat, t_gidx, maxh, ep_base, A_frame, train_idx,
-                                 args.H_max, args.window, args.ablate_horizon)
-    val_ds = WindowPairDataset(Frames, A_flat, t_gidx, maxh, ep_base, A_frame, val_idx,
-                               args.H_max, args.window, args.ablate_horizon)
+    train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max)
+    val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
-        num_workers=args.num_workers,
+        num_workers=args.num_workers, collate_fn=collate_pad,
     )
     if args.num_workers > 0:
-        _loader_common.update(prefetch_factor=args.prefetch_factor,
-                              persistent_workers=True)
+        _loader_common.update(prefetch_factor=args.prefetch_factor, persistent_workers=True)
     train_loader = DataLoader(train_ds, shuffle=True, **_loader_common)
     val_loader = DataLoader(val_ds, shuffle=False, **_loader_common)
     print(f"[lewam-uni] loaders ready: workers={args.num_workers} "
@@ -350,31 +334,57 @@ def main():
     cfg_out = dict(
         model="lewam_unified", z_dim=192, action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
-        window=args.window, agg_depth=args.agg_depth, agg_heads=args.agg_heads,
-        agg_max_len=args.agg_max_len, agg_residual=not args.no_agg_residual,
-        agg_gate=args.agg_gate, agg_action_cond=args.agg_action_cond,
+        agg_depth=args.agg_depth, agg_heads=args.agg_heads,
+        agg_residual=not args.no_agg_residual, agg_gate=args.agg_gate,
+        agg_action_cond=args.agg_action_cond,
         H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
-        ablate_horizon=args.ablate_horizon, ablate_dynamics=args.ablate_dynamics,
+        ablate_dynamics=args.ablate_dynamics,
         encoder_lr=args.encoder_lr, head_lr=args.head_lr,
         dynamics_lr=args.dynamics_lr, agg_lr=args.agg_lr,
     )
     (run_dir / "lewam_unified_config.json").write_text(json.dumps(cfg_out, indent=2))
     durable_sync([run_dir / "lewam_unified_config.json"], args.ckpt_sync_dir)
 
-    W = args.window
+    D = 192
+    Hmax = float(args.H_max)
 
-    def encode_split(trip, n):
-        """trip: [B, W+2, 3, H, W] -> (window [B,W,D], z_g [B,D], z_n [B,D]).
-        One encoder pass over all (W+2)*B frames; ordering matches the stack
-        [win_0..win_{W-1}, goal, next]."""
-        frames_all = trip.permute(1, 0, 2, 3, 4).reshape((W + 2) * n, *trip.shape[2:]).float()
-        z_all = model.encode(frames_all)                       # [(W+2)*n, D]
-        window = z_all[: W * n].reshape(W, n, -1).permute(1, 0, 2)  # [n, W, D]
-        z_g = z_all[W * n:(W + 1) * n]
-        z_n = z_all[(W + 1) * n:(W + 2) * n]
-        return window, z_g, z_n
+    def run_batch(frames, actions, lengths, train):
+        """One sequence-parallel forward: encode the trajectory once, aggregate causally, apply the
+        heads at every position, and return per-position masked (act, dyn) losses + valid latents."""
+        B, Lp1 = frames.shape[0], frames.shape[1]
+        Lmax = Lp1 - 1
+        frames = frames.to(device, non_blocking=True)
+        actions = actions.to(device, non_blocking=True).float()
+        lengths = lengths.to(device, non_blocking=True)
+        z = model.encode(frames.reshape(B * Lp1, *frames.shape[2:]).float()).reshape(B, Lp1, D)
+        states = z[:, :Lmax].float()                    # (B,Lmax,D) decision-point states
+        next_tgt = z[:, 1:Lp1].float()                  # (B,Lmax,D) dynamics targets z[k+1]
+        goal = z[torch.arange(B, device=device), lengths].float()       # (B,D) endpoint z[h]
+        goal_bc = goal.unsqueeze(1).expand(B, Lmax, D)
+        pos = torch.arange(Lmax, device=device)
+        valid = pos.unsqueeze(0) < lengths.unsqueeze(1)                 # (B,Lmax) bool
+        horizon = (lengths.unsqueeze(1) - pos.unsqueeze(0)).clamp(min=1)
+        h_norm = horizon.clamp(max=args.H_max).float() / Hmax          # (B,Lmax)
+        a_prev = a_prev_mask = None
+        if model.agg_action_cond:
+            a_prev = torch.zeros_like(actions)
+            a_prev[:, 1:] = actions[:, :-1]                            # a_{tau-1}; position 0 -> null
+            a_prev_mask = valid & (pos.unsqueeze(0) >= 1)
+        a_pred, z_pred = model.forward_seq(states, goal_bc, h_norm, actions, a_prev, a_prev_mask)
+        m = valid.unsqueeze(-1).float()
+        nval = valid.sum().clamp(min=1)
+        loss_act = ((a_pred - actions) ** 2 * m).sum() / (nval * actions.shape[-1])
+        loss_dyn = ((z_pred - next_tgt) ** 2 * m).sum() / (nval * D)
+        loss_cyc = torch.zeros((), device=device)
+        if train and args.w_cyc > 0:
+            c = model.aggregate(states, a_prev, a_prev_mask)
+            z_cyc = model.dynamics(c.reshape(B * Lmax, D), a_pred.reshape(B * Lmax, -1),
+                                   goal_bc.reshape(B * Lmax, D)).reshape(B, Lmax, D)
+            loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * m).sum() / (nval * D)
+        loss_reg = sigreg(states[valid].unsqueeze(0)) if train else torch.zeros((), device=device)
+        return loss_act, loss_dyn, loss_reg, loss_cyc, int(nval.item())
 
     # ---- training loop ----
     best_val = float("inf")
@@ -385,89 +395,38 @@ def main():
         # ---- train ----
         model.train()
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
-
-        for trip, a_t, h_norm, a_prev, a_prev_mask in train_loader:
-            n = trip.shape[0]
-            trip = trip.to(device, non_blocking=True)
-            a_t = a_t.to(device, non_blocking=True).float()
-            h_norm = h_norm.to(device, non_blocking=True).float()
-            if model.agg_action_cond:
-                a_prev = a_prev.to(device, non_blocking=True).float()
-                a_prev_mask = a_prev_mask.to(device, non_blocking=True)
-            else:
-                a_prev = a_prev_mask = None
-
+        for frames, actions, lengths in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                window, z_g, z_n = encode_split(trip, n)
-                window_f = window.float()
-                z_g_f = z_g.float()
-                z_n_f = z_n.float()
-                z_t_f = window_f[:, -1]  # current-frame latent (for SIGReg)
-
-                # no stop-grad: the encoder also learns from the dynamics target
-                a_pred, z_n_pred = model(window_f, z_g_f, h_norm, a_t, a_prev, a_prev_mask)
-                loss_act = F.mse_loss(a_pred, a_t)
-                loss_dyn = F.mse_loss(z_n_pred, z_n_f)
-
-                loss_reg = sigreg(z_t_f.unsqueeze(0))
-
-                loss = (args.w_act * loss_act
-                        + args.w_dyn * loss_dyn
-                        + args.w_reg * loss_reg)
-
-                # consistency: the predicted action through dynamics should reach z_n
-                loss_cyc = torch.tensor(0.0, device=device)
-                if args.w_cyc > 0:
-                    c_t = model.aggregate(window_f, a_prev, a_prev_mask)[:, -1]  # last position
-                    z_n_cyc = model.dynamics(c_t, a_pred, z_g_f)
-                    loss_cyc = F.mse_loss(z_n_cyc, z_n_f.detach())
-                    loss = loss + args.w_cyc * loss_cyc
-
+                loss_act, loss_dyn, loss_reg, loss_cyc, nval = run_batch(
+                    frames, actions, lengths, train=True)
+                loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
+                        + args.w_reg * loss_reg + args.w_cyc * loss_cyc)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-
-            tr_act += loss_act.item() * n
-            tr_dyn += loss_dyn.item() * n
-            tr_reg += loss_reg.item() * n
-            tr_cyc += loss_cyc.item() * n
-            tr_count += n
-
+            tr_act += loss_act.item() * nval
+            tr_dyn += loss_dyn.item() * nval
+            tr_reg += loss_reg.item() * nval
+            tr_cyc += loss_cyc.item() * nval
+            tr_count += nval
         sched.step()
 
         # ---- val ----
         model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
-            for trip, a_t, h_norm, a_prev, a_prev_mask in val_loader:
-                n = trip.shape[0]
-                trip = trip.to(device, non_blocking=True)
-                a_t = a_t.to(device, non_blocking=True).float()
-                h_norm = h_norm.to(device, non_blocking=True).float()
-                if model.agg_action_cond:
-                    a_prev = a_prev.to(device, non_blocking=True).float()
-                    a_prev_mask = a_prev_mask.to(device, non_blocking=True)
-                else:
-                    a_prev = a_prev_mask = None
-
+            for frames, actions, lengths in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    window, z_g, z_n = encode_split(trip, n)
-                    window_f, z_g_f, z_n_f = window.float(), z_g.float(), z_n.float()
-                    a_pred, z_n_pred = model(window_f, z_g_f, h_norm, a_t, a_prev, a_prev_mask)
-                    loss_act = F.mse_loss(a_pred, a_t)
-                    loss_dyn = F.mse_loss(z_n_pred, z_n_f)
+                    loss_act, loss_dyn, _, _, nval = run_batch(
+                        frames, actions, lengths, train=False)
+                va_act += loss_act.item() * nval
+                va_dyn += loss_dyn.item() * nval
+                va_count += nval
 
-                va_act += loss_act.item() * n
-                va_dyn += loss_dyn.item() * n
-                va_count += n
-
-        tr_a = tr_act / max(tr_count, 1)
-        tr_d = tr_dyn / max(tr_count, 1)
-        tr_r = tr_reg / max(tr_count, 1)
-        tr_c = tr_cyc / max(tr_count, 1)
-        va_a = va_act / max(va_count, 1)
-        va_d = va_dyn / max(va_count, 1)
+        tr_a = tr_act / max(tr_count, 1); tr_d = tr_dyn / max(tr_count, 1)
+        tr_r = tr_reg / max(tr_count, 1); tr_c = tr_cyc / max(tr_count, 1)
+        va_a = va_act / max(va_count, 1); va_d = va_dyn / max(va_count, 1)
         lrs = sched.get_last_lr()
         dt = time.time() - t0
         cyc_str = f"  cyc={tr_c:.5f}" if args.w_cyc > 0 else ""
@@ -476,17 +435,9 @@ def main():
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
-        # key prefixes (encoder./aggregator./gc_head./dynamics.) are load-bearing: the
-        # unified eval loader (gip.load_lewam_unified_model) reconstructs from them, strict.
-        full_sd = {}
-        for k, v in model.encoder.state_dict().items():
-            full_sd[f"encoder.{k}"] = v
-        for k, v in model.aggregator.state_dict().items():
-            full_sd[f"aggregator.{k}"] = v
-        for k, v in model.gc_head.state_dict().items():
-            full_sd[f"gc_head.{k}"] = v
-        for k, v in model.dynamics.state_dict().items():
-            full_sd[f"dynamics.{k}"] = v
+        # the full model state_dict (encoder./aggregator./gc_head./dynamics.[/gate_proj.]) loads
+        # strict into a LeWAMUnified rebuilt from the config (gip.load_lewam_unified_model).
+        full_sd = model.state_dict()
         torch.save(full_sd, run_dir / "lewam_unified_latest.pt")
 
         combined_val = va_a + va_d

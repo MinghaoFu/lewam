@@ -257,9 +257,7 @@ def load_lewam_unified_model(run_name, which="best"):
         embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
-        window=int(cfg["window"]), agg_depth=int(cfg["agg_depth"]),
-        agg_heads=int(cfg.get("agg_heads", 4)),
-        agg_max_len=int(cfg.get("agg_max_len", 128)),
+        agg_depth=int(cfg["agg_depth"]), agg_heads=int(cfg.get("agg_heads", 4)),
         agg_residual=bool(cfg.get("agg_residual", True)),
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
@@ -267,7 +265,7 @@ def load_lewam_unified_model(run_name, which="best"):
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
           f"(raw {cfg['action_raw_dim']}x{cfg['frameskip']}) H_max={cfg['H_max']} "
-          f"window={cfg['window']} agg_depth={cfg['agg_depth']} "
+          f"agg_depth={cfg['agg_depth']} action_cond={cfg.get('agg_action_cond', False)} "
           f"missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
     return model, cfg
 
@@ -825,60 +823,38 @@ class LeWAMSplitPolicy(BasePolicy):
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
-# LeWAM-Unified eval adapter (mode: unified_policy = reactive GC over a state window)
+# LeWAM-Unified eval adapter (mode: unified_policy = reactive, full-causal from episode start)
 class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
-    """Eval adapter for LeWAM-Unified. Structurally the split policy, but instead of a
-    single-frame z_t it maintains a per-env deque of the last `window` observed frames
-    (one per obs-step / replan), encodes that window, and reads the action off the
-    aggregated context latent c_t = z_t + Aggr([z_{t-k..t}]):
+    """Eval adapter for LeWAM-Unified. Full-causal from the episode start, mirroring training
+    (each start is a fresh start). Per env it CACHES the encoded latent of every observed frame
+    (encoder is deterministic at eval, so each frame is encoded once), re-runs the causal
+    aggregator over the growing latent history, and reads the current (last) position:
 
-      window = [last W observed frames]            # left-padded (repeat oldest) to length W
-      z_win  = model.encode(window)                # (R, W, D)
-      c_t    = model.aggregate(z_win)              # (R, D) = z_t + temporal correction
-      a      = model.gc_head(c_t, z_goal, h_norm)  # (R, block_dim) z-scored action block
+      z_t   = model.encode(current frame)          # appended to the per-env latent cache
+      c_t   = model.aggregate([z_start..z_t])[-1]  # causal, over the whole history so far
+      a     = model.gc_head(c_t, z_goal, h_norm)   # (block_dim) z-scored action block
 
-    Frame buffering matches training's causal window (clamp to episode start = repeat the
-    first observed frame). Everything else (goal encode, horizon countdown, un-z-score,
-    action-block unstack, model.eval()) is inherited from LeWAMSplitPolicy unchanged."""
+    The goal is the FIXED goal frame (encoded each replan); horizon counts down from
+    goal_offset/action_block. If agg_action_cond, the per-env cache of the executed z-scored
+    blocks (the block that led into each frame; null at the start) supplies a_{tau-1}. Live envs
+    generally share a history length, but lengths are padded per batch and each env's LAST valid
+    position is read, so unequal lengths are handled. Un-z-score / action-unstack / model.eval()
+    are inherited from LeWAMSplitPolicy."""
 
     def __init__(self, model, cfg, *a, **kw):
         super().__init__(model, cfg, *a, **kw)
         self.type = "lewam_unified_policy"
-        self.window = int(cfg["window"])
         self.action_cond = bool(cfg.get("agg_action_cond", False))
-        self._frame_buf = None   # per-env deque of the last W transformed frames
-        self._pblk_buf = None    # per-env deque of the z-scored block that led INTO each frame
+        self._lat_buf = None     # per-env list of cached latents z_start..z_t (grows per episode)
+        self._pblk_buf = None    # per-env list of z-scored blocks that led INTO each frame
         self._last_blk = None    # per-env last z-scored block emitted (the next frame's prev-action)
 
     def set_env(self, env):
         super().set_env(env)
         n = getattr(env, "num_envs", 1)
-        self._frame_buf = [deque(maxlen=self.window) for _ in range(n)]
-        self._pblk_buf = [deque(maxlen=self.window) for _ in range(n)]
+        self._lat_buf = [[] for _ in range(n)]
+        self._pblk_buf = [[] for _ in range(n)]
         self._last_blk = [None] * n
-
-    def _build_window(self, i):
-        """Left-pad the env-i frame deque to length W by repeating the oldest frame."""
-        buf = list(self._frame_buf[i])
-        pad = [buf[0]] * (self.window - len(buf))
-        return torch.stack(pad + buf, dim=0)  # (W, C, H, W)
-
-    def _build_prev_action(self, i):
-        """Previous-action window aligned to the frame window: a_prev[j] is the z-scored block
-        that led into frame j (None -> null via mask; left-pad positions -> null). Mirrors
-        training's a_{tau-1} with the episode-start/left-pad positions masked out."""
-        buf = list(self._pblk_buf[i])
-        pad = self.window - len(buf)
-        a_prev, mask = [], []
-        zero = torch.zeros(self.block_dim)
-        for _ in range(pad):
-            a_prev.append(zero); mask.append(False)
-        for blk in buf:
-            if blk is None:
-                a_prev.append(zero); mask.append(False)
-            else:
-                a_prev.append(blk); mask.append(True)
-        return torch.stack(a_prev, dim=0), torch.tensor(mask, dtype=torch.bool)  # (W,blk),(W,)
 
     @torch.no_grad()
     def get_action(self, info_dict, **kw):
@@ -888,9 +864,9 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         if self._action_buffer is None:
             self._action_buffer = [deque() for _ in range(n)]
             self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
-        if self._frame_buf is None:
-            self._frame_buf = [deque(maxlen=self.window) for _ in range(n)]
-            self._pblk_buf = [deque(maxlen=self.window) for _ in range(n)]
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(n)]
+            self._pblk_buf = [[] for _ in range(n)]
             self._last_blk = [None] * n
 
         flush = info_dict.pop("_needs_flush", None)
@@ -898,7 +874,7 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             for i in range(n):
                 if flush[i]:
                     self._action_buffer[i].clear()
-                    self._frame_buf[i].clear()   # new episode: drop the old window
+                    self._lat_buf[i].clear()     # new episode: fresh start (no history)
                     self._pblk_buf[i].clear()
                     self._last_blk[i] = None
                     self._steps_left[i] = self.horizon0
@@ -913,31 +889,43 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             gpx = info_dict["goal"][replan]
             gpx = gpx[:, -1] if gpx.ndim == 5 else gpx  # (R,C,H,W) single goal frame
             cpx = px[:, -1] if px.ndim == 5 else px     # (R,C,H,W) current frame
-            # push current frame + the block that led into it (prev emitted block) into the buffers
+            # encode the new current frame ONCE and cache it; cache the prev emitted block too
+            z_new = self.model.encode(cpx.to(dev).float())         # (R, D)
+            z_g = self.model.encode(gpx.to(dev).float())           # (R, D) fixed goal
             for row, i in enumerate(replan):
-                self._frame_buf[i].append(cpx[row])
-                self._pblk_buf[i].append(self._last_blk[i])  # None at episode start -> null
-            windows = torch.stack([self._build_window(i) for i in replan], dim=0)  # (R,W,C,H,W)
-            R, Wn = windows.shape[0], windows.shape[1]
-            z_win = self.model.encode(windows.reshape(R * Wn, *windows.shape[2:]).to(dev).float())
-            z_win = z_win.reshape(R, Wn, -1)
-            z_g = self.model.encode(gpx.to(dev).float())   # (R, D)
+                self._lat_buf[i].append(z_new[row])
+                self._pblk_buf[i].append(self._last_blk[i])        # None at start -> null
+            lens = [len(self._lat_buf[i]) for i in replan]
+            Lmax = max(lens)
+            R, Dd = len(replan), z_new.shape[-1]
+            # pad the growing histories to Lmax (pads at the END; causal -> never seen by earlier
+            # positions, and we read each env's own last valid index)
+            seq = torch.zeros(R, Lmax, Dd, device=dev)
+            for row, i in enumerate(replan):
+                buf = torch.stack(self._lat_buf[i], dim=0)         # (L_i, D)
+                seq[row, : buf.shape[0]] = buf
+            a_prev = a_prev_mask = None
+            if self.action_cond:
+                a_prev = torch.zeros(R, Lmax, self.block_dim, device=dev)
+                a_prev_mask = torch.zeros(R, Lmax, dtype=torch.bool, device=dev)
+                for row, i in enumerate(replan):
+                    for k, blk in enumerate(self._pblk_buf[i]):
+                        if blk is not None:
+                            a_prev[row, k] = blk.to(dev)
+                            a_prev_mask[row, k] = True
+            c = self.model.aggregate(seq, a_prev, a_prev_mask)     # (R, Lmax, D)
+            last_idx = torch.tensor([l - 1 for l in lens], device=dev)
+            c_last = c[torch.arange(R, device=dev), last_idx]      # (R, D) each env's current pos
             steps = np.maximum(self._steps_left[replan], 1.0)
             h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                   device=dev, dtype=torch.float32)
             if self.ablate_horizon:
                 h_norm = torch.zeros_like(h_norm)
-            a_prev = a_prev_mask = None
-            if self.action_cond:
-                pa = [self._build_prev_action(i) for i in replan]
-                a_prev = torch.stack([p[0] for p in pa], dim=0).to(dev).float()   # (R,W,blk)
-                a_prev_mask = torch.stack([p[1] for p in pa], dim=0).to(dev)      # (R,W)
-            # gc_action encapsulates aggregate (+ action-cond) -> arm-agnostic across ablations
-            z_blk = self.model.gc_action(z_win, z_g, h_norm, a_prev, a_prev_mask)  # (R,blk) z-scored
+            z_blk = self.model.gc_head(c_last, z_g, h_norm)        # (R, blk) z-scored
             for row, i in enumerate(replan):
-                self._last_blk[i] = z_blk[row].detach().cpu()  # z-scored, for the next frame's prev
+                self._last_blk[i] = z_blk[row].detach()            # z-scored, next frame's prev
             raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
-                   * self._astd + self._amean)             # un-z-score per raw dim
+                   * self._astd + self._amean)                     # un-z-score per raw dim
             raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
             for row, i in enumerate(replan):
                 self._action_buffer[i].extend(raw[row])

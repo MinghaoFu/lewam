@@ -44,7 +44,6 @@ class ShadowUnifiedPolicy(gip.LeWAMSplitPolicy):
         super().__init__(*a, **kw)
         self.uni = uni_model.eval()
         self.uni_cfg = uni_cfg
-        self.window = int(uni_cfg["window"])
         dev = next(uni_model.parameters()).device
         self._uni_amean = torch.tensor(uni_cfg["action_mean"], dtype=torch.float32, device=dev)
         self._uni_astd = torch.tensor(uni_cfg["action_std"], dtype=torch.float32, device=dev).clamp_min(1e-6)
@@ -52,51 +51,46 @@ class ShadowUnifiedPolicy(gip.LeWAMSplitPolicy):
         self._uni_raw = int(uni_cfg["action_raw_dim"])
         self._uni_block_dim = int(uni_cfg["action_dim"])
         self.action_cond = bool(uni_cfg.get("agg_action_cond", False))
-        self._frame_buf = None
-        self._pblk_buf = None    # z-scored block (split's) that led into each buffered frame
+        self._lat_buf = None     # per-env cache of unified latents z_start..z_t (grows per episode)
+        self._pblk_buf = None    # split's z-scored block that led into each frame
         self._last_blk = None    # last split z-scored block emitted (next frame's prev-action)
         self.log_split, self.log_uni, self.log_h = [], [], []
 
     def set_env(self, env):
         super().set_env(env)
         n = getattr(env, "num_envs", 1)
-        self._frame_buf = [deque(maxlen=self.window) for _ in range(n)]
-        self._pblk_buf = [deque(maxlen=self.window) for _ in range(n)]
+        self._lat_buf = [[] for _ in range(n)]
+        self._pblk_buf = [[] for _ in range(n)]
         self._last_blk = [None] * n
 
-    def _build_window(self, i):
-        buf = list(self._frame_buf[i])
-        pad = [buf[0]] * (self.window - len(buf))
-        return torch.stack(pad + buf, dim=0)  # (W, C, H, W)
-
-    def _build_prev_action(self, i):
-        buf = list(self._pblk_buf[i])
-        pad = self.window - len(buf)
-        a_prev, mask = [], []
-        zero = torch.zeros(self._uni_block_dim)
-        for _ in range(pad):
-            a_prev.append(zero); mask.append(False)
-        for blk in buf:
-            if blk is None:
-                a_prev.append(zero); mask.append(False)
-            else:
-                a_prev.append(blk); mask.append(True)
-        return torch.stack(a_prev, dim=0), torch.tensor(mask, dtype=torch.bool)
-
     @torch.no_grad()
-    def _uni_block(self, replan, gpx, h_norm, dev):
-        """Unified action (RAW) for the replanning envs, off the maintained frame windows
-        (and, if agg_action_cond, the split's executed z-scored blocks as previous actions)."""
-        windows = torch.stack([self._build_window(i) for i in replan], dim=0)  # (R,W,C,H,W)
-        R, Wn = windows.shape[0], windows.shape[1]
-        z_win = self.uni.encode(windows.reshape(R * Wn, *windows.shape[2:]).to(dev).float()).reshape(R, Wn, -1)
+    def _uni_block(self, replan, cpx, gpx, h_norm, dev):
+        """Unified action (RAW) for the replanning envs, full-causal over the cached latent history
+        (and, if agg_action_cond, the split's executed z-scored blocks as previous actions). cpx:
+        (R,C,H,W) current frames for the replanning envs (encoded once with the UNIFIED encoder)."""
+        z_new = self.uni.encode(cpx.to(dev).float())               # (R, D) unified latent
         z_g = self.uni.encode(gpx.to(dev).float())
+        for row, i in enumerate(replan):
+            self._lat_buf[i].append(z_new[row])
+            self._pblk_buf[i].append(self._last_blk[i])            # split's prev block; None at start
+        lens = [len(self._lat_buf[i]) for i in replan]
+        Lmax, R, Dd = max(lens), len(replan), z_new.shape[-1]
+        seq = torch.zeros(R, Lmax, Dd, device=dev)
+        for row, i in enumerate(replan):
+            buf = torch.stack(self._lat_buf[i], dim=0)
+            seq[row, : buf.shape[0]] = buf
         a_prev = a_prev_mask = None
         if self.action_cond:
-            pa = [self._build_prev_action(i) for i in replan]
-            a_prev = torch.stack([p[0] for p in pa], dim=0).to(dev).float()
-            a_prev_mask = torch.stack([p[1] for p in pa], dim=0).to(dev)
-        blk = self.uni.gc_action(z_win, z_g, h_norm.to(dev), a_prev, a_prev_mask)  # (R,blk) z-scored
+            a_prev = torch.zeros(R, Lmax, self._uni_block_dim, device=dev)
+            a_prev_mask = torch.zeros(R, Lmax, dtype=torch.bool, device=dev)
+            for row, i in enumerate(replan):
+                for k, blk in enumerate(self._pblk_buf[i]):
+                    if blk is not None:
+                        a_prev[row, k] = blk.to(dev); a_prev_mask[row, k] = True
+        c = self.uni.aggregate(seq, a_prev, a_prev_mask)           # (R, Lmax, D)
+        last_idx = torch.tensor([l - 1 for l in lens], device=dev)
+        c_last = c[torch.arange(R, device=dev), last_idx]
+        blk = self.uni.gc_head(c_last, z_g, h_norm.to(dev))        # (R, blk) z-scored
         raw = blk.reshape(blk.size(0), self._uni_fs, self._uni_raw) * self._uni_astd + self._uni_amean
         return raw.reshape(blk.size(0), -1)
 
@@ -108,9 +102,9 @@ class ShadowUnifiedPolicy(gip.LeWAMSplitPolicy):
         if self._action_buffer is None:
             self._action_buffer = [deque() for _ in range(n)]
             self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
-        if self._frame_buf is None:
-            self._frame_buf = [deque(maxlen=self.window) for _ in range(n)]
-            self._pblk_buf = [deque(maxlen=self.window) for _ in range(n)]
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(n)]
+            self._pblk_buf = [[] for _ in range(n)]
             self._last_blk = [None] * n
 
         flush = info_dict.pop("_needs_flush", None)
@@ -118,7 +112,7 @@ class ShadowUnifiedPolicy(gip.LeWAMSplitPolicy):
             for i in range(n):
                 if flush[i]:
                     self._action_buffer[i].clear()
-                    self._frame_buf[i].clear()
+                    self._lat_buf[i].clear()
                     self._pblk_buf[i].clear()
                     self._last_blk[i] = None
                     self._steps_left[i] = self.horizon0
@@ -133,21 +127,19 @@ class ShadowUnifiedPolicy(gip.LeWAMSplitPolicy):
             gpx = info_dict["goal"][replan]
             gpx = gpx[:, -1] if gpx.ndim == 5 else gpx      # (R,C,H,W)
             cpx = px[:, -1] if px.ndim == 5 else px         # (R,C,H,W)
-            for row, i in enumerate(replan):
-                self._frame_buf[i].append(cpx[row])
-                self._pblk_buf[i].append(self._last_blk[i])  # split's prev block -> null at start
             z_t = self.model.encode(cpx.to(dev).float())
             z_g = self.model.encode(gpx.to(dev).float())
             steps = np.maximum(self._steps_left[replan], 1.0)
             h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                   device=dev, dtype=torch.float32)
             z_blk = self.model.gc_head(z_t, z_g, h_norm)     # split z-scored block
-            for row, i in enumerate(replan):
-                self._last_blk[i] = z_blk[row].detach().cpu()  # the executed (split) prev-action
             raw_split = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
                          * self._astd + self._amean).reshape(len(replan), -1)
-            # SHADOW: unified action on the SAME window/goal/horizon (no env effect)
-            raw_uni = self._uni_block(replan, gpx, h_norm, dev)
+            # SHADOW: unified action on the SAME frames/goal/horizon (no env effect). Uses the OLD
+            # self._last_blk (the split's PREVIOUS block) as each frame's prev-action, then we update.
+            raw_uni = self._uni_block(replan, cpx, gpx, h_norm, dev)
+            for row, i in enumerate(replan):
+                self._last_blk[i] = z_blk[row].detach()  # split's block -> next frame's prev-action
             self.log_split.append(raw_split.cpu().numpy())
             self.log_uni.append(raw_uni.cpu().numpy())
             self.log_h.append(h_norm.cpu().numpy())
