@@ -300,18 +300,27 @@ def main():
           f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
+    # Each item is a whole start->goal trajectory (~avg_h decision points), so iterating EVERY start
+    # supervises each decision point ~avg_h times per epoch (~12x over-supervision -> 12x slow). Draw
+    # ~1x coverage per epoch instead: n_starts / avg_h trajectories, avg_h ~ H_max/2. Re-randomized
+    # each epoch (RandomSampler), so over many epochs all starts are still seen.
     train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max)
     val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max)
+    avg_h = max(1.0, args.H_max / 2.0)
+    n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_h))
+    n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_h))
+    train_sampler = torch.utils.data.RandomSampler(train_ds, replacement=True, num_samples=n_tr_ep)
+    val_sampler = torch.utils.data.RandomSampler(val_ds, replacement=True, num_samples=n_va_ep)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
         num_workers=args.num_workers, collate_fn=collate_pad,
     )
     if args.num_workers > 0:
         _loader_common.update(prefetch_factor=args.prefetch_factor, persistent_workers=True)
-    train_loader = DataLoader(train_ds, shuffle=True, **_loader_common)
-    val_loader = DataLoader(val_ds, shuffle=False, **_loader_common)
-    print(f"[lewam-uni] loaders ready: workers={args.num_workers} "
-          f"prefetch={args.prefetch_factor} pin_memory=True", flush=True)
+    train_loader = DataLoader(train_ds, sampler=train_sampler, **_loader_common)
+    val_loader = DataLoader(val_ds, sampler=val_sampler, **_loader_common)
+    print(f"[lewam-uni] loaders ready: workers={args.num_workers} prefetch={args.prefetch_factor} "
+          f"pin_memory=True  trajectories/epoch: train={n_tr_ep} val={n_va_ep} (~1x coverage)", flush=True)
 
     # ---- optimizer: 4 param groups ----
     opt = torch.optim.AdamW([
@@ -383,7 +392,11 @@ def main():
             z_cyc = model.dynamics(c.reshape(B * Lmax, D), a_pred.reshape(B * Lmax, -1),
                                    goal_bc.reshape(B * Lmax, D)).reshape(B, Lmax, D)
             loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * m).sum() / (nval * D)
-        loss_reg = sigreg(states[valid].unsqueeze(0)) if train else torch.zeros((), device=device)
+        # SIGReg anti-collapse: feed INDEPENDENT latents (one per trajectory = the fresh-start
+        # latents), like the split's z_t. Feeding all valid latents (consecutive, correlated
+        # trajectory frames) makes SIGReg read a false "collapse" and blow up (reg~200), drowning
+        # the action loss. SIGReg uses random 1-D projections so B(=batch) samples suffice.
+        loss_reg = sigreg(states[:, 0].unsqueeze(0)) if train else torch.zeros((), device=device)
         return loss_act, loss_dyn, loss_reg, loss_cyc, int(nval.item())
 
     # ---- training loop ----
