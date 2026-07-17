@@ -33,6 +33,16 @@ equally with the explicit `z_t` skip (res), without it (nores), or gated. The ag
 through the deep shared predictor destroyed endgame precision). The shallow causal aggregator here
 does not.
 
+**10-seed re-eval (confirmation).** To firm up the noisy 3-seed screen, the three reacher ckpts were
+re-evaluated at 10 eval seeds × N=50 (500 rollouts/arm; RAM-safe concurrency 5, since eval caches
+only `action` and reads frames lazily → ~5 min/arm). Result: **res 90.8±3.4, nores 89.6±3.1, gate
+91.2±4.8** (split 96). The three arms are indistinguishable — means span 1.6 SR, all inside ±3–5 std.
+The *ranking flipped* vs the 3-seed screen (gate now highest mean but widest spread; res tightest;
+nores lowest), which is the signature of noise. The n=3 "res clearly best with lower variance" was a
+small-sample artifact: **the residual/gate choice does no measurable work on reacher.** Pick **res**
+on the *principled* basis only (zero-init aggregator ⇒ res strictly contains the split at init, so it
+cannot underperform the split's direct read by construction), not on a measured SR win.
+
 **The real signal is the gap to split.** All three unified reacher arms sit ~3–5 SR under the
 split's 96, at 30ep. The reacher act-val curves were still creeping down at ep30 (0.958→0.956 over
 the last five epochs), and reacher act sits near the mean-predictor 1.0 for every method (the split
@@ -82,10 +92,12 @@ the question the finalization run answers.
    fast sampler). **Params → ~15M** (LeWM's size), up from 9.30M (encoder 5.80M ViT-tiny + agg
    1.81M + gc_head 1.12M + dynamics 0.57M); bump encoder/width, keep the +1.8M aggregator. See the
    `unified-finalization-protocol` memory. This is the run that decides unified-vs-split on reacher.
-2. **Which arm to finalize.** Screening does not separate res/nores/gate. Default to **res** (the
-   residual = zero-init identity boot = provably ≥ split's directness, the design intent) unless a
-   multi-seed reacher screen shows nores/gate ahead. If the residual question matters for the paper,
-   run ≥3 TRAINING seeds per arm on reacher to get error bars the single-seed screen can't provide.
+2. **Which arm to finalize: res.** The 10-seed re-eval (above) confirms res/nores/gate are
+   indistinguishable on reacher, so choose **res** on the principled basis (zero-init identity boot =
+   provably ≥ split's directness, the design intent), not on SR. Note the 10 seeds vary only the
+   EVAL seed on one trained model; the remaining unquantified axis is TRAINING-seed variance. Only
+   run ≥3 TRAINING seeds per arm if the residual question must be settled for the paper — the eval
+   evidence already says it is a wash, so this is low priority.
 3. **pusht** is the other precise task (split 88); worth adding to a finalization sweep. tworoom and
    cube are saturated (100) and won't discriminate.
 
