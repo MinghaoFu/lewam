@@ -110,6 +110,12 @@ def run(cfg: DictConfig):
     print(f"==== GIP {mode} RESULTS ====")
     print(metrics)
 
+    # trajectory-divergence probe: dump the executed per-obs-step latent trajectory if requested
+    _dump = cfg.get("gip_eval", {}).get("dump_latents", "")
+    if _dump and getattr(policy, "log_latents", False):
+        policy.dump_latents(_dump)
+        print(f"[divprobe] dumped executed latents -> {_dump}")
+
     with (results_path / f"{mode}_{cfg.policy}_results.txt").open("a") as f:
         f.write("\n==== CONFIG ====\n")
         f.write(OmegaConf.to_yaml(cfg))

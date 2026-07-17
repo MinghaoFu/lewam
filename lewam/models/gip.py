@@ -845,9 +845,14 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         # ctx_cap>0 -> aggregate only the LAST k cached latents (a sliding context window), for the
         # context ablation. 0 = full causal history from episode start (default eval behaviour).
         self.ctx_cap = int(kw.pop("ctx_cap", 0))
+        # log_latents -> record the executed per-obs-step current latent + goal latent per env, for
+        # the trajectory-divergence probe (compare ctx_cap=1 vs full rollouts from matched starts).
+        self.log_latents = bool(kw.pop("log_latents", False))
         super().__init__(model, cfg, *a, **kw)
         self.type = "lewam_unified_policy"
         self.action_cond = bool(cfg.get("agg_action_cond", False))
+        self._lat_log = []       # (call_idx, env_i, z_cur[D], z_goal[D]) tuples when log_latents
+        self._call = 0
         self._lat_buf = None     # per-env list of cached latents z_start..z_t (grows per episode)
         self._pblk_buf = None    # per-env list of z-scored blocks that led INTO each frame
         self._last_blk = None    # per-env last z-scored block emitted (the next frame's prev-action)
@@ -858,12 +863,27 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         self._lat_buf = [[] for _ in range(n)]
         self._pblk_buf = [[] for _ in range(n)]
         self._last_blk = [None] * n
+        self._lat_log = []
+        self._call = 0
+
+    def dump_latents(self, path):
+        """Save the executed per-obs-step latent trajectory (for the divergence probe)."""
+        import numpy as np
+        if not self._lat_log:
+            np.savez(path, calls=np.zeros(0), envs=np.zeros(0))
+            return
+        calls = np.array([r[0] for r in self._lat_log], dtype=np.int64)
+        envs = np.array([r[1] for r in self._lat_log], dtype=np.int64)
+        z_cur = torch.stack([r[2] for r in self._lat_log]).numpy()
+        z_goal = torch.stack([r[3] for r in self._lat_log]).numpy()
+        np.savez(path, calls=calls, envs=envs, z_cur=z_cur, z_goal=z_goal)
 
     @torch.no_grad()
     def get_action(self, info_dict, **kw):
         info_dict = self._prepare_info(info_dict)
         n = self.env.num_envs
         dev = next(self.model.parameters()).device
+        self._call += 1
         if self._action_buffer is None:
             self._action_buffer = [deque() for _ in range(n)]
             self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
@@ -898,6 +918,10 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             for row, i in enumerate(replan):
                 self._lat_buf[i].append(z_new[row])
                 self._pblk_buf[i].append(self._last_blk[i])        # None at start -> null
+            if self.log_latents:
+                for row, i in enumerate(replan):
+                    self._lat_log.append((self._call, int(i),
+                                          z_new[row].detach().cpu(), z_g[row].detach().cpu()))
             lens = [len(self._lat_buf[i]) for i in replan]
             if self.ctx_cap and self.ctx_cap > 0:
                 lens = [min(l, self.ctx_cap) for l in lens]        # context ablation: last-k window
@@ -1007,6 +1031,7 @@ def build_policy(cfg, model, adim, process, transform):
             process=process, transform=transform,
             ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
             ctx_cap=int(ge.get("ctx_cap", 0)),
+            log_latents=bool(ge.get("dump_latents", "")),
         )
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
