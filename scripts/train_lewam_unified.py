@@ -374,11 +374,17 @@ def main():
         z = model.encode(frames.reshape(B * Lp1, *frames.shape[2:]).float()).reshape(B, Lp1, D)
         states = z[:, :Lmax].float()                    # (B,Lmax,D) decision-point states
         next_tgt = z[:, 1:Lp1].float()                  # (B,Lmax,D) dynamics targets z[k+1]
-        goal = z[torch.arange(B, device=device), lengths].float()       # (B,D) endpoint z[h]
-        goal_bc = goal.unsqueeze(1).expand(B, Lmax, D)
         pos = torch.arange(Lmax, device=device)
         valid = pos.unsqueeze(0) < lengths.unsqueeze(1)                 # (B,Lmax) bool
-        horizon = (lengths.unsqueeze(1) - pos.unsqueeze(0)).clamp(min=1)
+        # Per-position goal at a RANDOM future distance within the trajectory, so horizon is NOT tied
+        # to context length/position. (The old code always used the window endpoint z[h], making
+        # horizon deterministically h-p, so long-context positions only ever saw short horizons and
+        # long-context x long-horizon was never trained.) goal for pos p = z[g], g ~ U[p+1, h].
+        pos_e, len_e = pos.unsqueeze(0), lengths.unsqueeze(1)          # (1,Lmax), (B,1)  len=endpoint h
+        span = (len_e - pos_e).clamp(min=1)                            # h-p (>=1 where valid)
+        g_idx = (pos_e + 1 + (torch.rand(B, Lmax, device=device) * span).long()).clamp(max=Lp1 - 1)
+        goal_bc = torch.gather(z, 1, g_idx.unsqueeze(-1).expand(B, Lmax, D)).float()  # (B,Lmax,D) per-pos
+        horizon = (g_idx - pos_e).clamp(min=1)                          # g - p (decoupled from p)
         h_norm = horizon.clamp(max=args.H_max).float() / Hmax          # (B,Lmax)
         a_prev = a_prev_mask = None
         if model.agg_action_cond:
