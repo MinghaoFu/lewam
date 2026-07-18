@@ -972,6 +972,81 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
+# LeWAM-Unified CEM PLANNER (mode: unified_cem) -- plans with the goal-conditioned DYNAMICS head
+# instead of the reactive gc_head. Diagnostic: if CEM reaches goals where the reactive policy fails,
+# the world model is fine and the reactive head/rollout is the weak link (undertraining); if CEM
+# also fails, the encoder/dynamics is the problem. Also the base for "does a policy trained in
+# parallel to the dynamics improve the dynamics" (compare CEM SR with/without the action head).
+class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
+    """Receding-horizon CEM over z-scored action BLOCKS, scored by predicted latent distance to the
+    goal. Rollout: z_0 = encode(current); z_{h+1} = model.dynamics(z_h, a_h, z_goal); cost = sum_h
+    ||z_h - z_goal||^2. CEM refines a per-env Gaussian over [a_0..a_{H-1}] and executes a_0."""
+
+    def __init__(self, model, cfg, *a, **kw):
+        self.cem_K = int(kw.pop("cem_K", 256))       # samples per iter
+        self.cem_M = int(kw.pop("cem_M", 32))        # elites
+        self.cem_iter = int(kw.pop("cem_iter", 4))
+        self.cem_H = int(kw.pop("cem_H", 5))         # plan horizon (blocks)
+        self.cem_std = float(kw.pop("cem_std", 1.0))  # init std (z-scored actions ~ unit var)
+        super().__init__(model, cfg, *a, **kw)
+        self.type = "lewam_unified_cem"
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kw):
+        info_dict = self._prepare_info(info_dict)
+        n = self.env.num_envs
+        dev = next(self.model.parameters()).device
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(n)]
+            self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(n):
+                if flush[i]:
+                    self._action_buffer[i].clear()
+                    self._steps_left[i] = self.horizon0
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
+        replan = [i for i in range(n) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            px = info_dict["pixels"][replan]
+            assert "goal" in info_dict, "LeWAM-Unified CEM needs info_dict['goal']"
+            gpx = info_dict["goal"][replan]
+            gpx = gpx[:, -1] if gpx.ndim == 5 else gpx
+            cpx = px[:, -1] if px.ndim == 5 else px
+            z0 = self.model.encode(cpx.to(dev).float())        # (R, D) current latent
+            zg = self.model.encode(gpx.to(dev).float())        # (R, D) goal latent
+            R, D = z0.shape
+            K, M, H, bd = self.cem_K, self.cem_M, self.cem_H, self.block_dim
+            mean = torch.zeros(R, H, bd, device=dev)
+            std = torch.full((R, H, bd), self.cem_std, device=dev)
+            z0k = z0.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
+            zgk = zg.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
+            for _ in range(self.cem_iter):
+                samp = mean.unsqueeze(1) + std.unsqueeze(1) * torch.randn(R, K, H, bd, device=dev)
+                z = z0k
+                cost = torch.zeros(R * K, device=dev)
+                for h in range(H):
+                    z = self.model.dynamics(z, samp[:, :, h].reshape(R * K, bd), zgk)  # (R*K, D)
+                    cost = cost + ((z - zgk) ** 2).sum(-1)
+                cost = cost.reshape(R, K)
+                idx = cost.argsort(dim=1)[:, :M]                                        # (R, M) best
+                elites = torch.gather(samp, 1, idx[:, :, None, None].expand(R, M, H, bd))
+                mean = elites.mean(1)
+                std = elites.std(1).clamp(min=1e-3)
+            z_blk = mean[:, 0]                                                          # (R, bd) exec a_0
+            raw = (z_blk.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
+            raw = raw.reshape(R, self.action_block, self.action_dim).cpu()
+            for row, i in enumerate(replan):
+                self._action_buffer[i].extend(raw[row])
+                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)
+        action = torch.full((n, self.action_dim), float("nan"))
+        for i in range(n):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
 # policy factory (the one config switch)
 def build_policy(cfg, model, adim, process, transform):
     """Dispatch on cfg.gip_eval.mode -> a configured policy."""
@@ -1018,21 +1093,25 @@ def build_policy(cfg, model, adim, process, transform):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py). Reactive GC over a state window, no CEM.
-    if mode == "unified_policy":
+    if mode in ("unified_policy", "unified_cem"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
         if horizon0 is None:
             horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+        common = dict(model=model, cfg=uni_cfg, action_block=action_block,
+                      action_dim=adim // action_block, horizon0=float(horizon0),
+                      H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
+                      process=process, transform=transform,
+                      ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))))
+        if mode == "unified_cem":
+            return LeWAMUnifiedCEMPolicy(
+                cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
+                cem_iter=int(ge.get("cem_iter", 4)), cem_H=int(ge.get("cem_H", 5)),
+                cem_std=float(ge.get("cem_std", 1.0)), **common)
         return LeWAMUnifiedPolicy(
-            model=model, cfg=uni_cfg, action_block=action_block,
-            action_dim=adim // action_block, horizon0=float(horizon0),
-            H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
-            process=process, transform=transform,
-            ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
             ctx_cap=int(ge.get("ctx_cap", 0)),
-            log_latents=bool(ge.get("dump_latents", "")),
-        )
+            log_latents=bool(ge.get("dump_latents", "")), **common)
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.
     if mode == "gcidm":
