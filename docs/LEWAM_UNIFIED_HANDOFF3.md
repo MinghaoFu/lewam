@@ -84,6 +84,35 @@ the question the finalization run answers.
    `rm`). This is how the 3 reacher arms ran concurrently. Note `mlx worker kill` is gated by the
    auto-mode permission classifier — needs a Bash permission rule or the user's ok.
 
+## Context ablation — does the aggregator's temporal history help? (reacher: NO)
+
+Question: on reacher, does the causal aggregator use temporal context, or is the policy effectively
+Markovian (current frame + goal + horizon)? Three probes, all pointing the same way:
+
+- **ctx_cap SR sweep** (`+gip_eval.ctx_cap=k` caps the aggregator to the last k obs-step latents,
+  FIFO, grows from 1 — Option A). Clean **serial** run, res: SR **91 / 90 / 90 / 92 / 92 / 92** for
+  k = 1/2/4/8/16/full. **FLAT** — a single frame controls as well as full history.
+- **One-step BC probe** (`scripts/probe_ctx_bc.py`, open-loop, expert-referenced, held-out demos):
+  `bc_mse(pred vs demonstrator)` is context-flat across k at every horizon, res ≈ nores; the only
+  effect is a small uptick in context-usefulness at the shortest horizons (H=1,2: `vs_full` ~0.015),
+  consistent with velocity mattering slightly for the last-inch endgame. Minor.
+- **Trajectory-divergence probe** (`scripts/probe_divergence_analyze.py` + `dump_latents`): k=1 and
+  k=full rollouts from matched starts track closely and both reach goal (SR 96/92).
+
+**Conclusion: temporal context is a wash on reacher — the policy is effectively Markovian.** So the
+residual/gate/context axis has no SR lever here, and the ~5–6 gap to split is a model/training
+matter (finalization), not context. Whether context *ever* helps needs a genuine-dynamics task
+(pusht: contact/momentum) — but **pusht has no trained unified checkpoint** (the sweep was
+tworoom+reacher), so that requires training a pusht arm first, then re-running these same probes.
+
+**⚠️ Data-integrity lesson (cost real time this session).** An earlier ctx sweep run **concurrently**
+(conc=5, 5 EGL renderers on one GPU) reported a spurious `ctx_cap=1` SR = **12** (uniform across 5
+seeds — the first concurrent wave took the GPU/EGL-init contention and came back with corrupted
+renders). It did **not** reproduce: the identical code + seeds run **serially** gives 91. This spawned
+a whole false "res collapses at k=1 → needs context → off-manifold drift" investigation before the
+reproduction caught it. **Treat concurrent-eval outliers as suspect; reproduce small-N eval numbers
+serially (conc=1) before believing them.** See [[merlin-worker-lifecycle]].
+
 ## Next steps
 
 1. **Finalization run (per user, 2026-07-18).** Once a design is chosen, run it at the split's
