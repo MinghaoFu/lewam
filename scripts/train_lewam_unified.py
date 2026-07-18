@@ -186,6 +186,71 @@ def collate_pad(batch):
 
 
 # --------------------------------------------------------------------------- #
+# Streaming path (--stream): read ONLY actions + episode lengths up front (tiny), enumerate valid    #
+# starts, and read each trajectory's frame window from the h5 on demand in __getitem__. No preload / #
+# flatten -> constant, low RAM (fits a normal worker), at the cost of per-batch h5 reads (epoch 1    #
+# slow; page cache warms after). Produces the SAME (frames, actions, h) items as SeqTrajDataset, so  #
+# collate_pad + run_batch are unchanged. Mirrors the proven stream path in train_lewam_seq.py.       #
+# --------------------------------------------------------------------------- #
+def build_traj_index_stream(base, frameskip, act_mean, act_std, raw_adim, max_eps=None):
+    """Read actions + lengths only; z-score actions per episode; enumerate (ep, start, maxh) starts.
+    n_fr (obs-frames) matches preload's min(ceil(L/fs), n_obs+1); maxh = last frame - start."""
+    import h5py
+    act_mean_t = torch.tensor(act_mean, dtype=torch.float32)
+    act_std_t = torch.tensor(act_std, dtype=torch.float32)
+    lengths = np.asarray(base.lengths)
+    n_eps = len(lengths) if max_eps is None else min(max_eps, len(lengths))
+    with h5py.File(base.h5_path, "r", swmr=True) as hf:
+        act_all = torch.from_numpy(np.asarray(hf["action"][:]))
+        offsets = (np.asarray(hf["ep_offset"][:]).astype(np.int64) if "ep_offset" in hf
+                   else np.concatenate([[0], np.cumsum(lengths)[:-1]]).astype(np.int64))
+    acts_by_ep, index = [], []
+    t0 = time.time()
+    for ep in range(n_eps):
+        L = int(lengths[ep]); off = int(offsets[ep]); n_obs = L // frameskip
+        a = act_all[off:off + n_obs * frameskip].reshape(n_obs, frameskip, raw_adim)
+        a = ((a - act_mean_t) / act_std_t).reshape(n_obs, frameskip * raw_adim).half()
+        n_fr = min((L + frameskip - 1) // frameskip, n_obs + 1)
+        acts_by_ep.append(a)
+        last = n_fr - 1
+        for t in range(min(n_obs, n_fr - 1)):     # valid starts: need >=1 frame after the start
+            index.append((ep, t, last - t))       # (ep, start, maxh = frames from start to ep end)
+    print(f"[lewam-uni] stream index: {len(index)} starts over {n_eps} eps ({time.time()-t0:.0f}s)",
+          flush=True)
+    return acts_by_ep, index
+
+
+class StreamTrajDataset(Dataset):
+    """Same item as SeqTrajDataset, but frames are read from the h5 on demand (no preloaded tensor)."""
+
+    def __init__(self, acts_by_ep, index, indices, h_max, base, img_t, frameskip):
+        self.acts = acts_by_ep
+        self.index = index
+        self.indices = indices
+        self.h_max = int(h_max)
+        self.base = base
+        self.img_t = img_t
+        self.fs = int(frameskip)
+
+    def __len__(self):
+        return self.indices.numel()
+
+    def __getitem__(self, i):
+        ep, t, mh = self.index[int(self.indices[i])]
+        h = int(torch.randint(1, self.h_max + 1, (1,)).item())
+        h = min(h, mh)
+        if h < 1:
+            h = 1
+        # obs-frames t .. t+h (h+1 frames), strided by frameskip inside _load_slice
+        pix = self.base._load_slice(ep, t * self.fs, (t + h) * self.fs + 1)["pixels"]
+        if not torch.is_tensor(pix):
+            pix = torch.as_tensor(np.asarray(pix))
+        frames = self.img_t({"pixels": pix})["pixels"].float().half()[: h + 1]   # (h+1, 3, H, W)
+        actions = self.acts[ep][t:t + h]                                          # (h, adim)
+        return frames, actions, h
+
+
+# --------------------------------------------------------------------------- #
 # Main training                                                                #
 # --------------------------------------------------------------------------- #
 def main():
@@ -239,6 +304,9 @@ def main():
     # data-pipeline knobs (no effect on loss/model logic)
     ap.add_argument("--num_workers", type=int, default=6)
     ap.add_argument("--prefetch_factor", type=int, default=3)
+    ap.add_argument("--stream", action="store_true",
+                    help="read frames from the h5 on demand (no preload/flatten) -> constant low RAM, "
+                         "fits a normal worker; epoch 1 slow (h5 reads), page cache warms after")
     args = ap.parse_args()
 
     if args.ablate_dynamics:
@@ -288,12 +356,18 @@ def main():
           f"agg_depth={args.agg_depth} action_cond={args.agg_action_cond}", flush=True)
 
     # ---- data ----
-    frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
-                                          frameskip, max_eps=max_eps)
-    Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
-    del frame_list
-    n_starts = t_gidx.shape[0]
-    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
+    if args.stream:
+        acts_by_ep, stream_index = build_traj_index_stream(base, frameskip, act_mean, act_std,
+                                                           raw_adim, max_eps=max_eps)
+        n_starts = len(stream_index)
+        print(f"[lewam-uni] stream mode: starts={n_starts} (no preload)", flush=True)
+    else:
+        frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
+                                              frameskip, max_eps=max_eps)
+        Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
+        del frame_list
+        n_starts = t_gidx.shape[0]
+        print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=g)
@@ -308,8 +382,12 @@ def main():
     # supervises each decision point ~avg_h times per epoch (~12x over-supervision -> 12x slow). Draw
     # ~1x coverage per epoch instead: n_starts / avg_h trajectories, avg_h ~ H_max/2. Re-randomized
     # each epoch (RandomSampler), so over many epochs all starts are still seen.
-    train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max)
-    val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max)
+    if args.stream:
+        train_ds = StreamTrajDataset(acts_by_ep, stream_index, train_idx, args.H_max, base, img_t, frameskip)
+        val_ds = StreamTrajDataset(acts_by_ep, stream_index, val_idx, args.H_max, base, img_t, frameskip)
+    else:
+        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max)
+        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max)
     avg_h = max(1.0, args.H_max / 2.0)
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_h))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_h))
