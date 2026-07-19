@@ -1,184 +1,184 @@
-# LeWAM — next direction handoff (2026-07-17): unify the split, don't rebuild the seq
+# LeWAM-Unified — consolidated handoff (updated 2026-07-19)
 
-The LeWAM-Seq model is **scrapped** (decision by the user + Minghao, 2026-07-17). This doc is the
-handoff for the next session. Part 1 is the seq post-mortem (what we learned, where it broke, so
-we don't repeat it). Part 2 is the new direction. Part 3 is the operational context (machine, repo,
-compute, checkpoints, eval) needed to run — read it before launching anything. The older seq/GC
-context is in `docs/LEWAM_SEQ_HANDOFF.md` (kept for history; seq is closed).
+Single source of truth for the LeWAM-Unified track. It replaces the earlier per-session handoffs
+(`LEWAM_UNIFIED_HANDOFF2/3.md`, now deleted). Seq history lives in `docs/LEWAM_SEQ_HANDOFF.md`
+(seq is closed). Branch **`lewam-unified`** (off `lewam-seq`). Commit identity MUST be
+`Minghao Fu <isminghaofu@gmail.com>`. `gh` is not installed — open PRs via the web link.
 
----
+## Goal
 
-## Part 1 — LeWAM-Seq post-mortem (why it failed, with evidence)
+Improve the working **split** model (a ViT encoder feeding two independent heads) by giving it
+**temporal context** on the state side and moving it toward a **single shared representation feeding
+both heads**, without adding many components and without re-introducing the seq model's failure mode.
+The precise tasks (reacher, pusht) are what discriminate architectures; tworoom and cube are
+saturated at SR 100 for both split and every unified arm, so they do not tell you if a change helped.
 
-**What seq was.** One causal Transformer over interleaved `[z_0,e_0,z_1,e_1,…]` state/action
-tokens (`lewam/models/lewam_seq.py`). State-token read-out → action head (IDM/BC); action-token
-read-out → dynamics head (FDM). Eval `get_action` = reactive receding-horizon rollout over a
-sliding `num_frames` window; `history_size` (HS) sets the eval context length.
+## 1. Background — why the earlier seq model was scrapped (condensed)
 
-**Headline (seq_policy, 3 seeds N=50) vs the split baseline:**
+The seq model was one causal Transformer over interleaved `[z_0,e_0,z_1,e_1,…]` state/action tokens.
+It underperformed the split badly on the precise tasks (seq vs split: reacher 37 vs 96, pusht 61 vs
+88; tworoom and cube tied). The eval scaffold, the eval adapter, and training were all ruled out as
+the cause (the seq even fit held-out actions *better* than the split, at val_act ≈ 0.76 vs 0.98). The
+deficit is architectural and concentrated in the precise endgame: with history capped to a single
+frame the seq is already 27 vs split 96, and a shadow diagnostic (drive the env with the working
+split, ask whether the seq would pick the split's action on the split's own goal-reaching states)
+showed agreement that **collapses as the goal approaches** (near-goal R² 0.24 vs far-goal 0.52) —
+backwards from a competent policy. Likely mechanism: the action decode is routed through a **deep
+(6-layer) predictor shared with the dynamics/FDM objective**, which rewards smooth, predictable
+latent transitions and smooths away the fine endgame corrections. The split avoids this because its
+`gc_head` reads **raw `z_t`** directly through independent MLP heads.
 
-| task | seq_policy | split (this repo) |
+**Design consequences carried into the unified model.** Keep a near-direct path from `z_t` to the
+action (the endgame precision lives there). Do not route the action through a deep predictor
+entangled with dynamics. Do not interleave action tokens into the sequence (the seq's action context
+netted only +10 SR from HS 1→8 and added self-generated covariate shift). Temporal context on the
+STATE side is the part that helped.
+
+## 2. The unified model (what is built)
+
+`lewam/models/lewam_unified.py` — `LeWAMUnified` = `ViTEncoder` → a **shallow causal state
+aggregator** (`CausalStateAggregator`, sinusoidal PE, emits a context latent `c_τ` at every position)
+→ a shared `c_t` feeding both `gc_head` (action, off `c_t`, `z_goal`, `h_norm`) and `dynamics`
+(`c_t`, `a_t`, `z_goal`). The heads are reused verbatim from `lewam_split`. `forward_seq` is the
+per-position training path; `gc_action` is the last-position eval path.
+
+Arm flags govern how `c_t` relates to `z_t`:
+- **res** (`--agg_residual`, positive flag): `c_t = z_t + Aggr(z)` with a **zero-init** correction, so
+  it boots as the split (identity at init) and cannot underperform the split's direct read by
+  construction.
+- **nores** (default): `c_t = Aggr(z)`.
+- **gate** (`--agg_gate`): `c_t = z_t + g(z)·Aggr(z)`, an input-dependent sigmoid gate.
+- `--agg_action_cond`, `--agg_depth` (4), `--agg_heads` (4) are also present so every checkpoint
+  strict-loads under one eval adapter.
+
+Trainer `scripts/train_lewam_unified.py` is sequence-parallel: it samples a start→goal trajectory
+`[t..t+h]` with `h~U[1,H_max]`, the goal is the window endpoint `z[-1]` (shared by all positions,
+confirmed with the user), per-position horizon is `h-k`, dynamics targets are `z[1:]`, and the loss is
+a per-position masked `act + dyn + SIGReg` (match the seq trainer: `sigreg` over ALL latents, no
+stop-grad). `--H_max` is the context length in OBS-STEPS (one frame per obs-step, not divided by
+frameskip). Always pass `--ckpt_sync_dir <hdfs_dir>` so a released worker never costs a run.
+
+Eval adapter: `lewam/models/gip.py` `load_lewam_unified_model` + `LeWAMUnifiedPolicy`
+(mode `unified_policy`) — full-causal-from-episode-start rollout, caches per-frame latents,
+re-aggregates the growing history, reads the current position, arm-agnostic via `model.gc_action`.
+Run it with `scripts/eval_gip.py --config-name <task> policy=<run_name> +gip_eval.mode=unified_policy`
+or `bash scripts/eval_lewam_unified.sh <task> <tag> <run_dir> <num_eval>`.
+
+### The trainer bug that was found and fixed (`90d333e`)
+
+Early unified runs looked like encoder collapse: `act` stuck at ~1.0 (mean predictor), `dyn→0`, SIGReg
+elevated, SR ~12. The cause was **not** collapse. The ViT projector has a **BatchNorm**, and the
+padding collate padded variable-length trajectories with **zero frames**; in train mode BatchNorm
+uses batch statistics, so the zero pads corrupted the stats for the real frames and made the encoder
+output non-discriminative. The fix pads with the trajectory's **last real frame** (repeat the
+endpoint) instead of zeros; padded positions stay masked out of the loss and causal-masked in the
+aggregator, so they only keep BatchNorm's stats real. With the fix the action learns for the first
+time (`act` 1.036 → 0.88 tracking toward the split's 0.85). Two earlier hypotheses (SIGReg on
+correlated latents; stop-grad the dynamics target) were wrong and reverted. A cleaner fix (encode only
+the real frames, or a padding-invariant projector norm) is deferred — the real-frame padding is
+sufficient and no residual BN artifacts have surfaced.
+
+## 3. Results so far
+
+### 3a. Residual sweep — res / nores / gate are indistinguishable
+
+Screening budget, identical across all six arms so the comparison is valid: **30 epochs, batch 64**,
+reacher `--max_eps 4000`, H_max 25 (tworoom) / 50 (reacher), the ~1×-coverage RandomSampler. Eval 3
+seeds {42,0,1} × N=50 on `lewam_unified_best.pt`.
+
+| arm — context `c_t` | tworoom SR | reacher SR (per seed) |
 |---|---|---|
-| tworoom | 100 | 100 |
-| cube | 92 | 100 |
-| pusht | 61 | 88 |
-| reacher | 37 | 96 (98/92/98) |
+| **res**   `z_t + Aggr(z)`      | 100 [100,100,100] | 92.7 [94,94,90] |
+| **nores** `Aggr(z)`            | 100 [100,100,100] | 90.7 [86,90,96] |
+| **gate**  `z_t + g(z)·Aggr(z)` | 100 [100,100,100] | 91.3 [94,96,84] |
+| *split (reference)*            | *100* | *96* |
 
-The gap grows with task precision. reacher is the sharpest failure and was the focus.
+tworoom is uninformative (all 100). On reacher the three arms fall within eval-seed noise of each
+other. A 10-seed re-eval (500 rollouts/arm) confirmed it: **res 90.8±3.4, nores 89.6±3.1, gate
+91.2±4.8** — means span 1.6 SR, all inside ±3–5 std, and the ranking flipped versus the 3-seed screen
+(the signature of noise). The aggregator learns the goal-conditioned action map about equally with or
+without the explicit `z_t` skip. Crucially the aggregator-only **nores** arm is **not worse**, which
+is the opposite of the seq's failure — the shallow causal aggregator does not smooth the endgame the
+way the seq's deep shared predictor did. **Choose res** on the principled basis (zero-init identity
+boot ⇒ provably ≥ the split's directness), not on a measured SR win.
 
-**What we RULED OUT (not the cause):**
-- **The eval scaffold** — shared with the split, which now scores tworoom 100 / reacher 96 through
-  the exact same `world.evaluate` path (via the new `split_policy` adapter). So env/goal/SR are fine.
-- **The eval policy adapter (`LeWAMSeqPolicy`)** — audited and empirically verified faithful:
-  the predictor is causal (perturbing the last action token changes **zero** action predictions;
-  `e_1` leaves position 0 unchanged, moves position 2), and `get_action` reproduces the training
-  `forward` at the decision position to **2e-7**. z-score is the exact inverse of training, goal
-  conditioning matches (`goal_dropout_act=0` → always-GC), past-action feeding is aligned.
-- **Training** — internally consistent, and NOT collapse / underfit / overfit: reacher **val_act
-  ≈ 0.76** (LOWER, i.e. better, than the split's 0.98), **eff_rank 48%**, z_std ≈ 1.0. The seq fits
-  held-out actions *better* than the split yet controls far worse.
-- One minor training wrinkle (not the cause): a horizon OOD at low HS — window position 0 is only
-  trained on horizons ≥ `num_frames/H_max` ≈ 0.16, but eval queries it down to 1/H_max = 0.02.
-  Explains part of the HS=1→HS=8 gradient (27→37), not the gap.
+The real open signal is the **~3–5 SR gap to split** on reacher at 30ep (all three arms sit under 96).
+The reacher act-val was still creeping down at ep30, and reacher act sits near the mean-predictor 1.0
+for every method (the split itself was ~0.98), so reacher is a high-action-MSE-floor task where SR,
+not act, is the metric. Whether the unified model matches or beats split on reacher is unresolved at
+the screening budget.
 
-**Where the problem IS (most likely) — the architecture, concentrated in the precise endgame.**
-Two pieces of evidence:
-1. **HS=1 isolates the state path** (no action tokens in context) and is already **27 vs split 96**.
-   So most of the deficit exists before any action embedding enters — it's the routing of `z_t`
-   through the predictor to decode the action, not the action context.
-2. **Shadow diagnostic** (`scripts/seq_vs_split_shadow.py`): drive the env with the *working* split
-   (drove at 90% here), and at each step shadow the seq's HS=1 action on the SAME frame/goal/horizon
-   — measuring whether the seq would pick the split's action on the split's own goal-reaching states
-   (self-consistent, competent distribution). Result (seq vs split action):
+### 3b. Context ablation on reacher — a wash (the policy is effectively Markovian)
 
-   | regime | cosine | R² | rel. RMSE |
-   |---|---|---|---|
-   | all | 0.62 | 0.41 | 0.75 |
-   | far from goal | 0.69 | 0.52 | 0.66 |
-   | **near goal** | **0.53** | **0.24** | **0.86** |
+Three probes agree that the aggregator's temporal history does not help on reacher:
+- **ctx_cap SR sweep** (cap the aggregator to the last k obs-step latents, FIFO), serial run, res arm:
+  SR 91 / 90 / 90 / 92 / 92 / 92 for k = 1/2/4/8/16/full — flat, a single frame controls as well as
+  full history.
+- **One-step BC probe** (`scripts/probe_ctx_bc.py`, open-loop, held-out demos, referenced to the
+  dataset's recorded actions): `bc_mse` is context-flat across k at every horizon, res ≈ nores; the
+  only effect is a small uptick in context usefulness at the shortest horizons (velocity mattering
+  slightly for the last inch).
+- **Trajectory-divergence probe** (`scripts/probe_divergence_analyze.py` + `dump_latents`): k=1 and
+  k=full rollouts from matched starts track closely and both reach goal.
 
-   Only moderate agreement overall (pure covariate shift would predict high agreement on good
-   states), and agreement **collapses as the goal approaches** — backwards from a competent policy,
-   since the correct action is *more* determined near the goal. The seq diverges from the competent
-   policy exactly in the precise endgame.
+So the residual/gate/context axis has no SR lever on reacher, and the gap to split is a model/training
+matter, not a context matter. Whether context *ever* helps needs a genuine-dynamics task with
+contact and momentum — which is pusht.
 
-**Synthesis.** The seq's action feature (predictor state-token output `h_act`) is a *lower-average-MSE
-but worse-for-control* map: the average MSE is dominated by the easy far/coarse actions, where it
-roughly tracks the split (R² 0.52); the precise endgame, where it falls apart (R² 0.24), is a small
-slice of the MSE but the decisive slice for reaching. Likely mechanism: the predictor is **shared**
-between the action decode and the dynamics/FDM objective (which rewards smooth, predictable latent
-transitions), plus it's a deep (6-layer) stack — this shapes `h_act` toward a smoothed action that
-loses the fine corrections. The split avoids this: its `gc_head` reads **raw `z_t`** directly, and its
-two heads are independent MLPs (only the encoder is shared), so nothing pulls the action map toward
-"smooth/predictable."
+> Data-integrity note: treat concurrent-eval outliers as suspect. An earlier ctx sweep run with 5 EGL
+> renderers on one GPU reported a spurious `ctx_cap=1` SR of 12 (corrupted renders under GPU/EGL-init
+> contention); the identical code + seeds run serially gives 91. Reproduce small-N eval numbers
+> serially (conc=1) before believing them.
 
-**One caveat on the shadow:** two independently trained good policies needn't agree in absolute
-terms, so absolute cosine 0.62 isn't self-calibrating — the robust signal is the near-vs-far
-*contrast* (which needs no calibration and goes the wrong way). A split-vs-demo (or 2nd-seed split)
-reference run would pin the absolute scale if ever needed. Left un-run; seq is closed.
+### 3c. PushT — screening result and the needed test (NEW, 2026-07-19)
 
----
+pusht is the discriminating dynamics task and the one place the aggregator's temporal context could
+finally matter. At the screening budget both models were trained on only ~4000 episodes (a fifth of
+the full 18,685), and **both are under-data there**: the **unified res arm reaches SR ≈ 9** (30
+epochs, 4000 episodes) and the **current-module split reaches SR ≈ 53** (50 epochs, 4000 episodes).
+The older split-pusht figure of 88 predates the current module/setup and should not be trusted as the
+baseline. The reference world-model baselines (DINO-WM, LeWM) use the full pusht dataset
+(≈18,500–20,000 episodes).
 
-## Part 2 — The NEW direction (what to build)
+**The needed next test is a FULL-DATA pusht run at 50 epochs** (full dataset, no `--max_eps` cap) for
+**both** the unified res arm and the split baseline, so the comparison is fair at full data. Removing
+the data deficit is the prerequisite before drawing any conclusion about pusht. **This full-data run
+has not yet been completed** — it is the primary open experiment.
 
-Goal (user + Minghao, 2026-07-17): **improve the split** (the working base) — give it **longer
-temporal context** and move it **closer to a unified predictor**, rather than "two independent heads
-bolted on an encoder" — **without adding many new components**, and without re-introducing the seq's
-failure mode.
+## 4. Next steps (priority order)
 
-**Keep (the split's wins):**
-- The direct, precise read of the current state for the action (`gc_head` off `z_t`). The endgame
-  precision the seq lost comes from this directness — preserve a near-direct path to the action.
-- The reactive goal + horizon conditioning (AdaLN) that already works across all four tasks.
+1. **Full-data pusht at 50 epochs, for BOTH the unified res arm and the split baseline** (full data,
+   no `--max_eps`). This is the immediate open experiment (§3c) — there is no full-data split pusht
+   baseline yet, so both must be run for a fair comparison. Eval both with 3 seeds × N=50 (unified:
+   `unified_policy`; split: `split_policy`).
+2. **Re-run the context probes on the full-data pusht checkpoint** (ctx_cap / one-step BC /
+   divergence). pusht is the genuine-dynamics task; this is where the temporal-context hypothesis gets
+   its real test, since reacher was Markovian.
+3. **Finalization / headline** for the chosen res arm at the split's protocol (full data, H_max 50,
+   matched effective supervision-per-epoch to the split rather than the fast ~1×-coverage sampler),
+   to settle unified-vs-split on the precise tasks.
 
-**Avoid (the seq's failures):**
-- Do **not** route the action decode through a deep predictor entangled with the dynamics objective
-  — that smooths the endgame. If a shared predictor feeds the action head, keep it **shallow** and/or
-  **residual to `z_t`** so raw-state precision survives.
-- Do **not** interleave action tokens into the sequence — that adds self-generated covariate shift at
-  eval and entangles the action pathway. The seq's action context netted only slightly positive
-  anyway (HS 1→8: +10). Prefer **state-side context**.
+## 5. Operational context (read before running)
 
-**Use (what helped even in the broken seq):**
-- Temporal context on the STATE side helps (HS 1→8 gave +10). Add a short state-latent history.
-
-**Concrete seed to consider (minimal-component unification):**
-A single **shallow causal aggregator over the state-latent window** `[z_{t-k..t}]` → a context latent
-`c_t = z_t + light_attn([z_{t-k..t}])` (residual, so `z_t`'s precision is preserved), where **one
-shared `c_t` feeds BOTH** the action head `gc_head(c_t, z_goal, h)` and the dynamics head
-`dyn(c_t, a, z_goal)`. That is "one predictor/representation feeding both read-outs over a temporal
-window" — more unified than 2-heads-on-encoder, adds ~one attention block (few new components), keeps
-the endgame-precise direct path via the residual, and drops the seq's action-token interleaving.
-Variants worth a thought: no residual but a shallow (1–2 layer) state-only transformer; or an
-explicit skip from `z_t` into the action head alongside `c_t`.
-
-**Validate on reacher and pusht FIRST** — the precise tasks that discriminate architectures. tworoom
-and cube are easy (both seq and split already pass), so they won't tell you if a change helped.
-
-**Reusable probe:** `scripts/seq_vs_split_shadow.py` is the template for asking "does the new model
-choose the split's actions on the split's trajectories, and does agreement hold near-goal?" — the
-fastest read on whether a new model preserves endgame precision, before a full SR sweep. Adapt it to
-shadow the new model instead of the seq.
-
----
-
-## Part 3 — Operational context (read before running)
-
-**Machine / repo.** Dev box `minghao4` (user 傅明浩 / minghao.fu / tiger), direct local access. Repo
-`/home/tiger/lewam`; active worktree `/home/tiger/lewam/.claude/worktrees/lewam-gc-preload-fix`,
-branch **`lewam-seq`** (despite the dir name). For the NEW model, branch off `lewam-seq` (it contains
-all the working infra + the split + eval adapters). Commit identity **MUST** be
-`Minghao Fu <isminghaofu@gmail.com>` (`git config user.email isminghaofu@gmail.com`). `gh` is NOT
-installed — open PRs via the web link.
-
-**The working split (your base).**
-- Model: `lewam/models/lewam_split.py` (`LeWAMSplit` = `ViTEncoder` → `gc_head(z_t,z_goal,h_norm)` +
-  `dynamics(z_t,a_t,z_goal)`). Encoder + heads defined in `lewam/models/module.py` (`ViTEncoder` with
-  a BatchNorm projector — force `model.eval()` at eval; `Transformer`/`Attention` are causal by
-  default; `GMMHead`/`DiffusionHead` exist there for a distributional action head).
-- Train: `scripts/train_lewam_gc.py` — 50ep, `--w_cyc 0.0 --hidden_dim 512 --batch_size 256`,
-  `--H_max 50`, per-position-free horizon `h~U[1,H_max]`. It now has: the **flatten OOM fix**
-  (preallocate+free, no `torch.cat` doubling) and **`--ckpt_sync_dir <hdfs_dir>`** which mirrors
-  config + best.pt to durable storage on each best-improvement — **always pass it** so a released
-  worker never costs a run (a lost SPLIT_RETRAIN checkpoint is what motivated it).
-- Eval: `bash scripts/eval_lewam_split.sh <task> [run_dir] [num_eval]`, or
-  `python scripts/eval_gip.py --config-name <task> policy=<run_name> +gip_eval.mode=split_policy`.
-  The `split_policy` path (`gip.load_lewam_split_model` + `gip.LeWAMSplitPolicy` +
-  `build_policy` dispatch in `lewam/models/gip.py`) loads a `LeWAMSplit` directly and drives it
-  reactively — it does NOT use the old gcidm/JEPA rebuild (that path is broken: its projector no
-  longer matches `module.ViTEncoder`, size mismatch → `SRs=[]`). A NEW model needs its own adapter
-  following this exact template (loader + `BasePolicy` subclass + a `build_policy` mode + an
-  `eval_gip.py` branch).
-- Durable current-module split ckpts (loadable, strict): `ckpts/lewam_gc_repro/SPLIT_RETRAIN2/
-  ckpts_live/{tworoom,reacher}_lewam_gc/` (tworoom SR 100, reacher SR 96). §10 ckpts
-  (`lewam_gc_v1/v2/v3`, `DBG2`, …) are an OLDER architecture (JEPA-style encoder, different ViT key
-  names) and will NOT load into the current `LeWAMSplit` — ignore them.
-
-**Compute (verified this session).** Cap-free headless worker launch:
-```
-tail -f /dev/null | script -qfc "mlx worker launch --type A100-SXM-80GB --gpu <N> \
-  --resourcetype arnold --usergroup bi_algorithm --cluster cloudnative-maliva \
-  --queuename compute-334-aliyun.va-cloudnative-ai-bi.algorithm-guarantee \
-  --no-input -- bash <hdfs_entry_script.sh> <args>" /tmp/launch.log
-```
-run as a **background command** (the worker lives only while this command lives; ~40 min to allocate
-+ image-pull, then it runs the entry script). Worker had **495 GB RAM** (the quota table's "206" was
-misleading). `mlx worker list` / `mlx worker kill <id>` to manage; **never kill another user's
-worker** (e.g. an H100 you didn't launch). Monitor progress via HDFS heartbeat files, not job logs.
-Entry-script pattern: untar the repo tarball to `/opt/tiger`, `export PYTHONPATH`, symlink datasets,
-`export STABLEWM_HOME=/opt/tiger/.swm_* MUJOCO_GL=egl HF_HUB_OFFLINE=1`, run the script, write
-heartbeat FILES. reacher eval needs `dm_control==1.0.43`. Before any launch, rebuild + stage the
-tarball: `cd <worktree>; tar czf /tmp/t.tgz lewam scripts configs requirements.txt pyproject.toml;
-cp /tmp/t.tgz /mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/code/lewam_repo_seq.tar.gz`.
-
-**HDFS layout** (`HROOT=/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam`): `code/` (entry
-scripts + `lewam_repo_seq.tar.gz`), `datasets/` (tworoom.h5, pusht_expert_train.h5, reacher.h5,
-ogbench/cube_single_expert.h5), `ckpts/lewam_gc_repro/<TAG>/` (outputs). Dataset→keys: seq/split
-trainers use `--keys_to_load pixels,action`; frameskip=5 → action_block = raw_adim×5 (reacher
-raw_adim=2 → block 10).
-
-**Reusable helper scripts on HDFS `code/`:** `split_retrain2.sh` (train+sync+split_policy eval, the
-template for training a new model with durable sync), `seq_split_shadow.sh` (the shadow probe entry),
-`eval_lewam_split.sh` (in-repo). The commits from this session on `lewam-seq`: `2cca312` split_policy
-eval adapter, `34204ab` flatten OOM fix, `5250f7d` `--ckpt_sync_dir`, `f95354b` shadow diagnostic,
-plus the SESSION 3 verdict doc.
+- **The working split (the base/reference).** Model `lewam/models/lewam_split.py`; train
+  `scripts/train_lewam_gc.py` (50ep, `--w_cyc 0.0 --hidden_dim 512 --batch_size 256 --H_max 50`, plus
+  `--ckpt_sync_dir`); eval `bash scripts/eval_lewam_split.sh <task>` or `eval_gip.py` mode
+  `split_policy`. Durable current-module split checkpoints (strict-loadable): tworoom SR 100 and
+  reacher SR 96 at `ckpts/lewam_gc_repro/SPLIT_RETRAIN2/ckpts_live/`; cube SR 100 (3000 eps) and pusht
+  SR ~53 (4000 eps) at `ckpts/lewam_gc_repro/SPLIT_NEW/ckpts_live/`. Cube's 3000 eps is saturated; the
+  pusht 4000-ep number (~53) is under-data, so a full-data split pusht baseline is still owed (§3c/§4).
+  The older §10 `lewam_gc_v1/v2/v3` checkpoints are a different (JEPA-style) architecture and will NOT
+  load into the current model — ignore them.
+- **Unified checkpoints + curves.** `ckpts/lewam_gc_repro/UNIFIED_RES6/ckpts_live/{tworoom,reacher}_uni_{res,nores,gate}/`,
+  per-arm curves in `hb_*.log` / `train_*.log`.
+- **Datasets** (HDFS `HROOT=/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam`): `datasets/`
+  holds `tworoom.h5`, `pusht_expert_train.h5` (18,685 episodes), `reacher.h5`,
+  `ogbench/cube_single_expert.h5`. Trainers use `--keys_to_load pixels,action`; frameskip=5 →
+  action_block = raw_adim × 5.
+- **Compute.** Merlin/Arnold GPU launch mechanics live in `merlin/MERLIN.md` and the project
+  `CLAUDE.md` (worker/job launch, cgroup RAM, entry-script pattern). Monitor runs via the HDFS
+  heartbeat files, not job logs. reacher eval needs `dm_control==1.0.43`; headless render needs
+  `MUJOCO_GL=egl`. Before any launch that includes code changes, rebuild and stage the repo tarball:
+  `cd <worktree>; tar czf /tmp/t.tgz lewam scripts configs requirements.txt pyproject.toml; cp /tmp/t.tgz $HROOT/code/lewam_repo_seq.tar.gz`.
+- **Reusable probes/scripts:** `scripts/probe_ctx_bc.py`, `scripts/probe_divergence_analyze.py`,
+  `scripts/unified_vs_split_shadow.py`, `scripts/eval_lewam_unified.sh`.
