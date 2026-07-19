@@ -169,6 +169,83 @@ class FramePairDataset(Dataset):
 
 
 # --------------------------------------------------------------------------- #
+# Streaming path (--stream): read ONLY actions + episode lengths up front       #
+# (tiny), enumerate valid (ep, start, maxh) samples, and read the 3 needed      #
+# obs-frames (start t, next t+1, goal t+h) from the h5 on demand in __getitem__.#
+# No preload / flatten -> constant, low RAM (fits a normal worker), at the cost #
+# of per-item h5 reads (epoch 1 slow; page cache warms after). Produces the SAME#
+# (trip, a_t, h_norm) item as FramePairDataset, so run_batch is unchanged.      #
+# Mirrors the proven stream path in train_lewam_unified.py (indexing verified:  #
+# _load_slice strides by frameskip, so obs-step t == raw frame t*fs).           #
+# --------------------------------------------------------------------------- #
+def build_index_stream(base, frameskip, act_mean, act_std, raw_adim, max_eps=None):
+    """Read actions + lengths only; z-score actions per episode; enumerate (ep, start, maxh)
+    samples with the same validity rule as flatten_for_training's preload index."""
+    import h5py
+    act_mean_t = torch.tensor(act_mean, dtype=torch.float32)
+    act_std_t = torch.tensor(act_std, dtype=torch.float32)
+    lengths = np.asarray(base.lengths)
+    n_eps = len(lengths) if max_eps is None else min(max_eps, len(lengths))
+    with h5py.File(base.h5_path, "r", swmr=True) as hf:
+        act_all = torch.from_numpy(np.asarray(hf["action"][:]))
+        offsets = (np.asarray(hf["ep_offset"][:]).astype(np.int64) if "ep_offset" in hf
+                   else np.concatenate([[0], np.cumsum(lengths)[:-1]]).astype(np.int64))
+    acts_by_ep, index = [], []
+    t0 = time.time()
+    for ep in range(n_eps):
+        L = int(lengths[ep]); off = int(offsets[ep]); n_obs = L // frameskip
+        a = act_all[off:off + n_obs * frameskip].reshape(n_obs, frameskip, raw_adim)
+        a = ((a - act_mean_t) / act_std_t).reshape(n_obs, frameskip * raw_adim).half()
+        n_fr = min((L + frameskip - 1) // frameskip, n_obs + 1)
+        acts_by_ep.append(a)
+        last = n_fr - 1
+        for t in range(min(n_obs, n_fr - 1)):     # valid starts: need >=1 frame after the start
+            index.append((ep, t, last - t))       # (ep, start, maxh = frames from start to ep end)
+    print(f"[lewam-gc] stream index: {len(index)} samples over {n_eps} eps ({time.time()-t0:.0f}s)",
+          flush=True)
+    return acts_by_ep, index
+
+
+class StreamPairDataset(Dataset):
+    """Same (trip, a_t, h_norm) item as FramePairDataset, but the 3 frames are read from the h5
+    on demand (no preloaded tensor)."""
+
+    def __init__(self, acts_by_ep, index, indices, h_max, ablate_horizon, base, img_t, frameskip):
+        self.acts = acts_by_ep
+        self.index = index
+        self.indices = indices
+        self.h_max = int(h_max)
+        self.ablate_horizon = bool(ablate_horizon)
+        self.base = base
+        self.img_t = img_t
+        self.fs = int(frameskip)
+
+    def __len__(self):
+        return self.indices.numel()
+
+    def _obs(self, ep, o0, o1):
+        """Read obs-frames [o0 .. o1) (o1 exclusive) via _load_slice, transformed to float CHW."""
+        pix = self.base._load_slice(ep, o0 * self.fs, (o1 - 1) * self.fs + 1)["pixels"]
+        if not torch.is_tensor(pix):
+            pix = torch.as_tensor(np.asarray(pix))
+        return self.img_t({"pixels": pix})["pixels"].float()
+
+    def __getitem__(self, i):
+        ep, t, mh = self.index[int(self.indices[i])]
+        h = int(torch.randint(1, self.h_max + 1, (1,)).item())
+        if h > mh:
+            h = mh
+        if h < 1:
+            h = 1
+        sg = self._obs(ep, t, t + 2)            # obs-frames t (start), t+1 (next)
+        gg = self._obs(ep, t + h, t + h + 1)    # obs-frame t+h (goal)
+        trip = torch.stack([sg[0], gg[0], sg[1]], dim=0).half()  # [start, goal, next]
+        a_t = self.acts[ep][t]
+        h_norm = 0.0 if self.ablate_horizon else min(h, self.h_max) / self.h_max
+        return trip, a_t, h_norm
+
+
+# --------------------------------------------------------------------------- #
 # Main training                                                                #
 # --------------------------------------------------------------------------- #
 def main():
@@ -207,6 +284,9 @@ def main():
                     help="DataLoader worker processes")
     ap.add_argument("--prefetch_factor", type=int, default=3,
                     help="batches prefetched per worker")
+    ap.add_argument("--stream", action="store_true",
+                    help="read frames from the h5 on demand (no preload/flatten) -> constant low RAM, "
+                         "fits a normal worker; epoch 1 slow (h5 reads), page cache warms after")
     args = ap.parse_args()
 
     if args.ablate_dynamics:
@@ -252,13 +332,19 @@ def main():
           f"dynamics={n_dyn/1e6:.2f}M  total={(n_enc+n_head+n_dyn)/1e6:.2f}M", flush=True)
 
     # ---- data ----
-    frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
-                                          frameskip, max_eps=max_eps)
-    Frames, A_flat, t_gidx, maxh, ep_base = flatten_for_training(
-        frame_list, act_list, "cpu")
-    del frame_list
-    n_samples = t_gidx.shape[0]
-    print(f"[lewam-gc] frames={Frames.shape} samples={n_samples}", flush=True)
+    if args.stream:
+        acts_by_ep, stream_index = build_index_stream(base, frameskip, act_mean, act_std,
+                                                      raw_adim, max_eps=max_eps)
+        n_samples = len(stream_index)
+        print(f"[lewam-gc] stream mode: samples={n_samples} (no preload)", flush=True)
+    else:
+        frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
+                                              frameskip, max_eps=max_eps)
+        Frames, A_flat, t_gidx, maxh, ep_base = flatten_for_training(
+            frame_list, act_list, "cpu")
+        del frame_list
+        n_samples = t_gidx.shape[0]
+        print(f"[lewam-gc] frames={Frames.shape} samples={n_samples}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_samples, generator=g)
@@ -269,10 +355,16 @@ def main():
           f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders (overlap CPU gather + pinning with GPU compute) ----
-    train_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, train_idx,
-                                args.H_max, args.ablate_horizon)
-    val_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, val_idx,
-                              args.H_max, args.ablate_horizon)
+    if args.stream:
+        train_ds = StreamPairDataset(acts_by_ep, stream_index, train_idx, args.H_max,
+                                     args.ablate_horizon, base, img_t, frameskip)
+        val_ds = StreamPairDataset(acts_by_ep, stream_index, val_idx, args.H_max,
+                                   args.ablate_horizon, base, img_t, frameskip)
+    else:
+        train_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, train_idx,
+                                    args.H_max, args.ablate_horizon)
+        val_ds = FramePairDataset(Frames, A_flat, t_gidx, maxh, val_idx,
+                                  args.H_max, args.ablate_horizon)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
         num_workers=args.num_workers,
