@@ -196,13 +196,43 @@ Launching the full-data pusht run hit a wall of Merlin/scheduler traps. Keep the
   memory <70 GB** and reroll. `gpuv: A100-SXM-80GB` is a soft hint, NOT enforced.
 - **2-GPU / big-RAM (≥370 GB) A100 requests do not schedule** on the packed pool — they sit in
   `STARTED` for hours with no heartbeat. 2-GPU dodges the A10 but then won't place.
-- **Escape hatch that worked: the H100 GCP pool** (`...va-cloudnative-aigcp-bi.algorithm-guarantee`,
-  `gpuv: H100-SXM-80GB`, cluster 4) — separate pool, no A10, 1-GPU schedules. H100-80GB is fine
-  substrate. Guard on memory (accepts A100+H100, rejects A10).
-- **Unified bs256 preload prefetch OOM.** The unified's trajectory-window batches are ~3.9 GB each;
-  DataLoader prefetch at 8 workers × 3 ≈ 90 GB on top of the 144 GB preload OOMs the pod. Bound it:
-  `--num_workers 4 --prefetch_factor 2`. (Split's 3-frame items are tiny — 8 workers is fine.)
-- **`train_lewam_gc.py` now has `--stream`** (h5-on-demand, low RAM) mirroring the unified trainer —
-  a fallback if preload RAM is ever the blocker; stream is slow for the split (full-coverage epochs).
+- **H100 GCP `submitv2` also FAILED** (jobs die ~2 min after submit). Not a usable escape via submitv2.
+- **`train_lewam_gc.py` now has `--stream`** (h5-on-demand, low RAM) mirroring the unified trainer.
+  Stream produces the SAME batches as preload (verified sample-for-sample). Slower for the split
+  (full-coverage epochs), but it's what fits Arnold's small workers (below).
 - **No `mlx job kill` in the CLI** — stuck/zombie jobs can only be killed from the web UI, so they
   accumulate. Launch scripts live in `~/lewam_project/jobs/` (`full_pusht_one.sh` + `_uni/_split.yaml`).
+
+### 6a. THE RECIPE THAT ACTUALLY WORKED (Arnold `worker launch`, not `submitv2`)
+
+`mlx job submitv2` routes through **workspace**, which only hands out GPU *slices* — that is the
+`NVIDIA A10 23 GB` "GPU" that trapped every 1-GPU job. To get a **full A100-80GB**, allocate from
+**Arnold** via `mlx worker launch` (Minghao, 2026-07-19). The full working invocation:
+
+```bash
+mlx worker launch --resourcetype arnold --usergroup bi_algorithm \
+  --type A100-SXM-80GB --gpu 1 --cpu 8 --memory 48 \
+  --cluster cloudnative-maliva \
+  --queuename compute-334-aliyun.va-cloudnative-ai-bi.algorithm-guarantee \
+  --no-input --alias fp_uni_s64 \
+  -- bash /mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/code/full_pusht_one.sh uni stream 64
+```
+
+Non-obvious pieces, each a trap I hit:
+- **`--no-input`** makes it run headless (no TTY; it falls back to "plain waiting"). Without it, dies
+  at "Login Worker" from a background context.
+- **Pass the command as separate tokens** `-- bash <scriptpath> <arg> <arg>`. `-- bash -c '...'`
+  loses its quotes in transit (`bash -c cp X Y` ran `cp` with no operands). Args after the script path
+  survive fine.
+- **Arnold caps 1-GPU-worker RAM at ~37–48 GiB** (asking 100/200/256 GiB → `status: FAILED`, won't
+  place; 8 CPU / 48 GiB is the profile that provisions). Too small for the 144 GB preload → **use
+  `stream`**. (Preload would need a 2-GPU worker for the RAM, and only 3 A100 are free.)
+- **HDFS auto-mounts** on the worker (`/mnt/hdfs/byte_ad_audit/bi_algorithm`, hdfs-fuse) BUT there's a
+  **startup race** — bash may read the script before fuse is ready (`No such file`). Just relaunch;
+  it's ~50/50 per attempt.
+- **Unified batch must be small on GPU**: bs256 AND bs128 both OOM at ~77–79 GiB (it ViT-encodes the
+  whole padded window, `batch × up to 52 frames`, in one shot). **bs64 fits** (screening-proven).
+  Split keeps bs256 (its items are 3 frames). The `full_pusht_one.sh` 3rd arg sets batch size.
+- The worker persists after the client exits (workers don't auto-exit); `mlx worker list` / `kill <id>`
+  to clean up. The run's `full_pusht_one.sh <arm> stream <bs>` writes to `FULL_PUSHT/{hb_<arm>.log,
+  train_pusht_<arm>.log,ckpts_live/}`; per-epoch progress stays worker-local (only synced at the end).
