@@ -182,3 +182,27 @@ has not yet been completed** — it is the primary open experiment.
   `cd <worktree>; tar czf /tmp/t.tgz lewam scripts configs requirements.txt pyproject.toml; cp /tmp/t.tgz $HROOT/code/lewam_repo_seq.tar.gz`.
 - **Reusable probes/scripts:** `scripts/probe_ctx_bc.py`, `scripts/probe_divergence_analyze.py`,
   `scripts/unified_vs_split_shadow.py`, `scripts/eval_lewam_unified.sh`.
+
+## 6. Compute gotchas — FULL-DATA pusht launch (learned the hard way, 2026-07-19)
+
+Launching the full-data pusht run hit a wall of Merlin/scheduler traps. Keep these in mind:
+- **Full pusht preload ≈ 195 GB RAM** (144 GB fp16 frames @ 224² + ~44 GB h5 page cache). `flatten`
+  is **1×, not 2×** (measured: `torch.empty` doesn't commit pages). Old runs OOM'd (`rc=137`) only
+  because pods were under-provisioned AND logged `cgroup=?` — nobody checked the real limit. Request
+  ≥256 GB and **log/guard the actual cgroup `memory.max`** at startup (abort if too small).
+- **A10 trap.** The A100 queue `...va-cloudnative-ai-bi.algorithm-guarantee` has ONE `NVIDIA A10`
+  (23 GB) mixed in, and the scheduler **deterministically** steers 1-GPU jobs onto it (node
+  `n214-147-131`). That was the mysterious "22 GB GPU" that OOM'd earlier runs. **Guard on GPU
+  memory <70 GB** and reroll. `gpuv: A100-SXM-80GB` is a soft hint, NOT enforced.
+- **2-GPU / big-RAM (≥370 GB) A100 requests do not schedule** on the packed pool — they sit in
+  `STARTED` for hours with no heartbeat. 2-GPU dodges the A10 but then won't place.
+- **Escape hatch that worked: the H100 GCP pool** (`...va-cloudnative-aigcp-bi.algorithm-guarantee`,
+  `gpuv: H100-SXM-80GB`, cluster 4) — separate pool, no A10, 1-GPU schedules. H100-80GB is fine
+  substrate. Guard on memory (accepts A100+H100, rejects A10).
+- **Unified bs256 preload prefetch OOM.** The unified's trajectory-window batches are ~3.9 GB each;
+  DataLoader prefetch at 8 workers × 3 ≈ 90 GB on top of the 144 GB preload OOMs the pod. Bound it:
+  `--num_workers 4 --prefetch_factor 2`. (Split's 3-frame items are tiny — 8 workers is fine.)
+- **`train_lewam_gc.py` now has `--stream`** (h5-on-demand, low RAM) mirroring the unified trainer —
+  a fallback if preload RAM is ever the blocker; stream is slow for the split (full-coverage epochs).
+- **No `mlx job kill` in the CLI** — stuck/zombie jobs can only be killed from the web UI, so they
+  accumulate. Launch scripts live in `~/lewam_project/jobs/` (`full_pusht_one.sh` + `_uni/_split.yaml`).
