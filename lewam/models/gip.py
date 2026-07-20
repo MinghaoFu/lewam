@@ -942,7 +942,14 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
                 for row, i in enumerate(replan):
                     pblk = self._pblk_buf[i]
                     if self.ctx_cap and self.ctx_cap > 0:
-                        pblk = pblk[-self.ctx_cap:]                 # align with the capped latents
+                        if len(pblk) > self.ctx_cap:
+                            # Truncated window: training always presents a window's FIRST position
+                            # with the null action (fresh start), so the capped window must too --
+                            # feeding the real pre-window block here is a train/eval mismatch
+                            # (owner-confirmed bug, 2026-07-20).
+                            pblk = [None] + pblk[-self.ctx_cap + 1:] if self.ctx_cap > 1 else [None]
+                        else:
+                            pblk = pblk[-self.ctx_cap:]             # align with the capped latents
                     for k, blk in enumerate(pblk):
                         if blk is not None:
                             a_prev[row, k] = blk.to(dev)
