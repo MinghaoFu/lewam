@@ -52,14 +52,17 @@ Arm flags govern how `c_t` relates to `z_t`:
   strict-loads under one eval adapter.
 
 Trainer `scripts/train_lewam_unified.py` is sequence-parallel: it samples a CONTEXT window of
-`--context_len` decision points (pure context — the window does NOT terminate at a goal), encodes a
-strip that extends `H_max` frames past the window, and gives every position its own goal `z_{p+h}`,
-`h~U[1,H_max]` episode-clamped (the split's pair sampling, vectorized). Dynamics targets are
-`z[p+1]`; the loss is a per-position masked `act + dyn + SIGReg` (match the seq trainer: `sigreg`
-over ALL latents, no stop-grad). `--H_max` is the max goal distance and `--context_len` the window
-length, both in OBS-STEPS (one frame per obs-step, not divided by frameskip) — decoupled since the
-2026-07-20 goal-in-window fix (below). Always pass `--ckpt_sync_dir <hdfs_dir>` so a released
-worker never costs a run.
+`--context_len` decision points (pure context — the window does NOT terminate at a goal) and loads
+ONE goal frame per position by index (so items are `2*context_len+1` frames regardless of
+`--H_max`). Goal modes, mixed by `--p_shared`: RANDOM (each position independently draws
+`h~U[1,H_max]`, goal clamped to the episode's last frame — the split `FramePairDataset`'s exact
+sample-then-clamp) and SHARED (one goal drawn ahead of the window's last position, horizons
+counting down toward it — the structure eval runs, and what a rollout loss would need). Dynamics
+targets are `z[p+1]` — always ONE step, the goal is only conditioning. The loss is a per-position
+masked `act + dyn + SIGReg` (match the split: `sigreg` on state latents only, no stop-grad).
+`--H_max` (max horizon) and `--context_len` are in OBS-STEPS (one frame per obs-step, not divided
+by frameskip) — fully decoupled since the 2026-07-20 fixes (below). Always pass
+`--ckpt_sync_dir <hdfs_dir>` so a released worker never costs a run.
 
 Eval adapter: `lewam/models/gip.py` `load_lewam_unified_model` + `LeWAMUnifiedPolicy`
 (mode `unified_policy`) — full-causal-from-episode-start rollout, caches per-frame latents,
@@ -90,18 +93,19 @@ three defects remained: (a) the last position always trained on horizon exactly 
 dynamics target ("one-step transition to the goal" — the split never does this except when its
 uniform `h` draws 1); (b) the horizon marginal was short-skewed, since a position's max horizon was
 only the frames left in the window; (c) every goal was an in-window frame of the fed sequence,
-while at eval the goal is a separately-encoded far-away frame never in the sequence. The fix:
-the window is pure context (`--context_len` decision points), each position samples its goal
-exactly like the split's `FramePairDataset` — draw `h~U[1,H_max]` then clamp the goal frame to the
-episode's last frame (overshooting draws pile mass on the final frame, matching the split's
-`if h > mh: h = mh`; unit-verified uniform mid-episode + split-identical pile-up in the tail) —
-and goals come from a strip extending up to `H_max` frames past the window — encoded, but never
-aggregator inputs. Side effects: items
-shrink from ≤`H_max`+1 frames to ≤`context_len+H_max`, so with the owner-chosen `H_max=5,
-context_len=5` (horizon length "doesn't seem to make a big difference") bs256 fits an A100-80GB
-again — back on the split-protocol batch. Eval defaults `ctx_cap` to the trained `context_len`
-(read from the ckpt config; old ckpts keep full-history). NOTE: the pusht full-data unified number
-[80, 86, 76] was trained under the OLD design — re-run before comparing.
+while at eval the goal is a separately-encoded far-away frame never in the sequence. The fix (iterated
+with the owner 2026-07-20): the window is pure context (`--context_len` decision points, owner
+spec: 5 — this caps the `B*L` encoder reshape that caused the GPU OOM), horizon stays at the
+split's protocol `H_max=50` (an intermediate `H_max=5` idea was a miscommunication — horizon does
+not cost memory once goals are per-position index LOOKUPS instead of a loaded contiguous tail;
+items are `2*context_len+1` frames for any `H_max`). RANDOM-mode sampling is the split's exact
+sample-then-clamp (unit-verified: uniform mid-episode, split-identical pile-up on the episode's
+last frame near the end); SHARED mode (`--p_shared`) trains eval's one-goal-countdown structure.
+bs256 fits an A100-80GB again — back on the split-protocol batch. Eval defaults `ctx_cap` to the
+trained `context_len` (read from the ckpt config; old ckpts keep full-history), and a truncated
+ctx_cap window now nulls its first prev-action (owner-confirmed action_cond bug, `0a39340`).
+NOTE: the pusht full-data unified number [80, 86, 76] was trained under the OLD design — re-run
+before comparing.
 
 ## 3. Results so far
 

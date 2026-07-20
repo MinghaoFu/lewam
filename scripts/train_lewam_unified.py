@@ -2,27 +2,35 @@
 # SEQUENCE-PARALLEL over a CONTEXT window, with ONE shared context latent per position.
 #
 #   sample a start t; context window = frames [t .. t+W-1], W = context_len (episode-clamped);
-#   strip frames [t .. t+W-1+H_max] -> encoder -> [z_0 .. z_E]   (ONE encode; the +H_max tail
-#   frames exist only as goal/target candidates, they are NOT aggregator inputs)
-#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator, tau < W
-#   a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)           # goal PER POSITION: z_{tau+h},
-#   z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)          #   h~U[1,H_max], goal clamped to the
-#                                                            #   episode end; dyn target z_{tau+1}
+#   encode window frames + each position's ONE goal frame in a single pass (2W+1 frames per item,
+#   independent of H_max -- goals are looked up by index, never a contiguous tail)
+#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator over states ONLY
+#   a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)           # per-position goal + horizon
+#   z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)          # dyn target z_{tau+1}, ALWAYS 1 step
+#
 #   L = w_act*MSE(a_pred, a) + w_dyn*MSE(z_pred, z[1:]) + w_reg*SIGReg(z) + w_cyc*consistency
 #       (all per-position, masked to the valid (non-pad) positions)
 #
+# Goal sampling, per window, two modes mixed by --p_shared:
+#   RANDOM (prob 1-p): each position independently draws h~U[1,H_max] and clamps its goal frame to
+#     the episode's last frame -- the split FramePairDataset's exact sampling (incl. the mass
+#     pile-up on the final frame near episode ends), so per position this IS a split example, just
+#     with an aggregated-context state. Maximal (goal,horizon) coverage; horizon uncorrelated with
+#     context length.
+#   SHARED (prob p): ONE goal for the whole window, drawn h~U[1,H_max] ahead of the LAST position
+#     (episode-clamped); horizons count down toward it across positions (h_norm clamps at 1.0 like
+#     eval's min(steps,H_max)/H_max). This is the structure eval runs -- one fixed goal, horizon
+#     decreasing over consecutive replans -- and what a future rollout loss would need.
+#
 # The window is NOT a start->goal cut (the original design made the sampled goal the window
-# endpoint, so the last position always trained on horizon 1 with goal == its dynamics target and
-# the horizon marginal was short-skewed; at eval the goal is a separately-encoded far frame that is
-# never in the sequence). Here the window is pure context and every position samples its goal the
-# way the split's FramePairDataset does: draw h~U[1,H_max], then clamp the goal frame to the
-# episode's last frame (overshooting draws pile mass on the final frame, same as the split's
-# `if h > mh: h = mh`). Goals come from the same encoded strip but are never aggregator inputs.
-# Each window is a FRESH start (no prior history), matching the eval episode start.
+# endpoint: the last position always trained on horizon 1 with goal == its dynamics target, the
+# horizon marginal was short-skewed, and the goal sat inside the fed sequence, unlike eval).
+# Goals are encoder inputs but NEVER aggregator inputs. Each window is a FRESH start (no prior
+# history), matching both the eval episode start and the eval adapter's ctx_cap sliding window.
 #
 #   python scripts/train_lewam_unified.py --dataset_name reacher.h5 \
-#       --run_name reacher_lewam_unified --epochs 50 --H_max 5 --context_len 5 --agg_depth 2 \
-#       --ckpt_sync_dir /mnt/hdfs/.../reacher_lewam_unified
+#       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --context_len 5 --p_shared 0.5 \
+#       --agg_depth 2 --ckpt_sync_dir /mnt/hdfs/.../reacher_lewam_unified
 import argparse
 import json
 import math
@@ -138,17 +146,43 @@ def flatten_for_training(frame_list, act_list, device):
 
 
 # --------------------------------------------------------------------------- #
-# Context-window Dataset. Each item is one window of `context_len` decision points plus the extra #
-# frames those decision points need:                                                              #
-#   frames  [start .. start+strip_last]  where strip_last = min(context_len-1 + H_max, frames_left)#
-#   actions [start .. start+n_pos-1]     (the action block taken AT each decision point)          #
-# The strip beyond the window exists so every position p can find its dynamics target z_{p+1} and #
-# any goal frame z_{p+h}, h<=H_max, WITHOUT the goal ever defining (or terminating) the window.   #
-# Goals/horizons are drawn per position on-GPU in run_batch. Windows are clamped at the episode   #
-# end, never cross it. Each window is a fresh start (no prior history), like an eval episode.     #
+# Context-window Dataset. Each item is one window of up to `context_len` decision points plus     #
+# exactly the frames those decision points use:                                                   #
+#   window  frames [start .. start+n_pos]   (n_pos+1: each position's state AND its z_{p+1} target)#
+#   goals   one frame per position, at the sampled goal offsets (RANDOM or SHARED mode, see the   #
+#           file header) -- looked up by index, so memory per item is ~2*context_len+1 frames     #
+#           REGARDLESS of H_max                                                                   #
+#   actions the action block taken AT each decision point                                         #
+#   horizon each position's distance to its goal in prediction steps                              #
+# Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior  #
+# history), like an eval episode / the eval adapter's sliding window.                             #
 # --------------------------------------------------------------------------- #
+def sample_goal_offsets(n_pos, frames_left, h_max, p_shared):
+    """Sample each position's goal offset (obs-frames from the window start) + horizon.
+
+    RANDOM mode (prob 1-p_shared): per position p, draw h~U[1,h_max]; goal offset = p+h clamped
+    to the episode's last frame -- the split FramePairDataset's sample-then-clamp, per position.
+    SHARED mode (prob p_shared): draw ONE h~U[1,h_max] for the LAST position; every position
+    points at that same frame, horizons counting down toward it (>= 1 by construction since the
+    goal sits at or beyond the window end even after the episode clamp).
+
+    Returns (goal_offsets (n_pos,) long, horizon (n_pos,) long). horizon can exceed h_max in
+    SHARED mode (earlier positions are farther); the trainer clamps h_norm at 1.0 exactly like
+    the eval countdown's min(steps, H_max)/H_max."""
+    positions = torch.arange(n_pos)
+    if float(torch.rand(())) < p_shared:
+        h_last = int(torch.randint(1, h_max + 1, ()))
+        goal_offsets = torch.full((n_pos,), min(n_pos - 1 + h_last, frames_left))
+    else:
+        h_draw = torch.randint(1, h_max + 1, (n_pos,))
+        goal_offsets = torch.minimum(positions + h_draw,
+                                     torch.tensor(frames_left, dtype=torch.long))
+    horizon = (goal_offsets - positions).clamp(min=1)
+    return goal_offsets, horizon
+
+
 class SeqTrajDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len):
+    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, p_shared):
         self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only; N = all obs-frames
         self.a_frame = a_frame        # [N,adim] fp16, CPU; a_frame[t] = z-scored block taken AT t
         self.t_gidx = t_gidx          # [M] long; episode-global obs-frame index of each valid start
@@ -156,6 +190,7 @@ class SeqTrajDataset(Dataset):
         self.indices = indices        # [K] long; train or val subset of the M starts
         self.h_max = int(h_max)       # max goal distance (obs-steps)
         self.ctx_len = int(ctx_len)   # decision points per window
+        self.p_shared = float(p_shared)
 
     def __len__(self):
         return self.indices.numel()
@@ -164,45 +199,47 @@ class SeqTrajDataset(Dataset):
         idx = int(self.indices[i])
         start = int(self.t_gidx[idx])
         frames_left = int(self.maxh[idx])                        # >= 1 for every valid start
-        n_pos = min(self.ctx_len, frames_left)                   # window decision points; frame
-                                                                 # start+n_pos exists (target of the
-                                                                 # last position), since n_pos <= frames_left
-        strip_last = min(n_pos - 1 + self.h_max, frames_left)    # strip end: covers z_{p+1} for all
-                                                                 # p < n_pos (h_max >= 1) and every
-                                                                 # in-episode goal z_{p+h}
-        frames = self.frames[start:start + strip_last + 1]       # (strip_last+1, 3, H, W)
+        n_pos = min(self.ctx_len, frames_left)                   # frame start+n_pos exists (the
+                                                                 # last position's target), since
+                                                                 # n_pos <= frames_left
+        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared)
+        window = self.frames[start:start + n_pos + 1]            # (n_pos+1, 3, H, W)
+        goals = self.frames[start + goal_offsets]                # (n_pos, 3, H, W)
         actions = self.a_frame[start:start + n_pos]              # (n_pos, adim)
-        return frames, actions, n_pos
+        return window, goals, actions, horizon, n_pos
 
 
 def collate_pad(batch):
     """Pad the batch's variable-length items to a common shape.
 
     Returns:
-      frames   (B, max_frames, 3, H, W)  each item's strip, tail-padded
-      actions  (B, max_pos, adim)        zero-padded past each item's n_pos
-      n_pos    (B,) long                 valid decision points per item (loss mask)
-      n_frames (B,) long                 valid frames per item (goal sampling bound)
+      window   (B, max_pos+1, 3, H, W)  states + next-state targets, tail-padded
+      goals    (B, max_pos, 3, H, W)    each position's goal frame, tail-padded
+      actions  (B, max_pos, adim)       zero-padded past each item's n_pos
+      horizon  (B, max_pos) long        pad value 1 (masked from the loss anyway)
+      n_pos    (B,) long                valid decision points per item (the loss mask)
 
     Frame padding repeats each item's LAST REAL frame instead of zeros: the ViT projector has a
     BatchNorm, and in train mode zero frames would corrupt the batch statistics for the real
     frames (the ep-1 "collapse" bug, see the handoff). Pad positions never enter the loss."""
-    n_pos = torch.tensor([item[2] for item in batch], dtype=torch.long)
-    n_frames = torch.tensor([item[0].shape[0] for item in batch], dtype=torch.long)
+    n_pos = torch.tensor([item[4] for item in batch], dtype=torch.long)
     max_pos = int(n_pos.max())
-    max_frames = int(n_frames.max())
     B = len(batch)
     C, H, W = batch[0][0].shape[1:]
-    adim = batch[0][1].shape[1]
-    frames = torch.zeros((B, max_frames, C, H, W), dtype=batch[0][0].dtype)
-    actions = torch.zeros((B, max_pos, adim), dtype=batch[0][1].dtype)
-    for i, (item_frames, item_actions, item_n_pos) in enumerate(batch):
-        f = item_frames.shape[0]
-        frames[i, :f] = item_frames
-        if f < max_frames:
-            frames[i, f:] = item_frames[-1]
-        actions[i, :item_n_pos] = item_actions
-    return frames, actions, n_pos, n_frames
+    adim = batch[0][2].shape[1]
+    window = torch.zeros((B, max_pos + 1, C, H, W), dtype=batch[0][0].dtype)
+    goals = torch.zeros((B, max_pos, C, H, W), dtype=batch[0][1].dtype)
+    actions = torch.zeros((B, max_pos, adim), dtype=batch[0][2].dtype)
+    horizon = torch.ones((B, max_pos), dtype=torch.long)
+    for i, (item_window, item_goals, item_actions, item_horizon, item_n_pos) in enumerate(batch):
+        window[i, : item_n_pos + 1] = item_window
+        goals[i, : item_n_pos] = item_goals
+        actions[i, : item_n_pos] = item_actions
+        horizon[i, : item_n_pos] = item_horizon
+        if item_n_pos < max_pos:
+            window[i, item_n_pos + 1:] = item_window[-1]
+            goals[i, item_n_pos:] = item_goals[-1]
+    return window, goals, actions, horizon, n_pos
 
 
 # --------------------------------------------------------------------------- #
@@ -241,14 +278,17 @@ def build_traj_index_stream(base, frameskip, act_mean, act_std, raw_adim, max_ep
 
 
 class StreamTrajDataset(Dataset):
-    """Same item as SeqTrajDataset, but frames are read from the h5 on demand (no preloaded tensor)."""
+    """Same item as SeqTrajDataset, but frames are read from the h5 on demand (no preloaded
+    tensor). The window is one contiguous read; each DISTINCT goal frame is one more small read
+    (<= context_len of them, often fewer -- SHARED mode needs just one)."""
 
-    def __init__(self, acts_by_ep, index, indices, h_max, ctx_len, base, img_t, frameskip):
+    def __init__(self, acts_by_ep, index, indices, h_max, ctx_len, p_shared, base, img_t, frameskip):
         self.acts = acts_by_ep
         self.index = index
         self.indices = indices
         self.h_max = int(h_max)
         self.ctx_len = int(ctx_len)
+        self.p_shared = float(p_shared)
         self.base = base
         self.img_t = img_t
         self.fs = int(frameskip)
@@ -256,18 +296,31 @@ class StreamTrajDataset(Dataset):
     def __len__(self):
         return self.indices.numel()
 
-    def __getitem__(self, i):
-        ep, start, frames_left = self.index[int(self.indices[i])]
-        # same window/strip geometry as SeqTrajDataset.__getitem__ (see its comments)
-        n_pos = min(self.ctx_len, frames_left)
-        strip_last = min(n_pos - 1 + self.h_max, frames_left)
-        # obs-frames start .. start+strip_last, strided by frameskip inside _load_slice
-        pix = self.base._load_slice(ep, start * self.fs, (start + strip_last) * self.fs + 1)["pixels"]
+    def _read_obs_frames(self, ep, first, last):
+        """Raw pixels for obs-frames [first .. last] (inclusive; strided by frameskip inside
+        _load_slice) -> (last-first+1, H, W, C) tensor."""
+        pix = self.base._load_slice(ep, first * self.fs, last * self.fs + 1)["pixels"]
         if not torch.is_tensor(pix):
             pix = torch.as_tensor(np.asarray(pix))
-        frames = self.img_t({"pixels": pix})["pixels"].float().half()[: strip_last + 1]
+        return pix[: last - first + 1]
+
+    def __getitem__(self, i):
+        ep, start, frames_left = self.index[int(self.indices[i])]
+        n_pos = min(self.ctx_len, frames_left)
+        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared)
+        window_raw = self._read_obs_frames(ep, start, start + n_pos)     # (n_pos+1, H, W, C)
+        # read each DISTINCT goal frame once, then index them back per position
+        distinct = torch.unique(goal_offsets)
+        goal_raw = torch.stack([self._read_obs_frames(ep, start + int(g), start + int(g))[0]
+                                for g in distinct])                      # (n_distinct, H, W, C)
+        lookup = {int(g): k for k, g in enumerate(distinct)}
+        goal_rows = torch.tensor([lookup[int(g)] for g in goal_offsets], dtype=torch.long)
+        # ONE transform call over window + distinct goals, then split back
+        all_t = self.img_t({"pixels": torch.cat([window_raw, goal_raw])})["pixels"].float().half()
+        window = all_t[: n_pos + 1]
+        goals = all_t[n_pos + 1:][goal_rows]
         actions = self.acts[ep][start:start + n_pos]
-        return frames, actions, n_pos
+        return window, goals, actions, horizon, n_pos
 
 
 # --------------------------------------------------------------------------- #
@@ -285,13 +338,18 @@ def main():
     ap.add_argument("--agg_lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--H_max", type=int, default=50,
-                    help="max goal distance in OBS-STEPS (frames are 1-per-obs-step, post-frameskip; "
-                         "NOT divided by frameskip); per-position h~U[1,H_max], episode-clamped. "
-                         "DECOUPLED from the window length (see --context_len)")
+                    help="max goal distance (horizon) in OBS-STEPS (frames are 1-per-obs-step, "
+                         "post-frameskip; NOT divided by frameskip); h~U[1,H_max], episode-clamped. "
+                         "DECOUPLED from the window length (see --context_len); does NOT affect "
+                         "memory (goals are looked up per position, not loaded as a tail)")
     ap.add_argument("--context_len", type=int, default=5,
-                    help="decision points per context window (the aggregator's max sequence length "
-                         "at train; eval defaults its ctx_cap to this). Frames per item = "
-                         "context_len + H_max, so this x H_max sets GPU memory")
+                    help="decision points per context window = the aggregator's max sequence length "
+                         "at train (eval defaults its ctx_cap to this). Frames per item = "
+                         "2*context_len+1, so batch x context_len sets GPU memory")
+    ap.add_argument("--p_shared", type=float, default=0.0,
+                    help="fraction of windows trained in SHARED-goal mode (one goal ahead of the "
+                         "window, horizons counting down -- the structure eval runs); the rest use "
+                         "per-position independent goals (the split's sampling). 0 = all random")
     ap.add_argument("--hidden_dim", type=int, default=512)
     ap.add_argument("--img_size", type=int, default=224)
     ap.add_argument("--seed", type=int, default=3072)
@@ -337,6 +395,7 @@ def main():
     if args.ablate_dynamics:
         args.w_dyn = 0.0
     assert args.context_len >= 1 and args.H_max >= 1, "context_len and H_max must be >= 1"
+    assert 0.0 <= args.p_shared <= 1.0, "p_shared must be in [0, 1]"
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -401,7 +460,7 @@ def main():
     val_idx = perm[:n_val]
     train_idx = perm[n_val:]
     print(f"[lewam-uni] train={train_idx.numel()} val={val_idx.numel()} "
-          f"H_max={args.H_max} context_len={args.context_len} "
+          f"H_max={args.H_max} context_len={args.context_len} p_shared={args.p_shared} "
           f"action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
@@ -411,12 +470,14 @@ def main():
     # many epochs all starts are still seen.
     if args.stream:
         train_ds = StreamTrajDataset(acts_by_ep, stream_index, train_idx, args.H_max,
-                                     args.context_len, base, img_t, frameskip)
+                                     args.context_len, args.p_shared, base, img_t, frameskip)
         val_ds = StreamTrajDataset(acts_by_ep, stream_index, val_idx, args.H_max,
-                                   args.context_len, base, img_t, frameskip)
+                                   args.context_len, args.p_shared, base, img_t, frameskip)
     else:
-        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max, args.context_len)
-        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max, args.context_len)
+        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
+                                  args.H_max, args.context_len, args.p_shared)
+        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
+                                args.H_max, args.context_len, args.p_shared)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
@@ -457,7 +518,7 @@ def main():
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
         agg_residual=args.agg_residual, agg_gate=args.agg_gate,
         agg_action_cond=args.agg_action_cond,
-        H_max=args.H_max, context_len=args.context_len,
+        H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
@@ -471,43 +532,40 @@ def main():
     D = 192
     Hmax = float(args.H_max)
 
-    def run_batch(frames, actions, n_pos, n_frames, train):
+    def run_batch(window, goals, actions, horizon, n_pos, train):
         """One sequence-parallel step over a batch of context windows.
 
-        frames   (B, max_frames, 3, H, W)  strips (window + goal tail), tail-padded
-        actions  (B, max_pos, adim)        action block taken AT each decision point
-        n_pos    (B,)                      valid decision points per item
-        n_frames (B,)                      valid frames per item
+        window  (B, max_pos+1, 3, H, W)  states + next-state targets, tail-padded
+        goals   (B, max_pos, 3, H, W)    each position's goal frame (sampled in the dataset)
+        actions (B, max_pos, adim)       action block taken AT each decision point
+        horizon (B, max_pos)             distance to each position's goal, in prediction steps
+        n_pos   (B,)                     valid decision points per item
 
-        Encode the whole strip once; only the first max_pos latents are aggregator inputs / head
-        states -- the tail latents exist purely as dynamics targets and goal candidates, so the
-        goal is never part of the sequence. Losses are means over valid decision points."""
-        B, max_frames = frames.shape[0], frames.shape[1]
+        Window + goal frames go through the encoder in ONE call (shared BatchNorm statistics,
+        like the split's cat-encode of its t/goal/next triple); only the window latents are
+        aggregator inputs. Losses are means over valid decision points."""
+        B = window.shape[0]
         max_pos = actions.shape[1]
-        frames = frames.to(device, non_blocking=True)
+        window = window.to(device, non_blocking=True)
+        goals = goals.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True).float()
+        horizon = horizon.to(device, non_blocking=True)
         n_pos = n_pos.to(device, non_blocking=True)
-        n_frames = n_frames.to(device, non_blocking=True)
 
-        z = model.encode(frames.reshape(B * max_frames, *frames.shape[2:]).float())
-        z = z.reshape(B, max_frames, D)
-        states = z[:, :max_pos].float()               # (B, max_pos, D)  z_p at each decision point
-        next_tgt = z[:, 1:max_pos + 1].float()        # (B, max_pos, D)  z_{p+1}, the dynamics target
+        n_window_frames = B * (max_pos + 1)
+        frames_all = torch.cat([window.reshape(n_window_frames, *window.shape[2:]),
+                                goals.reshape(B * max_pos, *goals.shape[2:])]).float()
+        z_all = model.encode(frames_all)
+        z_window = z_all[:n_window_frames].reshape(B, max_pos + 1, D)
+        z_goal = z_all[n_window_frames:].reshape(B, max_pos, D).float()
+        states = z_window[:, :max_pos].float()        # (B, max_pos, D)  z_p at each decision point
+        next_tgt = z_window[:, 1:].float()            # (B, max_pos, D)  z_{p+1}, the dynamics target
 
         pos = torch.arange(max_pos, device=device).unsqueeze(0)         # (1, max_pos)
         valid = pos < n_pos.unsqueeze(1)                                # (B, max_pos)
-
-        # Per-position goal, the split's FramePairDataset sampling exactly: draw h ~ U[1, H_max],
-        # then CLAMP the goal frame to the episode's last frame (so, like the split, draws that
-        # overshoot the episode end pile their mass on the final frame). The strip always contains
-        # frame p+h for in-episode draws, so the clamp to the strip end IS the episode clamp.
-        # Pad positions (masked from the loss) get whatever in-strip index the clamp yields.
-        h_draw = torch.randint(1, args.H_max + 1, (B, max_pos), device=device)
-        last_frame = (n_frames - 1).unsqueeze(1)                        # (B, 1)
-        goal_idx = torch.minimum(pos + h_draw, last_frame)              # (B, max_pos)
-        z_goal = torch.gather(z, 1, goal_idx.unsqueeze(-1).expand(B, max_pos, D)).float()
-        horizon = (goal_idx - pos).clamp(min=1)                         # min=1 guards pad positions
-        h_norm = horizon.float() / Hmax                                 # horizon <= H_max by draw
+        # SHARED-mode horizons can exceed H_max (early positions are farther from the window's
+        # goal); clamp exactly like the eval countdown's min(steps, H_max)/H_max.
+        h_norm = horizon.clamp(max=args.H_max).float() / Hmax
 
         a_prev = a_prev_mask = None
         if model.agg_action_cond:
@@ -541,10 +599,10 @@ def main():
         # ---- train ----
         model.train()
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
-        for frames, actions, n_pos, n_frames in train_loader:
+        for window, goals, actions, horizon, n_pos in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 loss_act, loss_dyn, loss_reg, loss_cyc, nval = run_batch(
-                    frames, actions, n_pos, n_frames, train=True)
+                    window, goals, actions, horizon, n_pos, train=True)
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc)
             opt.zero_grad(set_to_none=True)
@@ -562,10 +620,10 @@ def main():
         model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
-            for frames, actions, n_pos, n_frames in val_loader:
+            for window, goals, actions, horizon, n_pos in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     loss_act, loss_dyn, _, _, nval = run_batch(
-                        frames, actions, n_pos, n_frames, train=False)
+                        window, goals, actions, horizon, n_pos, train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
                 va_count += nval
