@@ -91,9 +91,12 @@ dynamics target ("one-step transition to the goal" — the split never does this
 uniform `h` draws 1); (b) the horizon marginal was short-skewed, since a position's max horizon was
 only the frames left in the window; (c) every goal was an in-window frame of the fed sequence,
 while at eval the goal is a separately-encoded far-away frame never in the sequence. The fix:
-the window is pure context (`--context_len` decision points), each position draws `h~U[1,H_max]`
-uniformly (episode-clamped; verified uniform by unit test), and goals come from a strip extending
-up to `H_max` frames past the window — encoded, but never aggregator inputs. Side effects: items
+the window is pure context (`--context_len` decision points), each position samples its goal
+exactly like the split's `FramePairDataset` — draw `h~U[1,H_max]` then clamp the goal frame to the
+episode's last frame (overshooting draws pile mass on the final frame, matching the split's
+`if h > mh: h = mh`; unit-verified uniform mid-episode + split-identical pile-up in the tail) —
+and goals come from a strip extending up to `H_max` frames past the window — encoded, but never
+aggregator inputs. Side effects: items
 shrink from ≤`H_max`+1 frames to ≤`context_len+H_max`, so with the owner-chosen `H_max=5,
 context_len=5` (horizon length "doesn't seem to make a big difference") bs256 fits an A100-80GB
 again — back on the split-protocol batch. Eval defaults `ctx_cap` to the trained `context_len`
