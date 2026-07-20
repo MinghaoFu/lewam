@@ -181,7 +181,9 @@ has not yet been completed** — it is the primary open experiment.
   `MUJOCO_GL=egl`. Before any launch that includes code changes, rebuild and stage the repo tarball:
   `cd <worktree>; tar czf /tmp/t.tgz lewam scripts configs requirements.txt pyproject.toml; cp /tmp/t.tgz $HROOT/code/lewam_repo_seq.tar.gz`.
 - **Reusable probes/scripts:** `scripts/probe_ctx_bc.py`, `scripts/probe_divergence_analyze.py`,
-  `scripts/unified_vs_split_shadow.py`, `scripts/eval_lewam_unified.sh`.
+  `scripts/shadow_compare.py` (generic head-to-head shadow: `+driver=<kind>:<run> +shadow=<kind>:<run>`,
+  kinds split/seq/unified — replaces the old `{seq,unified}_vs_split_shadow.py`),
+  `scripts/eval_lewam_unified.sh`.
 
 ## 6. Compute gotchas — FULL-DATA pusht launch (learned the hard way, 2026-07-19)
 
