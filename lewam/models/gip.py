@@ -1109,8 +1109,12 @@ def build_policy(cfg, model, adim, process, transform):
                 cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
                 cem_iter=int(ge.get("cem_iter", 4)), cem_H=int(ge.get("cem_H", 5)),
                 cem_std=float(ge.get("cem_std", 1.0)), **common)
+        # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config): the
+        # aggregator never saw longer sequences at train, so eval matches it. Old checkpoints
+        # (goal-terminated-window trainer, no context_len key) keep full-history behaviour (0).
+        # Explicit +gip_eval.ctx_cap=... still overrides.
         return LeWAMUnifiedPolicy(
-            ctx_cap=int(ge.get("ctx_cap", 0)),
+            ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 0))),
             log_latents=bool(ge.get("dump_latents", "")), **common)
 
     # mode=gcidm: the `model` arg is unused; GCIDM loads its OWN frozen-LeWM + head via load_gcidm_model.

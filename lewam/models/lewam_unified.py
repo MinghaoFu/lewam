@@ -2,10 +2,10 @@
 and moved CLOSER to a unified predictor, without re-introducing the seq's failure mode (a deep
 predictor entangled with dynamics, or interleaved action tokens). See docs/LEWAM_UNIFIED_HANDOFF.
 
-  pixels_t..goal -> encoder -> [z_t, ..., z_goal]
-  [c_t..c_{goal-1}] = z + g(z)*Aggr(z)               # causal aggregator, per-position, ZERO-INIT residual
-  a_pred_tau = gc_head(c_tau, z_goal, h_tau)          # goal = z[-1] of the trajectory (shared)
-  z_pred_tau = dynamics(c_tau, a_tau, z_goal)         # off the SHARED c
+  pixels_t..t+W-1 (+ goal-tail frames) -> encoder -> [z_t, ..]
+  [c_t..c_{t+W-1}] = z + g(z)*Aggr(z)                # causal aggregator, per-position, ZERO-INIT residual
+  a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)      # goal PER POSITION: z_{tau+h}, h~U[1,H_max];
+  z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)     #   NEVER an aggregator input. Off the SHARED c
 
 The aggregator is a CAUSAL Transformer over the state-latent sequence (sinusoidal positions): one
 pass emits a context latent c_tau at EVERY position (position tau attends only to z_{<=tau}), so it

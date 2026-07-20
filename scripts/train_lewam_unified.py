@@ -1,23 +1,25 @@
 # LeWAM-Unified: the split (goal-conditioned action head + goal-conditioned dynamics) trained
-# SEQUENCE-PARALLEL over a start->goal trajectory, with ONE shared context latent per position.
+# SEQUENCE-PARALLEL over a CONTEXT window, with ONE shared context latent per position.
 #
-#   sample a start t + goal distance h~U[1,H_max] (clamped to the episode tail);
-#   trajectory frames [t .. t+h] -> encoder -> [z_0 .. z_h]   (ONE encode)
-#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator, per position
-#   a_pred_tau = gc_head(c_tau, z_goal, h_tau)               # z_goal = z_h (endpoint, shared)
-#   z_pred_tau = dynamics(c_tau, a_tau, z_goal)              # target z_{tau+1}
-#
+#   sample a start t; context window = frames [t .. t+W-1], W = context_len (episode-clamped);
+#   strip frames [t .. t+W-1+H_max] -> encoder -> [z_0 .. z_E]   (ONE encode; the +H_max tail
+#   frames exist only as goal/target candidates, they are NOT aggregator inputs)
+#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator, tau < W
+#   a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)           # goal PER POSITION: z_{tau+h},
+#   z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)          #   h~U[1,H_max] (episode-clamped);
+#                                                            # dynamics target z_{tau+1}
 #   L = w_act*MSE(a_pred, a) + w_dyn*MSE(z_pred, z[1:]) + w_reg*SIGReg(z) + w_cyc*consistency
 #       (all per-position, masked to the valid (non-pad) positions)
 #
-# Forked from train_lewam_gc.py: preload/flatten/optim/schedule/ckpt-sync are unchanged; the only
-# new pieces are (a) the dataset samples a start->goal TRAJECTORY, (b) a padding collate for
-# variable-length trajectories, (c) the loss is per-position (masked) instead of one-step. The goal
-# is z[-1] of the trajectory (no separate goal encode); dynamics targets are z[1:]. Each start is a
-# FRESH start (no prior history), matching the eval episode start -- so no warmup/prefix.
+# The window is NOT a start->goal cut (the original design made the sampled goal the window
+# endpoint, so the last position always trained on horizon 1 with goal == its dynamics target and
+# the horizon marginal was short-skewed; at eval the goal is a separately-encoded far frame that is
+# never in the sequence). Here the window is pure context and every position draws its goal
+# h~U[1,H_max] uniformly, exactly like the split's pair sampling -- goals just come from the same
+# encoded strip. Each start is a FRESH start (no prior history), matching the eval episode start.
 #
 #   python scripts/train_lewam_unified.py --dataset_name reacher.h5 \
-#       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --agg_depth 2 \
+#       --run_name reacher_lewam_unified --epochs 50 --H_max 5 --context_len 5 --agg_depth 2 \
 #       --ckpt_sync_dir /mnt/hdfs/.../reacher_lewam_unified
 import argparse
 import json
@@ -134,19 +136,22 @@ def flatten_for_training(frame_list, act_list, device):
 
 
 # --------------------------------------------------------------------------- #
-# Trajectory Dataset: each item is a start->goal sub-trajectory. Sample h~U[1,H_max] clamped to    #
-# the episode tail; return frames [t .. t+h] (h+1 frames) + the z-scored action blocks a_t..a_{t+h-1}#
-# + the length h. The goal is the trajectory endpoint (z[-1]); dynamics targets are z[1:]; horizons #
-# per position run h..1. A fresh start (no prior history) matches the eval episode start.           #
+# Context-window Dataset: each item is a context window of W = context_len decision points        #
+# (episode-clamped) PLUS an H_max-frame goal tail. Return frames [t .. t+E] where                  #
+# E = min(W-1+H_max, maxh) (covers every position's dynamics target z_{p+1} and any goal          #
+# z_{p+h}, h<=H_max), the z-scored action blocks a_t..a_{t+W-1}, and W. Goals/horizons are        #
+# sampled per position on-GPU in run_batch (uniform h~U[1,H_max], episode-clamped) -- the window  #
+# does NOT terminate at a goal. A fresh start (no prior history) matches the eval episode start.  #
 # --------------------------------------------------------------------------- #
 class SeqTrajDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max):
+    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len):
         self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only
         self.a_frame = a_frame        # [N,adim] fp16, CPU  per-frame action block
         self.t_gidx = t_gidx          # [M] long  valid start frames
         self.maxh = maxh              # [M] long  frames from start to episode end
         self.indices = indices        # [K] long  train or val subset
         self.h_max = int(h_max)
+        self.ctx_len = int(ctx_len)
 
     def __len__(self):
         return self.indices.numel()
@@ -154,35 +159,36 @@ class SeqTrajDataset(Dataset):
     def __getitem__(self, i):
         idx = int(self.indices[i])
         t = int(self.t_gidx[idx])
-        mh = int(self.maxh[idx])
-        h = int(torch.randint(1, self.h_max + 1, (1,)).item())
-        h = min(h, mh)
-        if h < 1:
-            h = 1
-        frames = self.frames[t:t + h + 1]     # (h+1, 3, H, W)  z_0..z_h (z_h = goal)
-        actions = self.a_frame[t:t + h]       # (h, adim)       a_t..a_{t+h-1}
-        return frames, actions, h
+        mh = int(self.maxh[idx])                  # frames from t to episode end (>=1)
+        w = max(1, min(self.ctx_len, mh))         # decision points (frame t+w exists: w<=mh)
+        e = min(w - 1 + self.h_max, mh)           # last frame offset: targets + goal tail
+        frames = self.frames[t:t + e + 1]         # (e+1, 3, H, W)  z_0..z_e
+        actions = self.a_frame[t:t + w]           # (w, adim)       a_t..a_{t+w-1}
+        return frames, actions, w
 
 
 def collate_pad(batch):
-    """Pad variable-length trajectories to the batch's max length. Returns
-    frames (B, Lmax+1, 3, H, W), actions (B, Lmax, adim), lengths (B,). Pad frames/actions are
-    zeros and are masked out of the loss by `lengths` in the loop."""
-    lengths = torch.tensor([b[2] for b in batch], dtype=torch.long)
-    Lmax = int(lengths.max().item())
+    """Pad variable-length strips to the batch's max. Returns frames (B, Fmax, 3, H, W),
+    actions (B, Pmax, adim), w_len (B,) valid decision points, f_len (B,) valid frames.
+    Pad actions are zeros; positions >= w_len are masked out of the loss in run_batch."""
+    w_len = torch.tensor([b[2] for b in batch], dtype=torch.long)
+    f_len = torch.tensor([b[0].shape[0] for b in batch], dtype=torch.long)
+    Pmax = int(w_len.max().item())
+    Fmax = int(f_len.max().item())
     C, H, W = batch[0][0].shape[1:]
     adim = batch[0][1].shape[1]
     B = len(batch)
-    frames = torch.zeros((B, Lmax + 1, C, H, W), dtype=batch[0][0].dtype)
-    actions = torch.zeros((B, Lmax, adim), dtype=batch[0][1].dtype)
-    for i, (fr, ac, h) in enumerate(batch):
-        frames[i, : h + 1] = fr
-        if h + 1 <= Lmax:
-            frames[i, h + 1:] = fr[-1]   # pad with a REAL frame (repeat the endpoint), NOT zeros:
+    frames = torch.zeros((B, Fmax, C, H, W), dtype=batch[0][0].dtype)
+    actions = torch.zeros((B, Pmax, adim), dtype=batch[0][1].dtype)
+    for i, (fr, ac, w) in enumerate(batch):
+        f = fr.shape[0]
+        frames[i, :f] = fr
+        if f < Fmax:
+            frames[i, f:] = fr[-1]       # pad with a REAL frame (repeat the endpoint), NOT zeros:
                                          # the ViT projector has a BatchNorm, so zero-padding frames
                                          # would corrupt the batch statistics and the real latents.
-        actions[i, : h] = ac
-    return frames, actions, lengths
+        actions[i, :w] = ac
+    return frames, actions, w_len, f_len
 
 
 # --------------------------------------------------------------------------- #
@@ -223,11 +229,12 @@ def build_traj_index_stream(base, frameskip, act_mean, act_std, raw_adim, max_ep
 class StreamTrajDataset(Dataset):
     """Same item as SeqTrajDataset, but frames are read from the h5 on demand (no preloaded tensor)."""
 
-    def __init__(self, acts_by_ep, index, indices, h_max, base, img_t, frameskip):
+    def __init__(self, acts_by_ep, index, indices, h_max, ctx_len, base, img_t, frameskip):
         self.acts = acts_by_ep
         self.index = index
         self.indices = indices
         self.h_max = int(h_max)
+        self.ctx_len = int(ctx_len)
         self.base = base
         self.img_t = img_t
         self.fs = int(frameskip)
@@ -237,17 +244,15 @@ class StreamTrajDataset(Dataset):
 
     def __getitem__(self, i):
         ep, t, mh = self.index[int(self.indices[i])]
-        h = int(torch.randint(1, self.h_max + 1, (1,)).item())
-        h = min(h, mh)
-        if h < 1:
-            h = 1
-        # obs-frames t .. t+h (h+1 frames), strided by frameskip inside _load_slice
-        pix = self.base._load_slice(ep, t * self.fs, (t + h) * self.fs + 1)["pixels"]
+        w = max(1, min(self.ctx_len, mh))         # decision points (frame t+w exists: w<=mh)
+        e = min(w - 1 + self.h_max, mh)           # last frame offset: targets + goal tail
+        # obs-frames t .. t+e (e+1 frames), strided by frameskip inside _load_slice
+        pix = self.base._load_slice(ep, t * self.fs, (t + e) * self.fs + 1)["pixels"]
         if not torch.is_tensor(pix):
             pix = torch.as_tensor(np.asarray(pix))
-        frames = self.img_t({"pixels": pix})["pixels"].float().half()[: h + 1]   # (h+1, 3, H, W)
-        actions = self.acts[ep][t:t + h]                                          # (h, adim)
-        return frames, actions, h
+        frames = self.img_t({"pixels": pix})["pixels"].float().half()[: e + 1]   # (e+1, 3, H, W)
+        actions = self.acts[ep][t:t + w]                                          # (w, adim)
+        return frames, actions, w
 
 
 # --------------------------------------------------------------------------- #
@@ -257,8 +262,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch_size", type=int, default=128,
-                    help="trajectories per batch (each carries up to H_max decision points, so the "
-                         "effective decision-point batch is much larger; raise/lower per GPU mem)")
+                    help="windows per batch (each carries up to context_len decision points, so the "
+                         "effective decision-point batch is larger; raise/lower per GPU mem)")
     ap.add_argument("--encoder_lr", type=float, default=1e-4)
     ap.add_argument("--head_lr", type=float, default=3e-4)
     ap.add_argument("--dynamics_lr", type=float, default=3e-4)
@@ -266,7 +271,12 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--H_max", type=int, default=50,
                     help="max goal distance in OBS-STEPS (frames are 1-per-obs-step, post-frameskip; "
-                         "NOT divided by frameskip); == the max trajectory length sampled")
+                         "NOT divided by frameskip); per-position h~U[1,H_max], episode-clamped. "
+                         "DECOUPLED from the window length (see --context_len)")
+    ap.add_argument("--context_len", type=int, default=5,
+                    help="decision points per context window (the aggregator's max sequence length "
+                         "at train; eval defaults its ctx_cap to this). Frames per item = "
+                         "context_len + H_max, so this x H_max sets GPU memory")
     ap.add_argument("--hidden_dim", type=int, default=512)
     ap.add_argument("--img_size", type=int, default=224)
     ap.add_argument("--seed", type=int, default=3072)
@@ -375,22 +385,25 @@ def main():
     val_idx = perm[:n_val]
     train_idx = perm[n_val:]
     print(f"[lewam-uni] train={train_idx.numel()} val={val_idx.numel()} "
-          f"H_max={args.H_max} action_block={action_block_dim}", flush=True)
+          f"H_max={args.H_max} context_len={args.context_len} "
+          f"action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
-    # Each item is a whole start->goal trajectory (~avg_h decision points), so iterating EVERY start
-    # supervises each decision point ~avg_h times per epoch (~12x over-supervision -> 12x slow). Draw
-    # ~1x coverage per epoch instead: n_starts / avg_h trajectories, avg_h ~ H_max/2. Re-randomized
-    # each epoch (RandomSampler), so over many epochs all starts are still seen.
+    # Each item is a context window (~context_len decision points), so iterating EVERY start
+    # supervises each decision point ~context_len times per epoch. Draw ~1x coverage per epoch
+    # instead: n_starts / context_len windows. Re-randomized each epoch (RandomSampler), so over
+    # many epochs all starts are still seen.
     if args.stream:
-        train_ds = StreamTrajDataset(acts_by_ep, stream_index, train_idx, args.H_max, base, img_t, frameskip)
-        val_ds = StreamTrajDataset(acts_by_ep, stream_index, val_idx, args.H_max, base, img_t, frameskip)
+        train_ds = StreamTrajDataset(acts_by_ep, stream_index, train_idx, args.H_max,
+                                     args.context_len, base, img_t, frameskip)
+        val_ds = StreamTrajDataset(acts_by_ep, stream_index, val_idx, args.H_max,
+                                   args.context_len, base, img_t, frameskip)
     else:
-        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max)
-        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max)
-    avg_h = max(1.0, args.H_max / 2.0)
-    n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_h))
-    n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_h))
+        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max, args.context_len)
+        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max, args.context_len)
+    avg_cover = max(1.0, float(args.context_len))
+    n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
+    n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
     train_sampler = torch.utils.data.RandomSampler(train_ds, replacement=True, num_samples=n_tr_ep)
     val_sampler = torch.utils.data.RandomSampler(val_ds, replacement=True, num_samples=n_va_ep)
     _loader_common = dict(
@@ -428,7 +441,8 @@ def main():
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
         agg_residual=args.agg_residual, agg_gate=args.agg_gate,
         agg_action_cond=args.agg_action_cond,
-        H_max=args.H_max, frameskip=frameskip, action_raw_dim=raw_adim,
+        H_max=args.H_max, context_len=args.context_len,
+        frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
         ablate_dynamics=args.ablate_dynamics,
@@ -441,29 +455,34 @@ def main():
     D = 192
     Hmax = float(args.H_max)
 
-    def run_batch(frames, actions, lengths, train):
-        """One sequence-parallel forward: encode the trajectory once, aggregate causally, apply the
-        heads at every position, and return per-position masked (act, dyn) losses + valid latents."""
-        B, Lp1 = frames.shape[0], frames.shape[1]
-        Lmax = Lp1 - 1
+    def run_batch(frames, actions, w_len, f_len, train):
+        """One sequence-parallel forward: encode the strip once, aggregate causally over the first
+        Pmax positions, apply the heads at every valid position, and return per-position masked
+        (act, dyn) losses. The strip's goal-tail frames beyond Pmax are encoded ONLY as goal/target
+        candidates -- they are never aggregator inputs, so the goal is not part of the sequence."""
+        B, Fmax = frames.shape[0], frames.shape[1]
+        Pmax = actions.shape[1]                          # max decision points in the batch
         frames = frames.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True).float()
-        lengths = lengths.to(device, non_blocking=True)
-        z = model.encode(frames.reshape(B * Lp1, *frames.shape[2:]).float()).reshape(B, Lp1, D)
-        states = z[:, :Lmax].float()                    # (B,Lmax,D) decision-point states
-        next_tgt = z[:, 1:Lp1].float()                  # (B,Lmax,D) dynamics targets z[k+1]
-        pos = torch.arange(Lmax, device=device)
-        valid = pos.unsqueeze(0) < lengths.unsqueeze(1)                 # (B,Lmax) bool
-        # Per-position goal at a RANDOM future distance within the trajectory, so horizon is NOT tied
-        # to context length/position. (The old code always used the window endpoint z[h], making
-        # horizon deterministically h-p, so long-context positions only ever saw short horizons and
-        # long-context x long-horizon was never trained.) goal for pos p = z[g], g ~ U[p+1, h].
-        pos_e, len_e = pos.unsqueeze(0), lengths.unsqueeze(1)          # (1,Lmax), (B,1)  len=endpoint h
-        span = (len_e - pos_e).clamp(min=1)                            # h-p (>=1 where valid)
-        g_idx = (pos_e + 1 + (torch.rand(B, Lmax, device=device) * span).long()).clamp(max=Lp1 - 1)
-        goal_bc = torch.gather(z, 1, g_idx.unsqueeze(-1).expand(B, Lmax, D)).float()  # (B,Lmax,D) per-pos
-        horizon = (g_idx - pos_e).clamp(min=1)                          # g - p (decoupled from p)
-        h_norm = horizon.clamp(max=args.H_max).float() / Hmax          # (B,Lmax)
+        w_len = w_len.to(device, non_blocking=True)
+        f_len = f_len.to(device, non_blocking=True)
+        z = model.encode(frames.reshape(B * Fmax, *frames.shape[2:]).float()).reshape(B, Fmax, D)
+        states = z[:, :Pmax].float()                     # (B,Pmax,D) decision-point states
+        next_tgt = z[:, 1:Pmax + 1].float()              # (B,Pmax,D) dynamics targets z[p+1]
+        pos = torch.arange(Pmax, device=device)
+        valid = pos.unsqueeze(0) < w_len.unsqueeze(1)                   # (B,Pmax) bool
+        # Per-position goal h~U[1,H_max], clamped to the episode tail (same sampling as the split's
+        # pair dataset). goal for pos p = z[p+h]; the strip carries H_max frames beyond the window
+        # so unclamped goals always exist. Pad positions get an arbitrary in-strip goal and are
+        # masked from the loss.
+        pos_e = pos.unsqueeze(0)                                       # (1,Pmax)
+        last = (f_len - 1).unsqueeze(1)                                # (B,1) last valid frame idx
+        span = (last - pos_e).clamp(min=1, max=args.H_max)             # max h at pos p
+        g_idx = (pos_e + 1 + (torch.rand(B, Pmax, device=device) * span).long())
+        g_idx = torch.minimum(g_idx, last.expand_as(g_idx)).clamp(max=Fmax - 1)
+        goal_bc = torch.gather(z, 1, g_idx.unsqueeze(-1).expand(B, Pmax, D)).float()  # (B,Pmax,D)
+        horizon = (g_idx - pos_e).clamp(min=1)                          # == h (uniform in [1,H_max])
+        h_norm = horizon.clamp(max=args.H_max).float() / Hmax          # (B,Pmax)
         a_prev = a_prev_mask = None
         if model.agg_action_cond:
             a_prev = torch.zeros_like(actions)
@@ -477,8 +496,8 @@ def main():
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)
-            z_cyc = model.dynamics(c.reshape(B * Lmax, D), a_pred.reshape(B * Lmax, -1),
-                                   goal_bc.reshape(B * Lmax, D)).reshape(B, Lmax, D)
+            z_cyc = model.dynamics(c.reshape(B * Pmax, D), a_pred.reshape(B * Pmax, -1),
+                                   goal_bc.reshape(B * Pmax, D)).reshape(B, Pmax, D)
             loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * m).sum() / (nval * D)
         # SIGReg anti-collapse over ALL valid state latents (like the seq trainer's
         # sigreg(z.reshape(-1,D))). The earlier reg~200 blow-up was a symptom of the BatchNorm-
@@ -495,10 +514,10 @@ def main():
         # ---- train ----
         model.train()
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
-        for frames, actions, lengths in train_loader:
+        for frames, actions, w_len, f_len in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 loss_act, loss_dyn, loss_reg, loss_cyc, nval = run_batch(
-                    frames, actions, lengths, train=True)
+                    frames, actions, w_len, f_len, train=True)
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc)
             opt.zero_grad(set_to_none=True)
@@ -516,10 +535,10 @@ def main():
         model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
-            for frames, actions, lengths in val_loader:
+            for frames, actions, w_len, f_len in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     loss_act, loss_dyn, _, _, nval = run_batch(
-                        frames, actions, lengths, train=False)
+                        frames, actions, w_len, f_len, train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
                 va_count += nval

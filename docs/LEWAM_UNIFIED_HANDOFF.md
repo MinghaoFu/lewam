@@ -51,12 +51,15 @@ Arm flags govern how `c_t` relates to `z_t`:
 - `--agg_action_cond`, `--agg_depth` (4), `--agg_heads` (4) are also present so every checkpoint
   strict-loads under one eval adapter.
 
-Trainer `scripts/train_lewam_unified.py` is sequence-parallel: it samples a start→goal trajectory
-`[t..t+h]` with `h~U[1,H_max]`, the goal is the window endpoint `z[-1]` (shared by all positions,
-confirmed with the user), per-position horizon is `h-k`, dynamics targets are `z[1:]`, and the loss is
-a per-position masked `act + dyn + SIGReg` (match the seq trainer: `sigreg` over ALL latents, no
-stop-grad). `--H_max` is the context length in OBS-STEPS (one frame per obs-step, not divided by
-frameskip). Always pass `--ckpt_sync_dir <hdfs_dir>` so a released worker never costs a run.
+Trainer `scripts/train_lewam_unified.py` is sequence-parallel: it samples a CONTEXT window of
+`--context_len` decision points (pure context — the window does NOT terminate at a goal), encodes a
+strip that extends `H_max` frames past the window, and gives every position its own goal `z_{p+h}`,
+`h~U[1,H_max]` episode-clamped (the split's pair sampling, vectorized). Dynamics targets are
+`z[p+1]`; the loss is a per-position masked `act + dyn + SIGReg` (match the seq trainer: `sigreg`
+over ALL latents, no stop-grad). `--H_max` is the max goal distance and `--context_len` the window
+length, both in OBS-STEPS (one frame per obs-step, not divided by frameskip) — decoupled since the
+2026-07-20 goal-in-window fix (below). Always pass `--ckpt_sync_dir <hdfs_dir>` so a released
+worker never costs a run.
 
 Eval adapter: `lewam/models/gip.py` `load_lewam_unified_model` + `LeWAMUnifiedPolicy`
 (mode `unified_policy`) — full-causal-from-episode-start rollout, caches per-frame latents,
@@ -77,6 +80,25 @@ time (`act` 1.036 → 0.88 tracking toward the split's 0.85). Two earlier hypoth
 correlated latents; stop-grad the dynamics target) were wrong and reverted. A cleaner fix (encode only
 the real frames, or a padding-invariant projector norm) is deferred — the real-frame padding is
 sufficient and no residual BN artifacts have surfaced.
+
+### The goal-in-window bug and the context/goal decoupling (2026-07-20, owner-diagnosed)
+
+The original design (owner's spec, later recalled by the owner as a mistake) sampled the training
+window as a start→GOAL cut: `h~U[1,H_max]` defined both the context length and the goal, with the
+goal the window endpoint. Even after `6f743ed` (per-position goals `g~U[p+1,h]` inside the window)
+three defects remained: (a) the last position always trained on horizon exactly 1 with goal == its
+dynamics target ("one-step transition to the goal" — the split never does this except when its
+uniform `h` draws 1); (b) the horizon marginal was short-skewed, since a position's max horizon was
+only the frames left in the window; (c) every goal was an in-window frame of the fed sequence,
+while at eval the goal is a separately-encoded far-away frame never in the sequence. The fix:
+the window is pure context (`--context_len` decision points), each position draws `h~U[1,H_max]`
+uniformly (episode-clamped; verified uniform by unit test), and goals come from a strip extending
+up to `H_max` frames past the window — encoded, but never aggregator inputs. Side effects: items
+shrink from ≤`H_max`+1 frames to ≤`context_len+H_max`, so with the owner-chosen `H_max=5,
+context_len=5` (horizon length "doesn't seem to make a big difference") bs256 fits an A100-80GB
+again — back on the split-protocol batch. Eval defaults `ctx_cap` to the trained `context_len`
+(read from the ckpt config; old ckpts keep full-history). NOTE: the pusht full-data unified number
+[80, 86, 76] was trained under the OLD design — re-run before comparing.
 
 ## 3. Results so far
 
