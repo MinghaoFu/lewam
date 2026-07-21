@@ -94,3 +94,33 @@ Needs a real TTY: launched from a background/no-TTY context it dies at "Login Wo
 | `gpu type X is not available for this cluster` | add `--resourcetype arnold` |
 | `read mlx_config.yaml ... failed` | pass `-p your.yaml` |
 | queue stuck pending | try Path A worker, or the H100 GCP queue |
+
+## Job-launch hard rules — learned the hard way (2026-07-21, a whole session lost to these)
+
+**1. `mlx job submitv2` jobs are IRREVERSIBLE — you cannot kill them.**
+- `mlx job` has NO stop/kill/cancel/delete subcommand (only `help`, `submitv2`, `list`).
+- Path-B workers on the aigcp/GCP cluster do NOT appear in `mlx worker list`, so `mlx worker kill` can't reach them either. Only Path-A `mlx worker launch` workers are killable (`mlx worker kill <id>`).
+- **Consequence: never launch casually.** Every submitv2 job is a contended H100 committed for hours with no undo. Think the whole pipeline through BEFORE submitting. Do NOT "just fire a quick diagnostic" — it is neither quick nor cancellable, and duplicates/waste accumulate with no way to clean them. Read logs/checkpoints to diagnose FIRST; launch only when you know exactly what the result buys.
+
+**2. Build instrumentation INTO the entry script before the first launch.**
+- Mirror the training stdout to HDFS DURING training (background `cp /tmp/train.log $CK/train_$TAG.log` every ~60s), not only at the end. Otherwise you fly blind on multi-hour runs — no loss curves, can't tell training from hung. (I launched five 5h jobs with metrics synced only at the end. Inexcusable.)
+- Sync `latest.pt` periodically, not just `best.pt`-on-improvement — best.pt frequently freezes on an early checkpoint (see rule 6), so if HDFS only has best.pt you cannot eval the actual current model.
+- Emit a per-10-epoch heartbeat (`grep "ep N/EP" log | say`). Estimate epoch time from the REAL first-epoch line, never a guess (I assumed 6 min/ep; it was ~25).
+
+**3. Logging hygiene: one job = one log file, synchronous appends.**
+- Never let two jobs write the same heartbeat/log. They interleave, and with backgrounded appends they RACE and DROP lines — I read two duplicate jobs' interleaved epoch lines as a single "diverging" trajectory and falsely declared a training collapse. Use per-run paths (`hb_<tag>.log`).
+- Use SYNCHRONOUS `echo >> LOG`, not backgrounded `( echo >> LOG ) &` — the bg write is lost when the container exits before it flushes (dropped final summary lines).
+
+**4. Resubmitting a "stuck" job creates un-killable duplicates.**
+- A job with no heartbeat is usually QUEUED for a card, not dead. Resubmitting risks a duplicate that ALSO schedules → two un-killable jobs, same tag, colliding on checkpoints. Only resubmit after `mlx job list` shows the original FAILED.
+
+**5. Monitor for FAILURE, not just success — never stall.**
+- `mlx job list` shows RUNNING/FAILED. Poll it. A job can FAIL in ~2 min (e.g. a 256GB pod that can't schedule) and the heartbeat shows nothing. Watch best.pt mtime as a liveness signal. Set monitors whose grep catches FAILED / no-progress, not only the happy-path result line. Don't wait 20 min hoping — probe status actively.
+
+**6. Don't misread early training as failure (this cost the most).**
+- best.pt frozen for ~6-7 early epochs is NORMAL: it's the val_dyn transient. The screening run that CONVERGED to 52 SR had combined_val spike to 105 at ep4 and best.pt frozen 6 epochs before recovering at ep7. Full-data spikes are smaller. ALWAYS compare a suspected stall against a known-good run's per-epoch trajectory before alarming. Eval of an early-epoch best.pt giving low SR = "undertrained," not "broken."
+
+**7. GPU / pod facts.**
+- V100 UNUSABLE: image torch has no sm_70 kernels → `cudaErrorNoKernelImage` on any CUDA op. Target A100/H100. aigcp/H100 queue gives H100s reliably; the `ai` queue is mixed and hands out V100s despite an A100 request.
+- 256GB pods can FAIL to schedule (nodes/quota full) while 48GB schedule instantly — never assume a big pod lands; check `mlx job list` for fast FAILED.
+- Full-data STREAM ≈ 20-25 min/epoch (HDFS-read-bound); PRELOAD ≈ 3-4x faster (~6 min/ep). Preload full pusht in a 256GB pod (§10-proven; OOMs at 240GB). Do NOT stream full-data if preload fits — it triples wall-time. (Streaming full pusht = ~16-20h for 50ep and blew the deadline.)
