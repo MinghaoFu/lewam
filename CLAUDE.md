@@ -24,6 +24,10 @@ Before committing: `git config user.name "Minghao Fu" && git config user.email i
 
 ## GPU 申请方法 (Merlin/Arnold) — full how-to in `merlin/MERLIN.md`
 
+**Read our Merlin rules before launching GPUs, placing files, or reading data in a job:
+`/mnt/hdfs/bi_algo_a2f/minghao.fu/merlin-docs/`** (`merlin-kraken-gpu-ops.md`,
+`merlin-worker-interactive.md`, `merlin-job-formal.md`).
+
 ### 用户组信息
 - **usergroup**: `bi_algorithm`
 - **cluster**: `cloudnative-maliva`
@@ -85,5 +89,6 @@ ln -sf "$HSSD/tworoom.h5" "$DS/tworoom.h5"
 Train: `scripts/train_lewam_gc.py --dataset_name <h5> --run_name <task>_lewam_gc --epochs 50
 --H_max <25 for tworoom | 50 others> --w_cyc 0.0` (v3: `--w_cyc 1.0`).
 Eval: `bash scripts/eval_lewam_gc.sh <task>` (in the repo; remaps ckpt → gcidm format,
-3 seeds × N=50). Traps: preload needs ~100GB RAM for reacher/cube (max 2 big tasks
-per 384GB node); reacher eval needs `dm_control==1.0.43`; headless needs `MUJOCO_GL=egl`.
+3 seeds × N=50). Traps: the loader reads the prebuilt frames_cache (~1× the frame tensor in RAM:
+cube/reacher ~140GB, pusht ~160GB, tworoom ~70GB); reacher eval needs `dm_control==1.0.43`;
+headless needs `MUJOCO_GL=egl`.
