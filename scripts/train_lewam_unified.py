@@ -387,6 +387,11 @@ def main():
     # data-pipeline knobs (no effect on loss/model logic)
     ap.add_argument("--num_workers", type=int, default=6)
     ap.add_argument("--prefetch_factor", type=int, default=3)
+    ap.add_argument("--frames_cache", type=str, default="auto",
+                    help="prebuilt-cache dir | 'auto' (env LEWAM_CACHE_DIR or the default HDFS "
+                         "preload_cache) | 'off'. HIT -> np.load the shared <tag>.frames.npy + "
+                         "<tag>.aux.npz instead of decoding the h5 (much faster than --stream, "
+                         "~1x-frames RAM vs classic preload). Ignored when --stream or --max_eps set.")
     ap.add_argument("--stream", action="store_true",
                     help="read frames from the h5 on demand (no preload/flatten) -> constant low RAM, "
                          "fits a normal worker; epoch 1 slow (h5 reads), page cache warms after")
@@ -422,6 +427,12 @@ def main():
     else:
         run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
+    # HARD RULE (owner 2026-07-24): never write checkpoints under $HOME -- big .pt in the shared
+    # home fs filled it and crashed the box. Entry scripts pass --run_dir to /opt/tiger (local
+    # scratch); warn LOUD if anything resolves under home so it can't happen silently.
+    if os.path.realpath(run_dir).startswith(os.path.realpath(os.path.expanduser("~"))):
+        print(f"[lewam-uni] WARN run_dir under $HOME ({run_dir}); checkpoints in home can fill the "
+              f"shared fs -- pass --run_dir to local scratch (/opt/tiger/...) or HDFS", flush=True)
     max_eps = args.max_eps or None
 
     # ---- build model ----
@@ -447,10 +458,40 @@ def main():
         n_starts = len(stream_index)
         print(f"[lewam-uni] stream mode: starts={n_starts} (no preload)", flush=True)
     else:
-        frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
-                                              frameskip, max_eps=max_eps)
-        Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
-        del frame_list
+        Frames = None
+        if args.frames_cache != "off" and not max_eps:
+            _cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
+                "LEWAM_CACHE_DIR",
+                "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
+            _stem = os.path.basename(args.dataset_name).replace(".h5", "")
+            _tag = f"{_stem}_fs{frameskip}_i{args.img_size}"
+            _fp, _ap = f"{_cdir}/{_stem}/{_tag}.frames.npy", f"{_cdir}/{_stem}/{_tag}.aux.npz"
+            if not (os.path.isfile(_fp) and os.path.isfile(_ap)):
+                _fp, _ap = f"{_cdir}/{_tag}.frames.npy", f"{_cdir}/{_tag}.aux.npz"
+            if os.path.isfile(_fp) and os.path.isfile(_ap):
+                _t0 = time.time()
+                print(f"[lewam-uni] frames-cache HIT {_fp}", flush=True)
+                Frames = torch.from_numpy(np.load(_fp))
+                _aux = np.load(_ap)
+                # The cache is built by the GC pipeline: A_flat is per-SAMPLE (one action block per
+                # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
+                # A_flat back to a per-FRAME tensor A_frame[t_gidx]=A_flat: every frame the window
+                # dataset reads (frames[start:start+n_pos], all valid starts) is thereby set, so this
+                # is exact -- only episode-last frames stay zero, and their action is never read.
+                A_flat = torch.from_numpy(_aux["A_flat"])
+                t_gidx = torch.from_numpy(_aux["t_gidx"])
+                maxh = torch.from_numpy(_aux["maxh"])
+                A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
+                A_frame[t_gidx] = A_flat
+                print(f"[lewam-uni] cache loaded in {time.time()-_t0:.0f}s "
+                      f"frames={tuple(Frames.shape)}", flush=True)
+            else:
+                print(f"[lewam-uni] frames-cache MISS ({_fp}) -> classic preload", flush=True)
+        if Frames is None:
+            frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
+                                                  frameskip, max_eps=max_eps)
+            Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
+            del frame_list
         n_starts = t_gidx.shape[0]
         print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
 
@@ -643,6 +684,11 @@ def main():
         # strict into a LeWAMUnified rebuilt from the config (gip.load_lewam_unified_model).
         full_sd = model.state_dict()
         torch.save(full_sd, run_dir / "lewam_unified_latest.pt")
+        # sync latest.pt EVERY epoch (not just best.pt on improvement) so a killed/reclaimed pod
+        # never loses more than one epoch of progress -- best.pt alone can freeze on an early
+        # improvement epoch for the rest of the run, silently discarding everything trained after it.
+        durable_sync([run_dir / "lewam_unified_config.json",
+                      run_dir / "lewam_unified_latest.pt"], args.ckpt_sync_dir)
 
         combined_val = va_a + va_d
         if combined_val < best_val:
