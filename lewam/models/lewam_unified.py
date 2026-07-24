@@ -140,18 +140,34 @@ class LeWAMUnified(nn.Module):
             u = torch.sigmoid(self.gate_proj(seq)) * u
         return seq + u
 
-    def forward_seq(self, seq, z_goal, h_norm, a_t, a_prev=None, a_prev_mask=None):
+    def forward_seq(self, seq, z_goal, h_norm, a_t, a_prev=None, a_prev_mask=None,
+                    dyn_action_mix=0.0, dyn_action_detach=False):
         """Sequence-parallel training path: one causal pass -> c at every position, heads applied
         per-position. seq: (B,L,D); z_goal: (B,L,D); h_norm: (B,L); a_t: (B,L,action_dim);
         a_prev/a_prev_mask: (B,L,action_dim)/(B,L) if action_cond. Returns
-        (a_pred (B,L,action_dim), z_pred (B,L,D))."""
+        (a_pred (B,L,action_dim), z_pred (B,L,D)).
+
+        dyn_action_mix (alpha) in [0,1] feeds the dynamics head a convex mix of the POLICY action
+        and the ground-truth action: a_dyn = alpha*a_pred + (1-alpha)*a_t. alpha=0 (default) is the
+        original split behaviour (dynamics on ground-truth actions). alpha>0 closes the train/rollout
+        covariate gap -- at eval the dynamics is rolled on the policy's own actions, never on ground
+        truth. With dyn_action_detach the policy action enters dynamics stop-gradient (dynamics adapts
+        to the policy's action distribution, but the dyn loss never reshapes the BC policy); otherwise
+        gradients flow policy->dynamics (the coupled 'unified' arm). The action is still supervised by
+        the separate BC loss on a_pred, so this is NOT a latent-action model."""
         B, L, D = seq.shape
         c = self.aggregate(seq, a_prev, a_prev_mask)                      # (B,L,D)
         cf = c.reshape(B * L, D)                                          # flatten for the per-vector heads
         gf = z_goal.reshape(B * L, D)
         hf = h_norm.reshape(B * L)
-        af = a_t.reshape(B * L, a_t.shape[-1])
-        a_pred = self.gc_head(cf, gf, hf).reshape(B, L, -1)
+        a_pred_flat = self.gc_head(cf, gf, hf)                            # (B*L, action_dim)
+        a_pred = a_pred_flat.reshape(B, L, -1)
+        af_gt = a_t.reshape(B * L, a_t.shape[-1])
+        if dyn_action_mix > 0.0:
+            a_src = a_pred_flat.detach() if dyn_action_detach else a_pred_flat
+            af = dyn_action_mix * a_src.to(af_gt.dtype) + (1.0 - dyn_action_mix) * af_gt
+        else:
+            af = af_gt
         z_pred = self.dynamics(cf, af, gf).reshape(B, L, D)
         return a_pred, z_pred
 

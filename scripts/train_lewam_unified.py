@@ -315,6 +315,25 @@ def main():
     ap.add_argument("--agg_action_cond", action="store_true",
                     help="condition each token z_tau (AdaLN) on the embedded previous action "
                          "a_{tau-1} (null-action at the sequence start); conditioning, NOT tokens")
+    # dynamics-on-policy-action arm: feed the gc_head's PREDICTED action into the dynamics head
+    # (a convex mix with the ground-truth action, weight alpha ramped by a schedule), closing the
+    # train/rollout covariate gap. The action is still BC-supervised on ground truth, so it stays a
+    # grounded action, not a latent-action model.
+    ap.add_argument("--dyn_action_from_policy", action="store_true",
+                    help="feed a mix of the policy's predicted action into the dynamics head "
+                         "(alpha per --dyn_policy_schedule); off = dynamics on ground-truth actions")
+    ap.add_argument("--dyn_policy_schedule", type=str, default="cosine",
+                    help="alpha(epoch) schedule for the policy-action mix: const|linear|cosine|"
+                         "sigmoid. const = full alpha from epoch 0 (least stable, 'from the start').")
+    ap.add_argument("--dyn_policy_alpha_max", type=float, default=1.0,
+                    help="max mix weight (1.0 = dynamics sees ONLY the policy action at the end)")
+    ap.add_argument("--dyn_policy_ramp_frac", type=float, default=0.5,
+                    help="fraction of total epochs over which alpha ramps 0->alpha_max "
+                         "(non-const schedules); after that alpha stays at alpha_max")
+    ap.add_argument("--dyn_policy_detach", action="store_true",
+                    help="stop-gradient the policy action into dynamics (dynamics adapts to the "
+                         "policy's actions, but the dyn loss never reshapes the BC policy). "
+                         "default: gradients flow policy->dynamics (coupled 'unified' arm)")
     # loss weights
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
@@ -477,6 +496,27 @@ def main():
         return 0.5 * (1.0 + math.cos(math.pi * progress))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
+    def dyn_alpha(epoch):
+        """Mix weight for feeding the policy action into dynamics at this epoch (0 = ground-truth
+        only). const holds alpha_max from epoch 0; the ramps go 0->alpha_max over ramp_frac of the
+        run, then hold."""
+        if not args.dyn_action_from_policy:
+            return 0.0
+        a_max = float(args.dyn_policy_alpha_max)
+        if args.dyn_policy_schedule == "const":
+            return a_max
+        ramp = max(1, int(round(args.dyn_policy_ramp_frac * total_epochs)))
+        p = min(1.0, epoch / ramp)
+        if args.dyn_policy_schedule == "linear":
+            f = p
+        elif args.dyn_policy_schedule == "sigmoid":
+            k = 10.0
+            s0, s1 = 1.0 / (1.0 + math.exp(k * 0.5)), 1.0 / (1.0 + math.exp(-k * 0.5))
+            f = (1.0 / (1.0 + math.exp(-k * (p - 0.5))) - s0) / (s1 - s0)
+        else:  # cosine (default)
+            f = 0.5 * (1.0 - math.cos(math.pi * p))
+        return a_max * f
+
     # ---- save config ----
     cfg_out = dict(
         model="lewam_unified", z_dim=args.embed_dim, encoder_size=args.encoder_size,
@@ -490,6 +530,11 @@ def main():
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
         ablate_dynamics=args.ablate_dynamics,
+        dyn_action_from_policy=args.dyn_action_from_policy,
+        dyn_policy_schedule=args.dyn_policy_schedule,
+        dyn_policy_alpha_max=args.dyn_policy_alpha_max,
+        dyn_policy_ramp_frac=args.dyn_policy_ramp_frac,
+        dyn_policy_detach=args.dyn_policy_detach,
         encoder_lr=args.encoder_lr, head_lr=args.head_lr,
         dynamics_lr=args.dynamics_lr, agg_lr=args.agg_lr,
     )
@@ -499,7 +544,7 @@ def main():
     D = 192
     Hmax = float(args.H_max)
 
-    def run_batch(window, goals, actions, horizon, n_pos, train):
+    def run_batch(window, goals, actions, horizon, n_pos, train, dyn_mix=0.0):
         """One sequence-parallel step over a batch of context windows.
 
         window  (B, max_pos+1, 3, H, W)  states + next-state targets, tail-padded
@@ -540,7 +585,9 @@ def main():
             a_prev[:, 1:] = actions[:, :-1]           # a_{p-1}; position 0 gets the null embedding
             a_prev_mask = valid & (pos >= 1)
 
-        a_pred, z_pred = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask)
+        a_pred, z_pred = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
+                                           dyn_action_mix=(dyn_mix if train else 0.0),
+                                           dyn_action_detach=args.dyn_policy_detach)
 
         loss_mask = valid.unsqueeze(-1).float()
         n_valid = valid.sum().clamp(min=1)
@@ -562,6 +609,7 @@ def main():
 
     for ep in range(args.epochs):
         t0 = time.time()
+        alpha = dyn_alpha(ep)
 
         # ---- train ----
         model.train()
@@ -569,7 +617,7 @@ def main():
         for window, goals, actions, horizon, n_pos in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 loss_act, loss_dyn, loss_reg, loss_cyc, nval = run_batch(
-                    window, goals, actions, horizon, n_pos, train=True)
+                    window, goals, actions, horizon, n_pos, train=True, dyn_mix=alpha)
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc)
             opt.zero_grad(set_to_none=True)
@@ -601,8 +649,9 @@ def main():
         lrs = sched.get_last_lr()
         dt = time.time() - t0
         cyc_str = f"  cyc={tr_c:.5f}" if args.w_cyc > 0 else ""
+        dyn_str = f"  a={alpha:.2f}" if args.dyn_action_from_policy else ""
         print(f"[lewam-uni] ep {ep+1}/{args.epochs}  "
-              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}  "
+              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}  "
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
