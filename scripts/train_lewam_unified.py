@@ -270,6 +270,10 @@ def main():
                          "window, horizons counting down -- the structure eval runs); the rest use "
                          "per-position independent goals (the split's sampling). 0 = all random")
     ap.add_argument("--hidden_dim", type=int, default=512)
+    ap.add_argument("--embed_dim", type=int, default=192,
+                    help="latent width feeding aggregator + heads (ViT-tiny cls is projected to this)")
+    ap.add_argument("--encoder_size", type=str, default="tiny",
+                    help="ViT backbone size: tiny | small | base — the main param-count lever")
     ap.add_argument("--img_size", type=int, default=224)
     ap.add_argument("--seed", type=int, default=3072)
     ap.add_argument("--run_name", type=str, default="reacher_lewam_unified")
@@ -352,7 +356,8 @@ def main():
     max_eps = args.max_eps or None
 
     # ---- build model ----
-    model = LeWAMUnified(embed_dim=192, action_dim=action_block_dim,
+    model = LeWAMUnified(encoder_size=args.encoder_size, embed_dim=args.embed_dim,
+                         action_dim=action_block_dim,
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          agg_depth=args.agg_depth, agg_heads=args.agg_heads,
                          agg_residual=args.agg_residual, agg_gate=args.agg_gate,
@@ -458,7 +463,8 @@ def main():
 
     # ---- save config ----
     cfg_out = dict(
-        model="lewam_unified", z_dim=192, action_dim=action_block_dim,
+        model="lewam_unified", z_dim=args.embed_dim, encoder_size=args.encoder_size,
+        action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
         agg_residual=args.agg_residual, agg_gate=args.agg_gate,

@@ -254,6 +254,7 @@ def load_lewam_unified_model(run_name, which="best"):
     proj_w = sd.get("encoder.projector.net.0.weight")
     proj_hidden = int(proj_w.shape[0]) if proj_w is not None else None
     model = LeWAMUnified(
+        encoder_size=str(cfg.get("encoder_size", "tiny")),
         embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
