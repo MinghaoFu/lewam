@@ -243,87 +243,6 @@ def collate_pad(batch):
 
 
 # --------------------------------------------------------------------------- #
-# Streaming path (--stream): read ONLY actions + episode lengths up front (tiny), enumerate valid    #
-# starts, and read each trajectory's frame window from the h5 on demand in __getitem__. No preload / #
-# flatten -> constant, low RAM (fits a normal worker), at the cost of per-batch h5 reads (epoch 1    #
-# slow; page cache warms after). Produces the SAME (frames, actions, h) items as SeqTrajDataset, so  #
-# collate_pad + run_batch are unchanged. Mirrors the proven stream path in train_lewam_seq.py.       #
-# --------------------------------------------------------------------------- #
-def build_traj_index_stream(base, frameskip, act_mean, act_std, raw_adim, max_eps=None):
-    """Read actions + lengths only; z-score actions per episode; enumerate (ep, start, maxh) starts.
-    n_fr (obs-frames) matches preload's min(ceil(L/fs), n_obs+1); maxh = last frame - start."""
-    import h5py
-    act_mean_t = torch.tensor(act_mean, dtype=torch.float32)
-    act_std_t = torch.tensor(act_std, dtype=torch.float32)
-    lengths = np.asarray(base.lengths)
-    n_eps = len(lengths) if max_eps is None else min(max_eps, len(lengths))
-    with h5py.File(base.h5_path, "r", swmr=True) as hf:
-        act_all = torch.from_numpy(np.asarray(hf["action"][:]))
-        offsets = (np.asarray(hf["ep_offset"][:]).astype(np.int64) if "ep_offset" in hf
-                   else np.concatenate([[0], np.cumsum(lengths)[:-1]]).astype(np.int64))
-    acts_by_ep, index = [], []
-    t0 = time.time()
-    for ep in range(n_eps):
-        L = int(lengths[ep]); off = int(offsets[ep]); n_obs = L // frameskip
-        a = act_all[off:off + n_obs * frameskip].reshape(n_obs, frameskip, raw_adim)
-        a = ((a - act_mean_t) / act_std_t).reshape(n_obs, frameskip * raw_adim).half()
-        n_fr = min((L + frameskip - 1) // frameskip, n_obs + 1)
-        acts_by_ep.append(a)
-        last = n_fr - 1
-        for t in range(min(n_obs, n_fr - 1)):     # valid starts: need >=1 frame after the start
-            index.append((ep, t, last - t))       # (ep, start, maxh = frames from start to ep end)
-    print(f"[lewam-uni] stream index: {len(index)} starts over {n_eps} eps ({time.time()-t0:.0f}s)",
-          flush=True)
-    return acts_by_ep, index
-
-
-class StreamTrajDataset(Dataset):
-    """Same item as SeqTrajDataset, but frames are read from the h5 on demand (no preloaded
-    tensor). The window is one contiguous read; each DISTINCT goal frame is one more small read
-    (<= context_len of them, often fewer -- SHARED mode needs just one)."""
-
-    def __init__(self, acts_by_ep, index, indices, h_max, ctx_len, p_shared, base, img_t, frameskip):
-        self.acts = acts_by_ep
-        self.index = index
-        self.indices = indices
-        self.h_max = int(h_max)
-        self.ctx_len = int(ctx_len)
-        self.p_shared = float(p_shared)
-        self.base = base
-        self.img_t = img_t
-        self.fs = int(frameskip)
-
-    def __len__(self):
-        return self.indices.numel()
-
-    def _read_obs_frames(self, ep, first, last):
-        """Raw pixels for obs-frames [first .. last] (inclusive; strided by frameskip inside
-        _load_slice) -> (last-first+1, H, W, C) tensor."""
-        pix = self.base._load_slice(ep, first * self.fs, last * self.fs + 1)["pixels"]
-        if not torch.is_tensor(pix):
-            pix = torch.as_tensor(np.asarray(pix))
-        return pix[: last - first + 1]
-
-    def __getitem__(self, i):
-        ep, start, frames_left = self.index[int(self.indices[i])]
-        n_pos = min(self.ctx_len, frames_left)
-        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared)
-        window_raw = self._read_obs_frames(ep, start, start + n_pos)     # (n_pos+1, H, W, C)
-        # read each DISTINCT goal frame once, then index them back per position
-        distinct = torch.unique(goal_offsets)
-        goal_raw = torch.stack([self._read_obs_frames(ep, start + int(g), start + int(g))[0]
-                                for g in distinct])                      # (n_distinct, H, W, C)
-        lookup = {int(g): k for k, g in enumerate(distinct)}
-        goal_rows = torch.tensor([lookup[int(g)] for g in goal_offsets], dtype=torch.long)
-        # ONE transform call over window + distinct goals, then split back
-        all_t = self.img_t({"pixels": torch.cat([window_raw, goal_raw])})["pixels"].float().half()
-        window = all_t[: n_pos + 1]
-        goals = all_t[n_pos + 1:][goal_rows]
-        actions = self.acts[ep][start:start + n_pos]
-        return window, goals, actions, horizon, n_pos
-
-
-# --------------------------------------------------------------------------- #
 # Main training                                                                #
 # --------------------------------------------------------------------------- #
 def main():
@@ -390,11 +309,8 @@ def main():
     ap.add_argument("--frames_cache", type=str, default="auto",
                     help="prebuilt-cache dir | 'auto' (env LEWAM_CACHE_DIR or the default HDFS "
                          "preload_cache) | 'off'. HIT -> np.load the shared <tag>.frames.npy + "
-                         "<tag>.aux.npz instead of decoding the h5 (much faster than --stream, "
-                         "~1x-frames RAM vs classic preload). Ignored when --stream or --max_eps set.")
-    ap.add_argument("--stream", action="store_true",
-                    help="read frames from the h5 on demand (no preload/flatten) -> constant low RAM, "
-                         "fits a normal worker; epoch 1 slow (h5 reads), page cache warms after")
+                         "<tag>.aux.npz instead of decoding the h5 (~1x-frames RAM vs classic "
+                         "preload). Ignored when --max_eps set (falls back to classic preload).")
     args = ap.parse_args()
 
     if args.ablate_dynamics:
@@ -452,48 +368,42 @@ def main():
           f"agg_depth={args.agg_depth} action_cond={args.agg_action_cond}", flush=True)
 
     # ---- data ----
-    if args.stream:
-        acts_by_ep, stream_index = build_traj_index_stream(base, frameskip, act_mean, act_std,
-                                                           raw_adim, max_eps=max_eps)
-        n_starts = len(stream_index)
-        print(f"[lewam-uni] stream mode: starts={n_starts} (no preload)", flush=True)
-    else:
-        Frames = None
-        if args.frames_cache != "off" and not max_eps:
-            _cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
-                "LEWAM_CACHE_DIR",
-                "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
-            _stem = os.path.basename(args.dataset_name).replace(".h5", "")
-            _tag = f"{_stem}_fs{frameskip}_i{args.img_size}"
-            _fp, _ap = f"{_cdir}/{_stem}/{_tag}.frames.npy", f"{_cdir}/{_stem}/{_tag}.aux.npz"
-            if not (os.path.isfile(_fp) and os.path.isfile(_ap)):
-                _fp, _ap = f"{_cdir}/{_tag}.frames.npy", f"{_cdir}/{_tag}.aux.npz"
-            if os.path.isfile(_fp) and os.path.isfile(_ap):
-                _t0 = time.time()
-                print(f"[lewam-uni] frames-cache HIT {_fp}", flush=True)
-                Frames = torch.from_numpy(np.load(_fp))
-                _aux = np.load(_ap)
-                # The cache is built by the GC pipeline: A_flat is per-SAMPLE (one action block per
-                # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
-                # A_flat back to a per-FRAME tensor A_frame[t_gidx]=A_flat: every frame the window
-                # dataset reads (frames[start:start+n_pos], all valid starts) is thereby set, so this
-                # is exact -- only episode-last frames stay zero, and their action is never read.
-                A_flat = torch.from_numpy(_aux["A_flat"])
-                t_gidx = torch.from_numpy(_aux["t_gidx"])
-                maxh = torch.from_numpy(_aux["maxh"])
-                A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
-                A_frame[t_gidx] = A_flat
-                print(f"[lewam-uni] cache loaded in {time.time()-_t0:.0f}s "
-                      f"frames={tuple(Frames.shape)}", flush=True)
-            else:
-                print(f"[lewam-uni] frames-cache MISS ({_fp}) -> classic preload", flush=True)
-        if Frames is None:
-            frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
-                                                  frameskip, max_eps=max_eps)
-            Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
-            del frame_list
-        n_starts = t_gidx.shape[0]
-        print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
+    Frames = None
+    if args.frames_cache != "off" and not max_eps:
+        _cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
+            "LEWAM_CACHE_DIR",
+            "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
+        _stem = os.path.basename(args.dataset_name).replace(".h5", "")
+        _tag = f"{_stem}_fs{frameskip}_i{args.img_size}"
+        _fp, _ap = f"{_cdir}/{_stem}/{_tag}.frames.npy", f"{_cdir}/{_stem}/{_tag}.aux.npz"
+        if not (os.path.isfile(_fp) and os.path.isfile(_ap)):
+            _fp, _ap = f"{_cdir}/{_tag}.frames.npy", f"{_cdir}/{_tag}.aux.npz"
+        if os.path.isfile(_fp) and os.path.isfile(_ap):
+            _t0 = time.time()
+            print(f"[lewam-uni] frames-cache HIT {_fp}", flush=True)
+            Frames = torch.from_numpy(np.load(_fp))
+            _aux = np.load(_ap)
+            # The cache is built by the GC pipeline: A_flat is per-SAMPLE (one action block per
+            # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
+            # A_flat back to a per-FRAME tensor A_frame[t_gidx]=A_flat: every frame the window
+            # dataset reads (frames[start:start+n_pos], all valid starts) is thereby set, so this
+            # is exact -- only episode-last frames stay zero, and their action is never read.
+            A_flat = torch.from_numpy(_aux["A_flat"])
+            t_gidx = torch.from_numpy(_aux["t_gidx"])
+            maxh = torch.from_numpy(_aux["maxh"])
+            A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
+            A_frame[t_gidx] = A_flat
+            print(f"[lewam-uni] cache loaded in {time.time()-_t0:.0f}s "
+                  f"frames={tuple(Frames.shape)}", flush=True)
+        else:
+            print(f"[lewam-uni] frames-cache MISS ({_fp}) -> classic preload", flush=True)
+    if Frames is None:
+        frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
+                                              frameskip, max_eps=max_eps)
+        Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
+        del frame_list
+    n_starts = t_gidx.shape[0]
+    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=g)
@@ -509,16 +419,10 @@ def main():
     # supervises each decision point ~context_len times per epoch. Draw ~1x coverage per epoch
     # instead: n_starts / context_len windows. Re-randomized each epoch (RandomSampler), so over
     # many epochs all starts are still seen.
-    if args.stream:
-        train_ds = StreamTrajDataset(acts_by_ep, stream_index, train_idx, args.H_max,
-                                     args.context_len, args.p_shared, base, img_t, frameskip)
-        val_ds = StreamTrajDataset(acts_by_ep, stream_index, val_idx, args.H_max,
-                                   args.context_len, args.p_shared, base, img_t, frameskip)
-    else:
-        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
-                                  args.H_max, args.context_len, args.p_shared)
-        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
-                                args.H_max, args.context_len, args.p_shared)
+    train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
+                              args.H_max, args.context_len, args.p_shared)
+    val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
+                            args.H_max, args.context_len, args.p_shared)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
