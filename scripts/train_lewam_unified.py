@@ -157,7 +157,7 @@ def flatten_for_training(frame_list, act_list, device):
 # Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior  #
 # history), like an eval episode / the eval adapter's sliding window.                             #
 # --------------------------------------------------------------------------- #
-def sample_goal_offsets(n_pos, frames_left, h_max, p_shared):
+def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
     """Sample each position's goal offset (obs-frames from the window start) + horizon.
 
     RANDOM mode (prob 1-p_shared): per position p, draw h~U[1,h_max]; goal offset = p+h clamped
@@ -166,15 +166,24 @@ def sample_goal_offsets(n_pos, frames_left, h_max, p_shared):
     points at that same frame, horizons counting down toward it (>= 1 by construction since the
     goal sits at or beyond the window end even after the episode clamp).
 
+    close_bias>0 skews the horizon draw toward SMALL h (more close-to-goal supervision, where the
+    precision-limited tasks plateau): h = 1 + floor((h_max-1) * u^(1+close_bias)), u~U[0,1];
+    close_bias=0 recovers the uniform U[1,h_max]. Higher bias -> more mass near h=1.
+
     Returns (goal_offsets (n_pos,) long, horizon (n_pos,) long). horizon can exceed h_max in
     SHARED mode (earlier positions are farther); the trainer clamps h_norm at 1.0 exactly like
     the eval countdown's min(steps, H_max)/H_max."""
+    def _draw(shape):
+        if close_bias > 0:
+            u = torch.rand(shape)
+            return 1 + (u.pow(1.0 + close_bias) * (h_max - 1)).long()
+        return torch.randint(1, h_max + 1, shape)
     positions = torch.arange(n_pos)
     if float(torch.rand(())) < p_shared:
-        h_last = int(torch.randint(1, h_max + 1, ()))
+        h_last = int(_draw(()))
         goal_offsets = torch.full((n_pos,), min(n_pos - 1 + h_last, frames_left))
     else:
-        h_draw = torch.randint(1, h_max + 1, (n_pos,))
+        h_draw = _draw((n_pos,))
         goal_offsets = torch.minimum(positions + h_draw,
                                      torch.tensor(frames_left, dtype=torch.long))
     horizon = (goal_offsets - positions).clamp(min=1)
@@ -182,7 +191,8 @@ def sample_goal_offsets(n_pos, frames_left, h_max, p_shared):
 
 
 class SeqTrajDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, p_shared):
+    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, p_shared,
+                 close_bias=0.0):
         self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only; N = all obs-frames
         self.a_frame = a_frame        # [N,adim] fp16, CPU; a_frame[t] = z-scored block taken AT t
         self.t_gidx = t_gidx          # [M] long; episode-global obs-frame index of each valid start
@@ -191,6 +201,7 @@ class SeqTrajDataset(Dataset):
         self.h_max = int(h_max)       # max goal distance (obs-steps)
         self.ctx_len = int(ctx_len)   # decision points per window
         self.p_shared = float(p_shared)
+        self.close_bias = float(close_bias)  # >0 -> over-sample close goals (near-goal precision)
 
     def __len__(self):
         return self.indices.numel()
@@ -202,7 +213,8 @@ class SeqTrajDataset(Dataset):
         n_pos = min(self.ctx_len, frames_left)                   # frame start+n_pos exists (the
                                                                  # last position's target), since
                                                                  # n_pos <= frames_left
-        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared)
+        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared,
+                                                    self.close_bias)
         window = self.frames[start:start + n_pos + 1]            # (n_pos+1, 3, H, W)
         goals = self.frames[start + goal_offsets]                # (n_pos, 3, H, W)
         actions = self.a_frame[start:start + n_pos]              # (n_pos, adim)
@@ -269,6 +281,10 @@ def main():
                     help="fraction of windows trained in SHARED-goal mode (one goal ahead of the "
                          "window, horizons counting down -- the structure eval runs); the rest use "
                          "per-position independent goals (the split's sampling). 0 = all random")
+    ap.add_argument("--goal_close_bias", type=float, default=0.0,
+                    help="skew the training goal-distance draw toward SMALL h (more close-to-goal "
+                         "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
+                         "Applied to train only; val stays uniform for a comparable metric.")
     ap.add_argument("--hidden_dim", type=int, default=512)
     ap.add_argument("--embed_dim", type=int, default=192,
                     help="latent width feeding aggregator + heads (ViT-tiny cls is projected to this)")
@@ -425,9 +441,9 @@ def main():
     # instead: n_starts / context_len windows. Re-randomized each epoch (RandomSampler), so over
     # many epochs all starts are still seen.
     train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
-                              args.H_max, args.context_len, args.p_shared)
+                              args.H_max, args.context_len, args.p_shared, args.goal_close_bias)
     val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
-                            args.H_max, args.context_len, args.p_shared)
+                            args.H_max, args.context_len, args.p_shared, 0.0)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))

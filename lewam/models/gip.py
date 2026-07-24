@@ -996,8 +996,32 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         self.cem_iter = int(kw.pop("cem_iter", 4))
         self.cem_H = int(kw.pop("cem_H", 5))         # plan horizon (blocks)
         self.cem_std = float(kw.pop("cem_std", 1.0))  # init std (z-scored actions ~ unit var)
+        self.cem_warm = bool(kw.pop("cem_warm", False))  # seed CEM mean from the reactive gc_head plan
+        # cem_state: 'c' feeds dynamics the AGGREGATED context c=Aggr([z..]) it was TRAINED on
+        # (rollout re-aggregates the sliding window each step -- the faithful world-model loop);
+        # 'z' feeds the raw last latent (the old shortcut, kept as an ablation to measure the gap).
+        self.cem_state = str(kw.pop("cem_state", "c"))
         super().__init__(model, cfg, *a, **kw)
-        self.type = "lewam_unified_cem"
+        assert self.ctx_cap and self.ctx_cap > 0, "unified_cem needs ctx_cap>0 (the trained context_len)"
+        self.type = f"lewam_unified_cem_{self.cem_state}" + ("_warm" if self.cem_warm else "")
+
+    def _agg_c(self, win, vlen):
+        """Context at each row's last valid position: c = aggregate(win)[vlen-1]. win (B,cap,D)
+        left-aligned (real/imagined content in [0:vlen], zero-pad after; causal so the pad is
+        never attended by the read position). Returns (B, D)."""
+        c = self.model.aggregate(win)                                    # (B, cap, D)
+        return c[torch.arange(win.shape[0], device=win.device), (vlen - 1).clamp(min=0)]
+
+    def _slide(self, win, vlen, z, cap):
+        """Append latent z to the sliding window: rows with room place z at index vlen; full rows
+        shift left (drop oldest) and put z last. Keeps win (B,cap,D) left-aligned, newest last."""
+        B = win.shape[0]
+        full = (vlen >= cap)
+        win_shift = torch.cat([win[:, 1:], z[:, None]], dim=1)           # (B,cap,D) drop idx0, add z
+        win_place = win.clone()
+        win_place[torch.arange(B, device=win.device), vlen.clamp(max=cap - 1)] = z
+        win_new = torch.where(full[:, None, None], win_shift, win_place)
+        return win_new, torch.clamp(vlen + 1, max=cap)
 
     @torch.no_grad()
     def get_action(self, info_dict, **kw):
@@ -1007,11 +1031,14 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         if self._action_buffer is None:
             self._action_buffer = [deque() for _ in range(n)]
             self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(n)]
         flush = info_dict.pop("_needs_flush", None)
         if flush is not None:
             for i in range(n):
                 if flush[i]:
                     self._action_buffer[i].clear()
+                    self._lat_buf[i].clear()                             # new episode: fresh history
                     self._steps_left[i] = self.horizon0
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
@@ -1022,27 +1049,59 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
             gpx = info_dict["goal"][replan]
             gpx = gpx[:, -1] if gpx.ndim == 5 else gpx
             cpx = px[:, -1] if px.ndim == 5 else px
-            z0 = self.model.encode(cpx.to(dev).float())        # (R, D) current latent
-            zg = self.model.encode(gpx.to(dev).float())        # (R, D) goal latent
-            R, D = z0.shape
+            z_new = self.model.encode(cpx.to(dev).float())               # (R, D) current latent
+            zg = self.model.encode(gpx.to(dev).float())                 # (R, D) goal latent
+            for row, i in enumerate(replan):
+                self._lat_buf[i].append(z_new[row])                     # cache the REAL latent
+            R, D = z_new.shape
             K, M, H, bd = self.cem_K, self.cem_M, self.cem_H, self.block_dim
-            mean = torch.zeros(R, H, bd, device=dev)
-            std = torch.full((R, H, bd), self.cem_std, device=dev)
-            z0k = z0.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
+            cap = int(self.ctx_cap)                                     # trained context window (=context_len)
+            # initial window = last `cap` REAL latents per env, left-aligned in a (R,cap,D) buffer
+            win0 = torch.zeros(R, cap, D, device=dev)
+            vlen0 = torch.empty(R, dtype=torch.long, device=dev)
+            for row, i in enumerate(replan):
+                w = torch.stack(self._lat_buf[i][-cap:], dim=0)         # (li, D), li<=cap
+                win0[row, : w.shape[0]] = w
+                vlen0[row] = w.shape[0]
             zgk = zg.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
+            # warm-start mean: AR-roll gc_head + dynamics through the SAME windowed context (R-batched)
+            if self.cem_warm:
+                steps = np.maximum(self._steps_left[replan], 1.0).astype(np.float64)
+                win, vlen, _warm = win0.clone(), vlen0.clone(), []
+                for _h in range(H):
+                    hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                      device=dev, dtype=torch.float32)
+                    c = self._agg_c(win, vlen)                          # (R, D) trained context
+                    a_h = self.model.gc_head(c, zg, hn)                 # (R, bd)
+                    _warm.append(a_h)
+                    win, vlen = self._slide(win, vlen, self.model.dynamics(c, a_h, zg), cap)
+                    steps = np.maximum(steps - 1.0, 1.0)
+                mean = torch.stack(_warm, dim=1)                        # (R, H, bd)
+            else:
+                mean = torch.zeros(R, H, bd, device=dev)
+            std = torch.full((R, H, bd), self.cem_std, device=dev)
+            win0k = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D)
+            vlen0k = vlen0.unsqueeze(1).expand(R, K).reshape(R * K)
+            arangeRK = torch.arange(R * K, device=dev)
             for _ in range(self.cem_iter):
                 samp = mean.unsqueeze(1) + std.unsqueeze(1) * torch.randn(R, K, H, bd, device=dev)
-                z = z0k
+                sampk = samp.reshape(R * K, H, bd)
+                win, vlen = win0k.clone(), vlen0k.clone()
                 cost = torch.zeros(R * K, device=dev)
                 for h in range(H):
-                    z = self.model.dynamics(z, samp[:, :, h].reshape(R * K, bd), zgk)  # (R*K, D)
-                    cost = cost + ((z - zgk) ** 2).sum(-1)
+                    if self.cem_state == "z":                          # ablation: raw last latent
+                        c = win[arangeRK, (vlen - 1).clamp(min=0)]
+                    else:                                              # correct: aggregated context
+                        c = self._agg_c(win, vlen)
+                    z_nx = self.model.dynamics(c, sampk[:, h], zgk)    # (R*K, D)
+                    cost = cost + ((z_nx - zgk) ** 2).sum(-1)
+                    win, vlen = self._slide(win, vlen, z_nx, cap)
                 cost = cost.reshape(R, K)
-                idx = cost.argsort(dim=1)[:, :M]                                        # (R, M) best
+                idx = cost.argsort(dim=1)[:, :M]                       # (R, M) best
                 elites = torch.gather(samp, 1, idx[:, :, None, None].expand(R, M, H, bd))
                 mean = elites.mean(1)
                 std = elites.std(1).clamp(min=1e-3)
-            z_blk = mean[:, 0]                                                          # (R, bd) exec a_0
+            z_blk = mean[:, 0]                                          # (R, bd) execute a_0
             raw = (z_blk.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
             raw = raw.reshape(R, self.action_block, self.action_dim).cpu()
             for row, i in enumerate(replan):
@@ -1116,7 +1175,10 @@ def build_policy(cfg, model, adim, process, transform):
             return LeWAMUnifiedCEMPolicy(
                 cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
                 cem_iter=int(ge.get("cem_iter", 4)), cem_H=int(ge.get("cem_H", 5)),
-                cem_std=float(ge.get("cem_std", 1.0)), **common)
+                cem_std=float(ge.get("cem_std", 1.0)),
+                cem_warm=bool(ge.get("cem_warm", False)),
+                cem_state=str(ge.get("cem_state", "c")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config): the
         # aggregator never saw longer sequences at train, so eval matches it. Old checkpoints
         # (goal-terminated-window trainer, no context_len key) keep full-history behaviour (0).
