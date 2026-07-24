@@ -96,7 +96,15 @@ def sample_eval_episodes(cfg, dataset):
     max_start = lengths - cfg.eval.goal_offset_steps - 1
     max_start_by_ep = {e: max_start[i] for i, e in enumerate(ep_indices)}
     max_start_per_row = np.array([max_start_by_ep[e] for e in ep_idx])
-    valid = np.nonzero(step_idx <= max_start_per_row)[0]
+    # to_end: TASK-COMPLETION mode -- the goal is each episode's LAST frame (task done), not a fixed
+    # sub-goal. start = max_start so start + goal_offset = len-1 (the end); goal_offset is then the
+    # horizon before the end. One eligible start per episode (needs len > goal_offset); shorter
+    # episodes are dropped. Default off = the original random-start sampling (fixed offset ahead).
+    to_end = bool(cfg.get("gip_eval", {}).get("to_end", False))
+    if to_end:
+        valid = np.nonzero((step_idx == max_start_per_row) & (max_start_per_row >= 0))[0]
+    else:
+        valid = np.nonzero(step_idx <= max_start_per_row)[0]
 
     g = np.random.default_rng(cfg.seed)
     picks = np.sort(valid[g.choice(len(valid) - 1, size=cfg.eval.num_eval, replace=False)])
