@@ -283,6 +283,12 @@ def main():
                          "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
                          "Applied to train only; val stays uniform for a comparable metric.")
     ap.add_argument("--hidden_dim", type=int, default=512)
+    ap.add_argument("--head_type", type=str, default="mse",
+                    help="gc_head output: 'mse' (deterministic point, MSE loss) or 'gmm' (K-component "
+                         "diagonal-Gaussian mixture density net, mixture-NLL loss). GMM captures "
+                         "multimodal actions and can be SAMPLED for policy-proposal planning.")
+    ap.add_argument("--n_mix", type=int, default=5,
+                    help="number of mixture components when --head_type gmm")
     ap.add_argument("--embed_dim", type=int, default=192,
                     help="latent width feeding aggregator + heads (ViT-tiny cls is projected to this)")
     ap.add_argument("--encoder_size", type=str, default="tiny",
@@ -411,7 +417,8 @@ def main():
                          agg_depth=args.agg_depth, agg_heads=args.agg_heads,
                          agg_residual=args.agg_residual, agg_gate=args.agg_gate,
                          agg_action_cond=args.agg_action_cond,
-                         dyn_goal_cond=not args.dyn_no_goal).to(device)
+                         dyn_goal_cond=not args.dyn_no_goal,
+                         head_type=args.head_type, n_mix=args.n_mix).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -543,6 +550,7 @@ def main():
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
         w_straight=args.w_straight, straight_target=args.straight_target,
+        head_type=args.head_type, n_mix=args.n_mix,
         ablate_dynamics=args.ablate_dynamics,
         dyn_action_from_policy=args.dyn_action_from_policy,
         dyn_policy_schedule=args.dyn_policy_schedule,
@@ -599,18 +607,23 @@ def main():
             a_prev[:, 1:] = actions[:, :-1]           # a_{p-1}; position 0 gets the null embedding
             a_prev_mask = valid & (pos >= 1)
 
-        a_pred, z_pred = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
-                                           dyn_action_mix=(dyn_mix if train else 0.0),
-                                           dyn_action_detach=args.dyn_policy_detach)
+        a_out, z_pred = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
+                                          dyn_action_mix=(dyn_mix if train else 0.0),
+                                          dyn_action_detach=args.dyn_policy_detach)
 
         loss_mask = valid.unsqueeze(-1).float()
         n_valid = valid.sum().clamp(min=1)
-        loss_act = ((a_pred - actions) ** 2 * loss_mask).sum() / (n_valid * actions.shape[-1])
+        # per-sample action loss: MSE (mse head) or mixture NLL (gmm head). Float for NLL stability
+        # (logsumexp/exp under bf16 autocast is lossy). Masked to valid decision points.
+        aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
+                                          actions.reshape(B * max_pos, actions.shape[-1]).float())
+        loss_act = (aloss * valid.reshape(-1).float()).sum() / n_valid
         loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)  # no stop-grad (like split)
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)
-            z_cyc = model.dynamics(c.reshape(B * max_pos, D), a_pred.reshape(B * max_pos, -1),
+            a_pt = model.gc_head.point(a_out.reshape(B * max_pos, -1))   # policy action (mixture mean for gmm)
+            z_cyc = model.dynamics(c.reshape(B * max_pos, D), a_pt,
                                    z_goal.reshape(B * max_pos, D)).reshape(B, max_pos, D)
             loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * loss_mask).sum() / (n_valid * D)
         # SIGReg over the valid decision-point latents only -- the split regularizes z_t, not the

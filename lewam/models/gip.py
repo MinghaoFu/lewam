@@ -271,6 +271,7 @@ def load_lewam_unified_model(run_name, which="best"):
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
         dyn_goal_cond=bool(cfg.get("dyn_goal_cond", True)),
+        head_type=str(cfg.get("head_type", "mse")), n_mix=int(cfg.get("n_mix", 5)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
@@ -818,7 +819,7 @@ class LeWAMSplitPolicy(BasePolicy):
                                   device=dev, dtype=torch.float32)
             if self.ablate_horizon:
                 h_norm = torch.zeros_like(h_norm)
-            z_blk = self.model.gc_head(z_t, z_g, h_norm)   # (R, block_dim) z-scored
+            z_blk = self.model.gc_head.point(self.model.gc_head(z_t, z_g, h_norm))   # (R, block_dim) z-scored (mixture mean for gmm)
             raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
                    * self._astd + self._amean)             # un-z-score per raw dim
             raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
@@ -972,7 +973,7 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
                                   device=dev, dtype=torch.float32)
             if self.ablate_horizon:
                 h_norm = torch.zeros_like(h_norm)
-            z_blk = self.model.gc_head(c_last, z_g, h_norm)        # (R, blk) z-scored
+            z_blk = self.model.gc_head.point(self.model.gc_head(c_last, z_g, h_norm))   # (R, blk) z-scored (mixture mean for gmm)
             for row, i in enumerate(replan):
                 self._last_blk[i] = z_blk[row].detach()            # z-scored, next frame's prev
             raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
@@ -1085,7 +1086,7 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                     hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                       device=dev, dtype=torch.float32)
                     c = self._agg_c(win, vlen)                          # (R, D) trained context
-                    a_h = self.model.gc_head(c, zg, hn)                 # (R, bd)
+                    a_h = self.model.gc_head.point(self.model.gc_head(c, zg, hn))   # (R, bd) mixture mean for gmm
                     _warm.append(a_h)
                     win, vlen = self._slide(win, vlen, self.model.dynamics(c, a_h, zg), cap)
                     steps = np.maximum(steps - 1.0, 1.0)

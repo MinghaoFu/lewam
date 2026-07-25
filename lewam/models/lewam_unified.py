@@ -107,7 +107,7 @@ class LeWAMUnified(nn.Module):
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
                  agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False,
-                 dyn_goal_cond=True):
+                 dyn_goal_cond=True, head_type="mse", n_mix=5):
         super().__init__()
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
@@ -124,7 +124,8 @@ class LeWAMUnified(nn.Module):
             self.gate_proj = nn.Linear(embed_dim, embed_dim)
             nn.init.zeros_(self.gate_proj.bias)
         self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
-                              hidden_dim=hidden_dim, dropout=dropout)
+                              hidden_dim=hidden_dim, dropout=dropout,
+                              head_type=head_type, n_mix=n_mix)
         # dynamics goal-conditioning is independent of the gc_head's: the reactive policy stays
         # goal-conditioned; dyn_goal_cond=False makes ONLY the dynamics a pure forward model.
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
@@ -163,19 +164,21 @@ class LeWAMUnified(nn.Module):
         cf = c.reshape(B * L, D)                                          # flatten for the per-vector heads
         gf = z_goal.reshape(B * L, D)
         hf = h_norm.reshape(B * L)
-        a_pred_flat = self.gc_head(cf, gf, hf)                            # (B*L, action_dim)
-        a_pred = a_pred_flat.reshape(B, L, -1)
+        a_out_flat = self.gc_head(cf, gf, hf)                            # (B*L, out_dim) RAW head output
+        a_out = a_out_flat.reshape(B, L, -1)                             # params (gmm) or action (mse)
         af_gt = a_t.reshape(B * L, a_t.shape[-1])
         if dyn_action_mix > 0.0:
-            a_src = a_pred_flat.detach() if dyn_action_detach else a_pred_flat
+            # dynamics is fed the actual POLICY ACTION (mixture mean for gmm, point for mse), never raw params
+            a_pol = self.gc_head.point(a_out_flat)                       # (B*L, action_dim)
+            a_src = a_pol.detach() if dyn_action_detach else a_pol
             af = dyn_action_mix * a_src.to(af_gt.dtype) + (1.0 - dyn_action_mix) * af_gt
         else:
             af = af_gt
         z_pred = self.dynamics(cf, af, gf).reshape(B, L, D)
-        return a_pred, z_pred
+        return a_out, z_pred                                             # a_out: consume via gc_head.action_loss
 
     def gc_action(self, seq, z_goal, h_norm, a_prev=None, a_prev_mask=None):
         """Reactive LAST-position action from a sequence (the eval path; arm-agnostic).
         seq: (B,L,D); z_goal: (B,D); h_norm: (B,). Returns a_pred: (B, action_dim)."""
         c_last = self.aggregate(seq, a_prev, a_prev_mask)[:, -1]          # (B,D)
-        return self.gc_head(c_last, z_goal, h_norm)
+        return self.gc_head.point(self.gc_head(c_last, z_goal, h_norm))   # point action (mixture mean for gmm)
