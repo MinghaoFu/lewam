@@ -45,11 +45,16 @@ class GCHead(nn.Module):
 
 
 class GoalCondDynamics(nn.Module):
-    """cat[z_t, a_t, z_goal] -> z_{t+1}."""
+    """cat[z_t, a_t, z_goal] -> z_{t+1}. With goal_cond=False it becomes a PURE forward model
+    cat[z_t, a_t] -> z_{t+1} (no goal input) -- the honest world model for planning: a
+    goal-conditioned dynamics can drift toward z_goal using the goal input, partly ignoring a_t,
+    which makes a CEM/planning cost surface flat and exploitable. forward() keeps the 3-arg
+    signature either way (z_goal is simply unused when goal_cond=False) so callers don't change."""
 
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512):
+    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512, goal_cond=True):
         super().__init__()
-        in_dim = 2 * z_dim + action_dim
+        self.goal_cond = bool(goal_cond)
+        in_dim = (2 * z_dim + action_dim) if self.goal_cond else (z_dim + action_dim)
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -61,7 +66,8 @@ class GoalCondDynamics(nn.Module):
         )
 
     def forward(self, z_t, a_t, z_goal):
-        return self.net(torch.cat([z_t, a_t, z_goal], dim=-1))
+        x = torch.cat([z_t, a_t, z_goal], dim=-1) if self.goal_cond else torch.cat([z_t, a_t], dim=-1)
+        return self.net(x)
 
 
 class LeWAMSplit(nn.Module):

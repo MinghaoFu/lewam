@@ -312,6 +312,11 @@ def main():
     ap.add_argument("--agg_action_cond", action="store_true",
                     help="condition each token z_tau (AdaLN) on the embedded previous action "
                          "a_{tau-1} (null-action at the sequence start); conditioning, NOT tokens")
+    ap.add_argument("--dyn_no_goal", action="store_true",
+                    help="drop z_goal from the DYNAMICS head -> a pure forward model f(z_t,a_t) "
+                         "(the gc_head stays goal-conditioned). A goal-conditioned dynamics can "
+                         "drift toward z_goal ignoring the action, flattening the planning cost "
+                         "surface; the pure forward model is the honest world model for CEM/planning.")
     # dynamics-on-policy-action arm: feed the gc_head's PREDICTED action into the dynamics head
     # (a convex mix with the ground-truth action, weight alpha ramped by a schedule), closing the
     # train/rollout covariate gap. The action is still BC-supervised on ground truth, so it stays a
@@ -393,7 +398,8 @@ def main():
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          agg_depth=args.agg_depth, agg_heads=args.agg_heads,
                          agg_residual=args.agg_residual, agg_gate=args.agg_gate,
-                         agg_action_cond=args.agg_action_cond).to(device)
+                         agg_action_cond=args.agg_action_cond,
+                         dyn_goal_cond=not args.dyn_no_goal).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -519,7 +525,7 @@ def main():
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
         agg_residual=args.agg_residual, agg_gate=args.agg_gate,
-        agg_action_cond=args.agg_action_cond,
+        agg_action_cond=args.agg_action_cond, dyn_goal_cond=not args.dyn_no_goal,
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,

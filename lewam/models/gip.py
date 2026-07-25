@@ -270,6 +270,7 @@ def load_lewam_unified_model(run_name, which="best"):
         agg_residual=bool(cfg.get("agg_residual", False)),
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
+        dyn_goal_cond=bool(cfg.get("dyn_goal_cond", True)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "

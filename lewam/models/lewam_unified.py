@@ -106,7 +106,8 @@ class LeWAMUnified(nn.Module):
 
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
-                 agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False):
+                 agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False,
+                 dyn_goal_cond=True):
         super().__init__()
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
@@ -124,8 +125,10 @@ class LeWAMUnified(nn.Module):
             nn.init.zeros_(self.gate_proj.bias)
         self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
                               hidden_dim=hidden_dim, dropout=dropout)
+        # dynamics goal-conditioning is independent of the gc_head's: the reactive policy stays
+        # goal-conditioned; dyn_goal_cond=False makes ONLY the dynamics a pure forward model.
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
-                                         hidden_dim=hidden_dim)
+                                         hidden_dim=hidden_dim, goal_cond=bool(dyn_goal_cond))
 
     def encode(self, pixels):
         """pixels: (N, 3, H, W) -> (N, embed_dim) cls latent."""
