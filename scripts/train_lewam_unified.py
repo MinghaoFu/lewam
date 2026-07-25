@@ -79,13 +79,26 @@ def durable_sync(files, dst_dir):
 # --------------------------------------------------------------------------- #
 # Data loading (identical to train_lewam_gc.py)                                #
 # --------------------------------------------------------------------------- #
-def preload_frames(base, img_t, act_mean, act_std, frameskip, max_eps=None):
+def preload_flat(base, img_t, act_mean, act_std, frameskip, max_eps=None):
+    """Preload episodes DIRECTLY into ONE preallocated flat frame tensor (never a per-episode
+    frame_list), so peak host RAM stays ~1x the frames. The old frame_list + separate flat-copy
+    design doubled it: the freed per-episode tensors are not returned to the OS before the flat
+    tensor is allocated and filled, so peak ~= 2x the frames and a screening pod sized for ~1x
+    OOM-kills inside the copy. Here the flat buffer is a lazily-committed np.empty (pages commit as
+    written), each episode is decoded into its slice then dropped, and A_frame/t_gidx/maxh are built
+    in the same pass. Returns (Frames, A_frame, t_gidx, maxh), identical semantics to the old
+    preload_frames + flatten_for_training pair.
+
+      A_frame[base+t] = action block AT obs-step t (the action leading INTO frame t+1); zero at the
+      episode's last frame. t_gidx = valid START frames; maxh = frames from that start to the
+      episode's last frame (the max goal distance sampleable there)."""
     act_mean_t = torch.tensor(act_mean, dtype=torch.float32)
     act_std_t = torch.tensor(act_std, dtype=torch.float32)
     n_eps = len(base.lengths) if max_eps is None else min(max_eps, len(base.lengths))
-    frame_list, act_list = [], []
-    t0 = time.time()
-    for ep in range(n_eps):
+    # Upper bound on total frames (n_keep <= n_obs+1 always), from lengths alone -- no pixel load.
+    upper = int(sum(int(base.lengths[ep]) // frameskip + 1 for ep in range(n_eps)))
+
+    def _load_ep(ep):
         L = int(base.lengths[ep])
         sl = base._load_slice(ep, 0, L)
         pix = sl["pixels"]
@@ -95,51 +108,35 @@ def preload_frames(base, img_t, act_mean, act_std, frameskip, max_eps=None):
         raw_act = raw_act if torch.is_tensor(raw_act) else torch.as_tensor(np.asarray(raw_act))
         pp = img_t({"pixels": pix})["pixels"].float()
         n_obs = L // frameskip
-        a = raw_act[:n_obs * frameskip].reshape(n_obs, frameskip * raw_act.shape[1])
-        a = a.reshape(n_obs, frameskip, raw_act.shape[1])
+        a = raw_act[:n_obs * frameskip].reshape(n_obs, frameskip, raw_act.shape[1])
         a = (a - act_mean_t) / act_std_t
-        a = a.reshape(n_obs, frameskip * raw_act.shape[1])
+        a = a.reshape(n_obs, frameskip * raw_act.shape[1]).half()
+        return pp, a, n_obs
+
+    pp0, a0, _ = _load_ep(0)
+    C, H, W = pp0.shape[1:]
+    adim = a0.shape[1]
+    Frames_np = np.empty((upper, C, H, W), dtype=np.float16)   # anonymous mmap -> lazy commit
+    A_frame_np = np.zeros((upper, adim), dtype=np.float16)
+    t_gidx, maxh_list = [], []
+    off = 0
+    t0 = time.time()
+    for ep in range(n_eps):
+        pp, a, n_obs = (pp0, a0, a0.shape[0]) if ep == 0 else _load_ep(ep)
         n_keep = min(pp.shape[0], n_obs + 1)
-        frame_list.append(pp[:n_keep].half())
-        act_list.append(a.half())
+        Frames_np[off:off + n_keep] = pp[:n_keep].half().numpy()
+        na = min(n_obs, n_keep)
+        A_frame_np[off:off + na] = a[:na].numpy()
+        last = n_keep - 1
+        for t in range(min(n_obs, n_keep - 1)):
+            t_gidx.append(off + t)
+            maxh_list.append(last - t)
+        off += n_keep
         if (ep + 1) % 500 == 0:
             print(f"[lewam-uni] preload {ep+1}/{n_eps} ({time.time()-t0:.0f}s)", flush=True)
-    print(f"[lewam-uni] preload DONE {n_eps} eps in {time.time()-t0:.0f}s", flush=True)
-    return frame_list, act_list
-
-
-def flatten_for_training(frame_list, act_list, device):
-    """Build flat Frames tensor + a per-FRAME action tensor + per-start index (t, max horizon).
-    Preallocate + free-as-you-go so peak RAM stays ~1x the frames (torch.cat would double it)."""
-    offsets, off = [], 0
-    for f in frame_list:
-        offsets.append(off)
-        off += f.shape[0]
-    total = off
-    C, H, W = frame_list[0].shape[1:]
-    Frames = torch.empty((total, C, H, W), dtype=frame_list[0].dtype)
-    for ep in range(len(frame_list)):
-        f = frame_list[ep]
-        Frames[offsets[ep]:offsets[ep] + f.shape[0]].copy_(f)
-        frame_list[ep] = None  # free the source episode tensor incrementally
-    if device != "cpu":
-        Frames = Frames.to(device)
-    # A_frame[base+t] = action block AT obs-step t (== the action that led INTO frame t+1). Zero at
-    # the episode's last frame. t_gidx = valid START frames; maxh = frames from the start to the
-    # episode end (the max goal distance sampleable from that start).
-    adim = act_list[0].shape[1]
-    A_frame = torch.zeros((total, adim), dtype=act_list[0].dtype)
-    t_gidx, maxh_list = [], []
-    for ep, a in enumerate(act_list):
-        n_obs = a.shape[0]
-        n_fr = (offsets[ep + 1] if ep + 1 < len(offsets) else total) - offsets[ep]
-        base = offsets[ep]
-        last = n_fr - 1
-        A_frame[base:base + min(n_obs, n_fr)] = a[: min(n_obs, n_fr)]
-        n_valid = min(n_obs, n_fr - 1)
-        for t in range(n_valid):
-            t_gidx.append(base + t)
-            maxh_list.append(last - t)   # frames from t to the episode end
+    print(f"[lewam-uni] preload DONE {n_eps} eps in {time.time()-t0:.0f}s (flat, ~1x)", flush=True)
+    Frames = torch.from_numpy(Frames_np[:off])       # zero-copy; keeps Frames_np alive
+    A_frame = torch.from_numpy(A_frame_np[:off])
     return (Frames, A_frame,
             torch.tensor(t_gidx, dtype=torch.long),
             torch.tensor(maxh_list, dtype=torch.long))
@@ -438,10 +435,8 @@ def main():
         else:
             print(f"[lewam-uni] frames-cache MISS ({_fp}) -> classic preload", flush=True)
     if Frames is None:
-        frame_list, act_list = preload_frames(base, img_t, act_mean, act_std,
-                                              frameskip, max_eps=max_eps)
-        Frames, A_frame, t_gidx, maxh = flatten_for_training(frame_list, act_list, "cpu")
-        del frame_list
+        Frames, A_frame, t_gidx, maxh = preload_flat(base, img_t, act_mean, act_std,
+                                                     frameskip, max_eps=max_eps)
     n_starts = t_gidx.shape[0]
     print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
 
