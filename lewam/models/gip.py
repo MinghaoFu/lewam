@@ -1015,6 +1015,9 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         # (max feedback); True executes the ENTIRE optimized H-block plan before replanning (LeWM's
         # scheme -- replan cadence = the horizon, open-loop within it).
         self.cem_exec_full = bool(kw.pop("cem_exec_full", False))
+        # 'cem' (default) = Gaussian sample+refine around the warm-start; 'policy' = sample K candidate
+        # sequences from the (GMM) head and keep the WM-verified best (on-manifold, no refinement).
+        self.cem_propose = str(kw.pop("cem_propose", "cem"))
         super().__init__(model, cfg, *a, **kw)
         assert self.ctx_cap and self.ctx_cap > 0, "unified_cem needs ctx_cap>0 (the trained context_len)"
         self.type = f"lewam_unified_cem_{self.cem_state}" + ("_warm" if self.cem_warm else "")
@@ -1078,43 +1081,68 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 win0[row, : w.shape[0]] = w
                 vlen0[row] = w.shape[0]
             zgk = zg.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
-            # warm-start mean: AR-roll gc_head + dynamics through the SAME windowed context (R-batched)
-            if self.cem_warm:
-                steps = np.maximum(self._steps_left[replan], 1.0).astype(np.float64)
-                win, vlen, _warm = win0.clone(), vlen0.clone(), []
+            # ---- propose candidate H-block plans, keep the WM-verified best -> `mean` (R,H,bd) ----
+            if self.cem_propose == "policy":
+                # POLICY-PROPOSAL MPC: sample K sequences from the (GMM) head AUTOREGRESSIVELY, roll each
+                # through the dynamics, score sum ||z_h - z_goal||^2, keep the best per env. No Gaussian
+                # noise, no refinement -> candidates stay on the policy's ACTION MANIFOLD (where the WM is
+                # accurate, per the diagnostic), so the verify step is honest and can't be exploited.
+                # Needs a stochastic head (gmm); an mse head samples its point K times (no diversity ->
+                # reduces to reactive).
+                win = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D).clone()
+                vlen = vlen0.unsqueeze(1).expand(R, K).reshape(R * K).clone()
+                steps = np.repeat(np.maximum(self._steps_left[replan], 1.0).astype(np.float64), K)  # (R*K,)
+                cost = torch.zeros(R * K, device=dev); acts = []
                 for _h in range(H):
                     hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                       device=dev, dtype=torch.float32)
-                    c = self._agg_c(win, vlen)                          # (R, D) trained context
-                    a_h = self.model.gc_head.point(self.model.gc_head(c, zg, hn))   # (R, bd) mixture mean for gmm
-                    _warm.append(a_h)
-                    win, vlen = self._slide(win, vlen, self.model.dynamics(c, a_h, zg), cap)
-                    steps = np.maximum(steps - 1.0, 1.0)
-                mean = torch.stack(_warm, dim=1)                        # (R, H, bd)
-            else:
-                mean = torch.zeros(R, H, bd, device=dev)
-            std = torch.full((R, H, bd), self.cem_std, device=dev)
-            win0k = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D)
-            vlen0k = vlen0.unsqueeze(1).expand(R, K).reshape(R * K)
-            arangeRK = torch.arange(R * K, device=dev)
-            for _ in range(self.cem_iter):
-                samp = mean.unsqueeze(1) + std.unsqueeze(1) * torch.randn(R, K, H, bd, device=dev)
-                sampk = samp.reshape(R * K, H, bd)
-                win, vlen = win0k.clone(), vlen0k.clone()
-                cost = torch.zeros(R * K, device=dev)
-                for h in range(H):
-                    if self.cem_state == "z":                          # ablation: raw last latent
-                        c = win[arangeRK, (vlen - 1).clamp(min=0)]
-                    else:                                              # correct: aggregated context
-                        c = self._agg_c(win, vlen)
-                    z_nx = self.model.dynamics(c, sampk[:, h], zgk)    # (R*K, D)
+                    c = self._agg_c(win, vlen)                          # (R*K, D)
+                    a_h = self.model.gc_head.sample(self.model.gc_head(c, zgk, hn), 1).squeeze(1)  # (R*K, bd)
+                    acts.append(a_h)
+                    z_nx = self.model.dynamics(c, a_h, zgk)             # (R*K, D)
                     cost = cost + ((z_nx - zgk) ** 2).sum(-1)
                     win, vlen = self._slide(win, vlen, z_nx, cap)
-                cost = cost.reshape(R, K)
-                idx = cost.argsort(dim=1)[:, :M]                       # (R, M) best
-                elites = torch.gather(samp, 1, idx[:, :, None, None].expand(R, M, H, bd))
-                mean = elites.mean(1)
-                std = elites.std(1).clamp(min=1e-3)
+                    steps = np.maximum(steps - 1.0, 1.0)
+                best = cost.reshape(R, K).argmin(dim=1)                 # (R,) WM-verified best candidate
+                mean = torch.stack(acts, dim=1).reshape(R, K, H, bd)[torch.arange(R, device=dev), best]  # (R,H,bd)
+            else:
+                # warm-start mean: AR-roll gc_head + dynamics through the SAME windowed context (R-batched)
+                if self.cem_warm:
+                    steps = np.maximum(self._steps_left[replan], 1.0).astype(np.float64)
+                    win, vlen, _warm = win0.clone(), vlen0.clone(), []
+                    for _h in range(H):
+                        hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                          device=dev, dtype=torch.float32)
+                        c = self._agg_c(win, vlen)                      # (R, D) trained context
+                        a_h = self.model.gc_head.point(self.model.gc_head(c, zg, hn))   # (R, bd) mixture mean for gmm
+                        _warm.append(a_h)
+                        win, vlen = self._slide(win, vlen, self.model.dynamics(c, a_h, zg), cap)
+                        steps = np.maximum(steps - 1.0, 1.0)
+                    mean = torch.stack(_warm, dim=1)                    # (R, H, bd)
+                else:
+                    mean = torch.zeros(R, H, bd, device=dev)
+                std = torch.full((R, H, bd), self.cem_std, device=dev)
+                win0k = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D)
+                vlen0k = vlen0.unsqueeze(1).expand(R, K).reshape(R * K)
+                arangeRK = torch.arange(R * K, device=dev)
+                for _ in range(self.cem_iter):
+                    samp = mean.unsqueeze(1) + std.unsqueeze(1) * torch.randn(R, K, H, bd, device=dev)
+                    sampk = samp.reshape(R * K, H, bd)
+                    win, vlen = win0k.clone(), vlen0k.clone()
+                    cost = torch.zeros(R * K, device=dev)
+                    for h in range(H):
+                        if self.cem_state == "z":                      # ablation: raw last latent
+                            c = win[arangeRK, (vlen - 1).clamp(min=0)]
+                        else:                                          # correct: aggregated context
+                            c = self._agg_c(win, vlen)
+                        z_nx = self.model.dynamics(c, sampk[:, h], zgk)  # (R*K, D)
+                        cost = cost + ((z_nx - zgk) ** 2).sum(-1)
+                        win, vlen = self._slide(win, vlen, z_nx, cap)
+                    cost = cost.reshape(R, K)
+                    idx = cost.argsort(dim=1)[:, :M]                   # (R, M) best
+                    elites = torch.gather(samp, 1, idx[:, :, None, None].expand(R, M, H, bd))
+                    mean = elites.mean(1)
+                    std = elites.std(1).clamp(min=1e-3)
             # execute a_0 only (replan every frame), or the whole H-block plan (LeWM receding MPC)
             n_exec = self.cem_H if self.cem_exec_full else 1
             for h in range(n_exec):
@@ -1197,6 +1225,7 @@ def build_policy(cfg, model, adim, process, transform):
                 cem_warm=bool(ge.get("cem_warm", False)),
                 cem_state=str(ge.get("cem_state", "c")),
                 cem_exec_full=bool(ge.get("cem_exec_full", False)),
+                cem_propose=str(ge.get("cem_propose", "cem")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config): the
         # aggregator never saw longer sequences at train, so eval matches it. Old checkpoints
