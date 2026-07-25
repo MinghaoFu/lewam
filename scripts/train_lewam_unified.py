@@ -344,6 +344,15 @@ def main():
                     help="disable dynamics loss (w_dyn=0), keep gc_head only")
     ap.add_argument("--w_cyc", type=float, default=0.0,
                     help="FDM-IDM consistency loss weight (0=without, 1.0=with)")
+    ap.add_argument("--w_straight", type=float, default=0.0,
+                    help="temporal-straightening loss weight: w*(1 - cos(v_t, v_{t+1})) over "
+                         "consecutive latent velocities within each context window (v_t=z_{t+1}-z_t). "
+                         "Straightens the latent dynamics -> better rollout/cost geometry/subgoal "
+                         "interpolation. 0=off. Computed on the UNFLATTENED per-window latents (no "
+                         "cross-sequence bleed); needs context_len>=3 (>=4 recommended).")
+    ap.add_argument("--straight_target", type=str, default="z",
+                    help="what to straighten: 'z' (encoder latents; traditional AND the "
+                         "dynamics-target/cost space) or 'c' (aggregated context). z recommended.")
     # data-pipeline knobs (no effect on loss/model logic)
     ap.add_argument("--num_workers", type=int, default=6)
     ap.add_argument("--prefetch_factor", type=int, default=3)
@@ -358,6 +367,9 @@ def main():
         args.w_dyn = 0.0
     assert args.context_len >= 1 and args.H_max >= 1, "context_len and H_max must be >= 1"
     assert 0.0 <= args.p_shared <= 1.0, "p_shared must be in [0, 1]"
+    assert args.straight_target in ("z", "c"), "straight_target must be 'z' or 'c'"
+    if args.w_straight > 0:
+        assert args.context_len >= 3, "temporal straightening needs context_len>=3 (>=4 recommended)"
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -530,6 +542,7 @@ def main():
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
+        w_straight=args.w_straight, straight_target=args.straight_target,
         ablate_dynamics=args.ablate_dynamics,
         dyn_action_from_policy=args.dyn_action_from_policy,
         dyn_policy_schedule=args.dyn_policy_schedule,
@@ -603,7 +616,25 @@ def main():
         # SIGReg over the valid decision-point latents only -- the split regularizes z_t, not the
         # goal/target frames, and states IS the per-position z_t set here.
         loss_reg = sigreg(states[valid].unsqueeze(0)) if train else torch.zeros((), device=device)
-        return loss_act, loss_dyn, loss_reg, loss_cyc, int(n_valid.item())
+        # temporal straightening: w*(1 - cos(v_t, v_{t+1})) over consecutive latent velocities WITHIN
+        # each window. `seq` is UNFLATTENED (B, T, D) -> velocities never bleed across sequences.
+        # target z (encoder latents, traditional) is also the dynamics-target/cost space, so it
+        # directly straightens what planning rolls and scores; `c` (aggregated context) is an ablation.
+        # Masked to real (non-pad) triples: cos(v_t, v_{t+1}) needs frames t, t+1, t+2 all real.
+        loss_straight = torch.zeros((), device=device)
+        if train and args.w_straight > 0:
+            if args.straight_target == "c":
+                seq = model.aggregate(states, a_prev, a_prev_mask)      # (B, max_pos, D)
+                nreal = n_pos                                          # c: n_pos valid positions
+            else:
+                seq = z_window                                         # (B, max_pos+1, D): frames 0..n_pos real
+                nreal = n_pos + 1
+            v = F.normalize(seq.float()[:, 1:] - seq.float()[:, :-1], dim=-1, eps=1e-6)  # (B,T-1,D)
+            csim = (v[:, 1:] * v[:, :-1]).sum(-1)                       # (B, T-2) cos(v_t, v_{t+1})
+            tpos = torch.arange(csim.shape[1], device=device).unsqueeze(0)
+            vmask = tpos < (nreal.unsqueeze(1) - 2)                     # real triple t,t+1,t+2
+            loss_straight = ((1.0 - csim) * vmask.float()).sum() / vmask.sum().clamp(min=1)
+        return loss_act, loss_dyn, loss_reg, loss_cyc, loss_straight, int(n_valid.item())
 
     # ---- training loop ----
     best_val = float("inf")
@@ -614,13 +645,14 @@ def main():
 
         # ---- train ----
         model.train()
-        tr_act, tr_dyn, tr_reg, tr_cyc, tr_count = 0.0, 0.0, 0.0, 0.0, 0
+        tr_act, tr_dyn, tr_reg, tr_cyc, tr_str, tr_count = 0.0, 0.0, 0.0, 0.0, 0.0, 0
         for window, goals, actions, horizon, n_pos in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss_act, loss_dyn, loss_reg, loss_cyc, nval = run_batch(
+                loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, nval = run_batch(
                     window, goals, actions, horizon, n_pos, train=True, dyn_mix=alpha)
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
-                        + args.w_reg * loss_reg + args.w_cyc * loss_cyc)
+                        + args.w_reg * loss_reg + args.w_cyc * loss_cyc
+                        + args.w_straight * loss_str)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -629,6 +661,7 @@ def main():
             tr_dyn += loss_dyn.item() * nval
             tr_reg += loss_reg.item() * nval
             tr_cyc += loss_cyc.item() * nval
+            tr_str += loss_str.item() * nval
             tr_count += nval
         sched.step()
 
@@ -638,7 +671,7 @@ def main():
         with torch.no_grad():
             for window, goals, actions, horizon, n_pos in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    loss_act, loss_dyn, _, _, nval = run_batch(
+                    loss_act, loss_dyn, _, _, _, nval = run_batch(
                         window, goals, actions, horizon, n_pos, train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
@@ -646,13 +679,15 @@ def main():
 
         tr_a = tr_act / max(tr_count, 1); tr_d = tr_dyn / max(tr_count, 1)
         tr_r = tr_reg / max(tr_count, 1); tr_c = tr_cyc / max(tr_count, 1)
+        tr_s = tr_str / max(tr_count, 1)
         va_a = va_act / max(va_count, 1); va_d = va_dyn / max(va_count, 1)
         lrs = sched.get_last_lr()
         dt = time.time() - t0
         cyc_str = f"  cyc={tr_c:.5f}" if args.w_cyc > 0 else ""
         dyn_str = f"  a={alpha:.2f}" if args.dyn_action_from_policy else ""
+        str_str = f"  straight={tr_s:.4f}(cos~{1-tr_s:.3f})" if args.w_straight > 0 else ""
         print(f"[lewam-uni] ep {ep+1}/{args.epochs}  "
-              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}  "
+              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}  "
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
