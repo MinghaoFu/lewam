@@ -1010,6 +1010,10 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         # (rollout re-aggregates the sliding window each step -- the faithful world-model loop);
         # 'z' feeds the raw last latent (the old shortcut, kept as an ablation to measure the gap).
         self.cem_state = str(kw.pop("cem_state", "c"))
+        # receding-horizon MPC scheme: False (default) executes only a_0 then replans EVERY frame
+        # (max feedback); True executes the ENTIRE optimized H-block plan before replanning (LeWM's
+        # scheme -- replan cadence = the horizon, open-loop within it).
+        self.cem_exec_full = bool(kw.pop("cem_exec_full", False))
         super().__init__(model, cfg, *a, **kw)
         assert self.ctx_cap and self.ctx_cap > 0, "unified_cem needs ctx_cap>0 (the trained context_len)"
         self.type = f"lewam_unified_cem_{self.cem_state}" + ("_warm" if self.cem_warm else "")
@@ -1110,12 +1114,16 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 elites = torch.gather(samp, 1, idx[:, :, None, None].expand(R, M, H, bd))
                 mean = elites.mean(1)
                 std = elites.std(1).clamp(min=1e-3)
-            z_blk = mean[:, 0]                                          # (R, bd) execute a_0
-            raw = (z_blk.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
-            raw = raw.reshape(R, self.action_block, self.action_dim).cpu()
+            # execute a_0 only (replan every frame), or the whole H-block plan (LeWM receding MPC)
+            n_exec = self.cem_H if self.cem_exec_full else 1
+            for h in range(n_exec):
+                z_blk = mean[:, h]                                      # (R, bd) block h of the plan
+                raw = (z_blk.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
+                raw = raw.reshape(R, self.action_block, self.action_dim).cpu()
+                for row, i in enumerate(replan):
+                    self._action_buffer[i].extend(raw[row])
             for row, i in enumerate(replan):
-                self._action_buffer[i].extend(raw[row])
-                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)
+                self._steps_left[i] = max(self._steps_left[i] - float(n_exec), 1.0)
         action = torch.full((n, self.action_dim), float("nan"))
         for i in range(n):
             if not dead[i]:
@@ -1187,6 +1195,7 @@ def build_policy(cfg, model, adim, process, transform):
                 cem_std=float(ge.get("cem_std", 1.0)),
                 cem_warm=bool(ge.get("cem_warm", False)),
                 cem_state=str(ge.get("cem_state", "c")),
+                cem_exec_full=bool(ge.get("cem_exec_full", False)),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config): the
         # aggregator never saw longer sequences at train, so eval matches it. Old checkpoints
