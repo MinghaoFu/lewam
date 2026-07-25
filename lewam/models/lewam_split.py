@@ -79,11 +79,14 @@ class GCHead(nn.Module):
         return -torch.logsumexp(logpi + logcomp, dim=-1)                        # (N,)
 
     def point(self, out):
-        """Deterministic action (N,d): identity for mse; mixture mean sum_k pi_k mu_k for gmm."""
+        """Deterministic action (N,d): identity for mse; for gmm the MOST-LIKELY component's mean
+        mu_{argmax pi} -- a valid MODE. NOT the mixture mean sum_k pi_k mu_k, which for multimodal
+        data lands in the low-density valley BETWEEN modes (an invalid averaged action)."""
         if self.head_type != "gmm":
             return out
         logits, mu, _ = self._gmm_params(out)
-        return (F.softmax(logits, dim=-1).unsqueeze(-1) * mu).sum(1)
+        k = logits.argmax(dim=-1)                                              # (N,) most-likely component
+        return mu.gather(1, k[:, None, None].expand(-1, 1, self.action_dim)).squeeze(1)
 
     def rsample(self, out):
         """One reparameterized sample (N,d): identity for mse; component ~ Cat(pi) (hard, detached)
