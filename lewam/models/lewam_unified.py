@@ -107,7 +107,7 @@ class LeWAMUnified(nn.Module):
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
                  agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False,
-                 dyn_goal_cond=True, head_type="mse", n_mix=5,
+                 dyn_goal_cond=True, head_type="mse", n_mix=5, flow_H=1,
                  agg_dim_head=None, agg_mlp_dim=None, dyn_action_embed_dim=0):
         super().__init__()
         self.agg_residual = bool(agg_residual)
@@ -130,9 +130,18 @@ class LeWAMUnified(nn.Module):
             # input-dependent sigmoid gate on the correction; bias zero-init -> g == 0.5 at init.
             self.gate_proj = nn.Linear(embed_dim, embed_dim)
             nn.init.zeros_(self.gate_proj.bias)
-        self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
-                              hidden_dim=hidden_dim, dropout=dropout,
-                              head_type=head_type, n_mix=n_mix)
+        self.flow_H = int(flow_H)
+        if head_type == "flow":
+            # generative flow-matching action-chunk head (deterministic dynamics unchanged). Drop-in:
+            # forward->cond, action_loss(cond,tgt), point/sample via few-step ODE. H=1 fits the current
+            # single-block data path; H>1 (chunking) needs the trainer to feed (N,H,d) targets + mask.
+            from lewam.models.flow_policy_head import FlowPolicyHead
+            self.gc_head = FlowPolicyHead(z_dim=embed_dim, action_dim=action_dim,
+                                          hidden_dim=hidden_dim, dropout=dropout, H=self.flow_H)
+        else:
+            self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
+                                  hidden_dim=hidden_dim, dropout=dropout,
+                                  head_type=head_type, n_mix=n_mix)
         # dynamics goal-conditioning is independent of the gc_head's: the reactive policy stays
         # goal-conditioned; dyn_goal_cond=False makes ONLY the dynamics a pure forward model.
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,

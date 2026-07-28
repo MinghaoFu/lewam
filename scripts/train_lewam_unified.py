@@ -284,11 +284,15 @@ def main():
                          "Applied to train only; val stays uniform for a comparable metric.")
     ap.add_argument("--hidden_dim", type=int, default=512)
     ap.add_argument("--head_type", type=str, default="mse",
-                    help="gc_head output: 'mse' (deterministic point, MSE loss) or 'gmm' (K-component "
-                         "diagonal-Gaussian mixture density net, mixture-NLL loss). GMM captures "
-                         "multimodal actions and can be SAMPLED for policy-proposal planning.")
+                    help="gc_head output: 'mse' (deterministic point, MSE loss), 'gmm' (K-component "
+                         "diagonal-Gaussian mixture density net, mixture-NLL loss), or 'flow' "
+                         "(rectified flow-matching action-chunk head). gmm/flow capture multimodal "
+                         "actions and can be SAMPLED for policy-proposal planning.")
     ap.add_argument("--n_mix", type=int, default=5,
                     help="number of mixture components when --head_type gmm")
+    ap.add_argument("--flow_H", type=int, default=1,
+                    help="action-chunk length in blocks for --head_type flow; H=1 = single-block "
+                         "drop-in (current data path), H>1 (chunking) needs (N,H,d) targets + mask")
     ap.add_argument("--embed_dim", type=int, default=192,
                     help="latent width feeding aggregator + heads (ViT-tiny cls is projected to this)")
     ap.add_argument("--encoder_size", type=str, default="tiny",
@@ -442,7 +446,7 @@ def main():
                          agg_action_cond=args.agg_action_cond,
                          dyn_goal_cond=not args.dyn_no_goal,
                          dyn_action_embed_dim=args.dyn_action_embed_dim,
-                         head_type=args.head_type, n_mix=args.n_mix).to(device)
+                         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -579,7 +583,7 @@ def main():
         action_mean=act_mean, action_std=act_std,
         w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
         w_straight=args.w_straight, straight_target=args.straight_target,
-        head_type=args.head_type, n_mix=args.n_mix,
+        head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
         ablate_dynamics=args.ablate_dynamics,
         dyn_action_from_policy=args.dyn_action_from_policy,
         dyn_policy_schedule=args.dyn_policy_schedule,

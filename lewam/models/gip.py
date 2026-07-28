@@ -274,6 +274,7 @@ def load_lewam_unified_model(run_name, which="best"):
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
         dyn_goal_cond=bool(cfg.get("dyn_goal_cond", True)),
         head_type=str(cfg.get("head_type", "mse")), n_mix=int(cfg.get("n_mix", 5)),
+        flow_H=int(cfg.get("flow_H", 1)),
         dyn_action_embed_dim=int(cfg.get("dyn_action_embed_dim", 0) or 0),
     )
     res = model.load_state_dict(sd, strict=True)
