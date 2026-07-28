@@ -100,15 +100,23 @@ class GCHead(nn.Module):
         sig_s = logsig.gather(1, idx).squeeze(1).exp()
         return mu_s + sig_s * torch.randn_like(mu_s)
 
-    def sample(self, out, n):
-        """n samples per row (N,n,d) for planning: mse -> mean repeated; gmm -> component~Cat then N."""
+    def sample(self, out, n, noise=True):
+        """n samples per row (N,n,d) for planning: mse -> mean repeated; gmm -> component~Cat then draw.
+        noise=True: full reparam draw mu + sigma*eps (diverse modes AND within-mode Gaussian). noise=False:
+        the drawn component's MEAN mu_k with NO within-mode Gaussian -- diverse in WHICH MODE but each
+        candidate is a CLEAN on-manifold mode, not corrupted by the (often inflated) sigma. The diagnostic
+        showed sigma~0.33 blows sample error 0.25->0.44, sinking WM-verified policy-proposal; proposing
+        clean modes (noise=False) lets the world model route among the actual modes it can verify."""
         if self.head_type != "gmm":
             return out.unsqueeze(1).expand(-1, n, -1)
         logits, mu, logsig = self._gmm_params(out)
         N, K, d = mu.shape
         comp = torch.multinomial(F.softmax(logits, dim=-1), n, replacement=True)  # (N,n)
         idx = comp.unsqueeze(-1).expand(N, n, d)
-        return mu.gather(1, idx) + logsig.gather(1, idx).exp() * torch.randn(N, n, d, device=out.device)
+        draw = mu.gather(1, idx)
+        if noise:
+            draw = draw + logsig.gather(1, idx).exp() * torch.randn(N, n, d, device=out.device)
+        return draw
 
 
 class GoalCondDynamics(nn.Module):
@@ -118,10 +126,26 @@ class GoalCondDynamics(nn.Module):
     which makes a CEM/planning cost surface flat and exploitable. forward() keeps the 3-arg
     signature either way (z_goal is simply unused when goal_cond=False) so callers don't change."""
 
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512, goal_cond=True):
+    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512, goal_cond=True, action_embed_dim=0):
         super().__init__()
         self.goal_cond = bool(goal_cond)
-        in_dim = (2 * z_dim + action_dim) if self.goal_cond else (z_dim + action_dim)
+        # action pathway: the raw z-scored action (action_dim) is tiny next to the z_dim latents and
+        # gets drowned in the concat. action_embed_dim>0 projects+normalizes it (Linear -> LayerNorm
+        # -> GELU) to a comparable width BEFORE concat, giving the MLP a real action pathway (stronger
+        # action-sensitivity). 0 = the raw-concat baseline. Note the projection is rank<=action_dim,
+        # so it rebalances the concat width, it does not add action information.
+        self.action_embed_dim = int(action_embed_dim)
+        if self.action_embed_dim > 0:
+            self.a_proj = nn.Sequential(
+                nn.Linear(action_dim, self.action_embed_dim),
+                nn.LayerNorm(self.action_embed_dim),
+                nn.GELU(),
+            )
+            a_in = self.action_embed_dim
+        else:
+            self.a_proj = None
+            a_in = action_dim
+        in_dim = (2 * z_dim + a_in) if self.goal_cond else (z_dim + a_in)
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -133,7 +157,8 @@ class GoalCondDynamics(nn.Module):
         )
 
     def forward(self, z_t, a_t, z_goal):
-        x = torch.cat([z_t, a_t, z_goal], dim=-1) if self.goal_cond else torch.cat([z_t, a_t], dim=-1)
+        a = self.a_proj(a_t) if self.a_proj is not None else a_t
+        x = torch.cat([z_t, a, z_goal], dim=-1) if self.goal_cond else torch.cat([z_t, a], dim=-1)
         return self.net(x)
 
 

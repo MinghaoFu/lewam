@@ -309,6 +309,21 @@ def main():
     ap.add_argument("--agg_depth", type=int, default=4,
                     help="causal-transformer depth of the aggregator")
     ap.add_argument("--agg_heads", type=int, default=4)
+    ap.add_argument("--agg_dim_head", type=int, default=0,
+                    help="per-head dim of the aggregator attention; 0 = tied embed_dim//agg_heads "
+                         "(baseline). >0 DECOUPLES it so the aggregator (our 'predictor') can be widened "
+                         "(heads*dim_head > embed_dim) to LeWM-predictor scale without touching the latent.")
+    ap.add_argument("--agg_mlp_dim", type=int, default=0,
+                    help="aggregator FFN width; 0 = 4*embed_dim (baseline). >0 widens the FFN.")
+    ap.add_argument("--dyn_action_embed_dim", type=int, default=0,
+                    help="0 = raw-concat the action into the dynamics head (baseline). >0 embeds the "
+                         "action (Linear->LayerNorm->GELU) to this width BEFORE concat, so it isn't "
+                         "drowned by the z_dim latents (stronger action pathway / action-sensitivity).")
+    ap.add_argument("--perturb_data", type=str, default="",
+                    help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the DYNAMICS "
+                         "loss ONLY (DAgger-for-the-critic) -- the reactive/BC head stays purely on-policy.")
+    ap.add_argument("--perturb_ratio", type=float, default=0.0,
+                    help="dynamics-loss weight on off-policy transitions: loss_dyn=(1-r)*on + r*off. 0=baseline.")
     ap.add_argument("--agg_residual", action="store_true",
                     help="c = z + Aggr(z) with a ZERO-INIT correction (boots as the split, "
                          "identity at init); off (default) = c = Aggr(z), no residual")
@@ -367,6 +382,12 @@ def main():
                          "preload_cache) | 'off'. HIT -> np.load the shared <tag>.frames.npy + "
                          "<tag>.aux.npz instead of decoding the h5 (~1x-frames RAM vs classic "
                          "preload). Ignored when --max_eps set (falls back to classic preload).")
+    ap.add_argument("--cache_mmap", action="store_true",
+                    help="OPT-IN (default off): memory-MAP the cache .frames.npy (np.load mmap_mode='r') "
+                         "instead of reading it fully into RAM. Peak RSS drops from ~1x-frames (143GB pusht) "
+                         "to <1GB -- fits a 140GB H100 pod -- at the cost of fuse page-in latency on random "
+                         "reads (hidden by --num_workers; warm after epoch 1). Default load stays full-RAM "
+                         "(faster) so this never changes the fast path unless explicitly requested.")
     args = ap.parse_args()
 
     if args.ablate_dynamics:
@@ -415,9 +436,12 @@ def main():
                          action_dim=action_block_dim,
                          hidden_dim=args.hidden_dim, img_size=args.img_size, dropout=0.1,
                          agg_depth=args.agg_depth, agg_heads=args.agg_heads,
+                         agg_dim_head=(args.agg_dim_head or None),
+                         agg_mlp_dim=(args.agg_mlp_dim or None),
                          agg_residual=args.agg_residual, agg_gate=args.agg_gate,
                          agg_action_cond=args.agg_action_cond,
                          dyn_goal_cond=not args.dyn_no_goal,
+                         dyn_action_embed_dim=args.dyn_action_embed_dim,
                          head_type=args.head_type, n_mix=args.n_mix).to(device)
     sigreg = SIGReg().to(device)
 
@@ -442,8 +466,11 @@ def main():
             _fp, _ap = f"{_cdir}/{_tag}.frames.npy", f"{_cdir}/{_tag}.aux.npz"
         if os.path.isfile(_fp) and os.path.isfile(_ap):
             _t0 = time.time()
-            print(f"[lewam-uni] frames-cache HIT {_fp}", flush=True)
-            Frames = torch.from_numpy(np.load(_fp))
+            print(f"[lewam-uni] frames-cache HIT {_fp}"
+                  + (" (mmap: low-RAM, fuse-latency)" if args.cache_mmap else ""), flush=True)
+            # mmap keeps the 143GB tensor on disk/fuse (kernel-evictable pages) -> <1GB peak RSS;
+            # default (mmap off) reads it fully into RAM (fast). Read-only either way (dataset only slices).
+            Frames = torch.from_numpy(np.load(_fp, mmap_mode="r" if args.cache_mmap else None))
             _aux = np.load(_ap)
             # The cache is built by the GC pipeline: A_flat is per-SAMPLE (one action block per
             # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
@@ -543,8 +570,10 @@ def main():
         action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
+        agg_dim_head=args.agg_dim_head, agg_mlp_dim=args.agg_mlp_dim,
         agg_residual=args.agg_residual, agg_gate=args.agg_gate,
         agg_action_cond=args.agg_action_cond, dyn_goal_cond=not args.dyn_no_goal,
+        dyn_action_embed_dim=args.dyn_action_embed_dim,
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
@@ -565,6 +594,23 @@ def main():
 
     D = 192
     Hmax = float(args.H_max)
+
+    # --- off-policy transitions for the DAgger-for-the-critic dynamics mix (optional) ---
+    OP = None
+    if args.perturb_data and args.perturb_ratio > 0:
+        import h5py as _h5
+        with _h5.File(args.perturb_data, "r") as _f:
+            OP = dict(ctx=torch.from_numpy(_f["ctx_frames"][:]),   # (M,cap,224,224,3) uint8
+                      goal=torch.from_numpy(_f["goal_frame"][:]),
+                      nxt=torch.from_numpy(_f["next_frame"][:]),
+                      act=torch.from_numpy(_f["action"][:]).float())  # (M,adim) z-scored
+        _imean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+        _istd  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+        print(f"[lewam-uni] off-policy dynamics mix: {OP['ctx'].shape[0]} transitions r={args.perturb_ratio}", flush=True)
+
+    def _enc_op(frames_u8):                                   # (N,224,224,3) uint8 -> (N,D), norm like the cache
+        x = frames_u8.to(device, non_blocking=True).float().permute(0, 3, 1, 2) / 255.0
+        return model.encode((x - _imean) / _istd)
 
     def run_batch(window, goals, actions, horizon, n_pos, train, dyn_mix=0.0):
         """One sequence-parallel step over a batch of context windows.
@@ -619,6 +665,28 @@ def main():
                                           actions.reshape(B * max_pos, actions.shape[-1]).float())
         loss_act = (aloss * valid.reshape(-1).float()).sum() / n_valid
         loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)  # no stop-grad (like split)
+        if train and OP is not None:
+            # DAgger-for-the-critic: mix an off-policy dynamics term (env-rendered (ctx,a',next) with a'
+            # perturbed in z-scored space). DYNAMICS only -- the BC/action loss above stays on-policy so
+            # the reactive head is untouched. loss_dyn = (1-r)*on + r*off holds the dyn budget fixed.
+            r = float(args.perturb_ratio); cap_op = OP["ctx"].shape[1]
+            bso = min(32, OP["ctx"].shape[0])
+            ix = torch.randint(0, OP["ctx"].shape[0], (bso,))
+            # DECOUPLED: encode+aggregate the off-policy context/goal/next under no_grad so the
+            # off-policy loss trains ONLY the dynamics head (GoalCondDynamics), never the SHARED
+            # encoder/aggregator. Coupling them let a heavy off-policy dose corrupt the shared c and
+            # kill the reactive policy (r=0.15 collapse); this isolates the critic from the policy rep.
+            with torch.no_grad():
+                zc = _enc_op(OP["ctx"][ix].reshape(bso * cap_op, 224, 224, 3)).reshape(bso, cap_op, D)
+                a_pv = a_pm = None
+                if model.agg_action_cond:
+                    a_pv = torch.zeros(bso, cap_op, actions.shape[-1], device=device)
+                    a_pm = torch.zeros(bso, cap_op, dtype=torch.bool, device=device)
+                c_op = model.aggregate(zc, a_pv, a_pm)[:, -1]
+                zg_op = _enc_op(OP["goal"][ix]); zn_op = _enc_op(OP["nxt"][ix])
+            z_pred_op = model.dynamics(c_op, OP["act"][ix].to(device), zg_op)   # grad -> dynamics head only
+            loss_dyn_op = ((z_pred_op - zn_op) ** 2).mean()
+            loss_dyn = (1.0 - r) * loss_dyn + r * loss_dyn_op
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)

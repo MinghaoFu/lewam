@@ -107,7 +107,8 @@ class LeWAMUnified(nn.Module):
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
                  agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False,
-                 dyn_goal_cond=True, head_type="mse", n_mix=5):
+                 dyn_goal_cond=True, head_type="mse", n_mix=5,
+                 agg_dim_head=None, agg_mlp_dim=None, dyn_action_embed_dim=0):
         super().__init__()
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
@@ -115,9 +116,15 @@ class LeWAMUnified(nn.Module):
         self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden)
+        # aggregator width knobs (default = the tied MHA of the 9.3M baseline). agg_dim_head>0
+        # DECOUPLES the attention inner dim (heads*dim_head) from embed_dim, and agg_mlp_dim widens
+        # the FFN -- so the aggregator (our "predictor") can be scaled up (heads/head-dim/width) to
+        # LeWM-predictor size WITHOUT touching the encoder latent width or the heads.
+        _agg_dh = int(agg_dim_head) if agg_dim_head else max(embed_dim // agg_heads, 1)
         self.aggregator = CausalStateAggregator(
             z_dim=embed_dim, depth=agg_depth, heads=agg_heads,
-            dim_head=max(embed_dim // agg_heads, 1), zero_init=self.agg_residual,
+            dim_head=_agg_dh, mlp_dim=(int(agg_mlp_dim) if agg_mlp_dim else None),
+            zero_init=self.agg_residual,
             action_cond=self.agg_action_cond, action_dim=action_dim)
         if self.agg_gate:
             # input-dependent sigmoid gate on the correction; bias zero-init -> g == 0.5 at init.
@@ -129,7 +136,8 @@ class LeWAMUnified(nn.Module):
         # dynamics goal-conditioning is independent of the gc_head's: the reactive policy stays
         # goal-conditioned; dyn_goal_cond=False makes ONLY the dynamics a pure forward model.
         self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
-                                         hidden_dim=hidden_dim, goal_cond=bool(dyn_goal_cond))
+                                         hidden_dim=hidden_dim, goal_cond=bool(dyn_goal_cond),
+                                         action_embed_dim=int(dyn_action_embed_dim))
 
     def encode(self, pixels):
         """pixels: (N, 3, H, W) -> (N, embed_dim) cls latent."""

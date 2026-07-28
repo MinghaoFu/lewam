@@ -267,11 +267,14 @@ def load_lewam_unified_model(run_name, which="best"):
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
         agg_depth=int(cfg["agg_depth"]), agg_heads=int(cfg.get("agg_heads", 4)),
+        agg_dim_head=(int(cfg["agg_dim_head"]) or None) if cfg.get("agg_dim_head") else None,
+        agg_mlp_dim=(int(cfg["agg_mlp_dim"]) or None) if cfg.get("agg_mlp_dim") else None,
         agg_residual=bool(cfg.get("agg_residual", False)),
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
         dyn_goal_cond=bool(cfg.get("dyn_goal_cond", True)),
         head_type=str(cfg.get("head_type", "mse")), n_mix=int(cfg.get("n_mix", 5)),
+        dyn_action_embed_dim=int(cfg.get("dyn_action_embed_dim", 0) or 0),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
@@ -1018,6 +1021,13 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         # 'cem' (default) = Gaussian sample+refine around the warm-start; 'policy' = sample K candidate
         # sequences from the (GMM) head and keep the WM-verified best (on-manifold, no refinement).
         self.cem_propose = str(kw.pop("cem_propose", "cem"))
+        # cem_cost: 'sum' (default) accumulates ||z_h - z_goal||^2 over EVERY rollout step -- penalizes
+        # intermediate states for not already being at the goal, so it rewards rushing to the goal region
+        # ASAP (and the correct gradual approach, which is far from the goal mid-trajectory, is penalized).
+        # 'final' (DEFAULT) scores ONLY the terminal ||z_H - z_goal||^2 -- LeWM's objective, matching the
+        # goal being defined H steps ahead (the plan just has to LAND on it, path unconstrained). Measured
+        # +15 SR over 'sum' warm on pushT off25 (62.4 -> 77.2, 5 seeds); 'sum' kept as an ablation.
+        self.cem_cost = str(kw.pop("cem_cost", "final"))
         super().__init__(model, cfg, *a, **kw)
         assert self.ctx_cap and self.ctx_cap > 0, "unified_cem needs ctx_cap>0 (the trained context_len)"
         self.type = f"lewam_unified_cem_{self.cem_state}" + ("_warm" if self.cem_warm else "")
@@ -1026,7 +1036,14 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         """Context at each row's last valid position: c = aggregate(win)[vlen-1]. win (B,cap,D)
         left-aligned (real/imagined content in [0:vlen], zero-pad after; causal so the pad is
         never attended by the read position). Returns (B, D)."""
-        c = self.model.aggregate(win)                                    # (B, cap, D)
+        a_prev = a_prev_mask = None
+        if getattr(self, "action_cond", False):
+            # AdaLN aggregator needs a real (non-None) a_prev tensor; feed null-action everywhere
+            # (mask all-False -> the trained null_action conditioning, the fresh-start default).
+            B, cap = win.shape[0], win.shape[1]
+            a_prev = torch.zeros(B, cap, self.block_dim, device=win.device, dtype=win.dtype)
+            a_prev_mask = torch.zeros(B, cap, dtype=torch.bool, device=win.device)
+        c = self.model.aggregate(win, a_prev, a_prev_mask)               # (B, cap, D)
         return c[torch.arange(win.shape[0], device=win.device), (vlen - 1).clamp(min=0)]
 
     def _slide(self, win, vlen, z, cap):
@@ -1045,6 +1062,7 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         info_dict = self._prepare_info(info_dict)
         n = self.env.num_envs
         dev = next(self.model.parameters()).device
+        self._call += 1
         if self._action_buffer is None:
             self._action_buffer = [deque() for _ in range(n)]
             self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
@@ -1070,6 +1088,10 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
             zg = self.model.encode(gpx.to(dev).float())                 # (R, D) goal latent
             for row, i in enumerate(replan):
                 self._lat_buf[i].append(z_new[row])                     # cache the REAL latent
+            if self.log_latents:                                        # executed real dist-to-goal probe
+                for row, i in enumerate(replan):
+                    self._lat_log.append((self._call, int(i),
+                                          z_new[row].detach().cpu(), zg[row].detach().cpu()))
             R, D = z_new.shape
             K, M, H, bd = self.cem_K, self.cem_M, self.cem_H, self.block_dim
             cap = int(self.ctx_cap)                                     # trained context window (=context_len)
@@ -1082,13 +1104,18 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 vlen0[row] = w.shape[0]
             zgk = zg.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
             # ---- propose candidate H-block plans, keep the WM-verified best -> `mean` (R,H,bd) ----
-            if self.cem_propose == "policy":
+            if self.cem_propose in ("policy", "policy_modes"):
                 # POLICY-PROPOSAL MPC: sample K sequences from the (GMM) head AUTOREGRESSIVELY, roll each
-                # through the dynamics, score sum ||z_h - z_goal||^2, keep the best per env. No Gaussian
-                # noise, no refinement -> candidates stay on the policy's ACTION MANIFOLD (where the WM is
-                # accurate, per the diagnostic), so the verify step is honest and can't be exploited.
-                # Needs a stochastic head (gmm); an mse head samples its point K times (no diversity ->
-                # reduces to reactive).
+                # through the dynamics, score sum ||z_h - z_goal||^2, keep the best per env. No isotropic
+                # CEM noise, no refinement -> candidates stay on the policy's ACTION MANIFOLD (where the WM
+                # is accurate, per the diagnostic), so the verify step is honest and can't be exploited.
+                # 'policy'       -> full reparam draws mu+sigma*eps (the diagnostic showed the inflated
+                #                   sigma~0.33 blurs every candidate to 0.44 err, worse than the clean mode).
+                # 'policy_modes' -> the drawn components' MEANS only (noise=False): K CLEAN modes, diverse in
+                #                   WHICH mode, so the WM does the routing the weight head pi under-does
+                #                   (oracle comp 0.19 << mode 0.27). Needs a stochastic head (gmm); an mse
+                #                   head has one point -> both reduce to reactive.
+                _pnoise = (self.cem_propose == "policy")
                 win = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D).clone()
                 vlen = vlen0.unsqueeze(1).expand(R, K).reshape(R * K).clone()
                 steps = np.repeat(np.maximum(self._steps_left[replan], 1.0).astype(np.float64), K)  # (R*K,)
@@ -1097,10 +1124,11 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                     hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                       device=dev, dtype=torch.float32)
                     c = self._agg_c(win, vlen)                          # (R*K, D)
-                    a_h = self.model.gc_head.sample(self.model.gc_head(c, zgk, hn), 1).squeeze(1)  # (R*K, bd)
+                    a_h = self.model.gc_head.sample(self.model.gc_head(c, zgk, hn), 1, noise=_pnoise).squeeze(1)  # (R*K, bd)
                     acts.append(a_h)
                     z_nx = self.model.dynamics(c, a_h, zgk)             # (R*K, D)
-                    cost = cost + ((z_nx - zgk) ** 2).sum(-1)
+                    _step = ((z_nx - zgk) ** 2).sum(-1)
+                    cost = _step if self.cem_cost == "final" else cost + _step
                     win, vlen = self._slide(win, vlen, z_nx, cap)
                     steps = np.maximum(steps - 1.0, 1.0)
                 best = cost.reshape(R, K).argmin(dim=1)                 # (R,) WM-verified best candidate
@@ -1136,7 +1164,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                         else:                                          # correct: aggregated context
                             c = self._agg_c(win, vlen)
                         z_nx = self.model.dynamics(c, sampk[:, h], zgk)  # (R*K, D)
-                        cost = cost + ((z_nx - zgk) ** 2).sum(-1)
+                        _step = ((z_nx - zgk) ** 2).sum(-1)
+                        cost = _step if self.cem_cost == "final" else cost + _step
                         win, vlen = self._slide(win, vlen, z_nx, cap)
                     cost = cost.reshape(R, K)
                     idx = cost.argsort(dim=1)[:, :M]                   # (R, M) best
@@ -1226,6 +1255,8 @@ def build_policy(cfg, model, adim, process, transform):
                 cem_state=str(ge.get("cem_state", "c")),
                 cem_exec_full=bool(ge.get("cem_exec_full", False)),
                 cem_propose=str(ge.get("cem_propose", "cem")),
+                cem_cost=str(ge.get("cem_cost", "final")),
+                log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config): the
         # aggregator never saw longer sequences at train, so eval matches it. Old checkpoints

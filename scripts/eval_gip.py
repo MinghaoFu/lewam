@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import hydra
+import torch
 from omegaconf import DictConfig, OmegaConf
 
 import stable_worldmodel as swm
@@ -52,7 +53,7 @@ def run(cfg: DictConfig):
     elif mode in ("seq_policy", "seq_cem"):
         # LeWAM-Seq: its own loader + config; adim = the model's z-scored action block dim.
         model, seq_cfg = gip.load_lewam_seq_model(cfg.policy, which=cfg.get("seq_which", "best"))
-        model = model.to("cuda").eval()
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
         model.requires_grad_(False)
         model._seq_cfg = seq_cfg
         adim = int(seq_cfg["action_dim"])
@@ -60,7 +61,7 @@ def run(cfg: DictConfig):
     elif mode == "split_policy":
         # LeWAM-Split: its own loader + config; adim = the model's z-scored action block dim.
         model, split_cfg = gip.load_lewam_split_model(cfg.policy, which=cfg.get("seq_which", "best"))
-        model = model.to("cuda").eval()
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
         model.requires_grad_(False)
         model._split_cfg = split_cfg
         adim = int(split_cfg["action_dim"])
@@ -69,14 +70,14 @@ def run(cfg: DictConfig):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
         model, uni_cfg = gip.load_lewam_unified_model(cfg.policy, which=cfg.get("seq_which", "best"))
-        model = model.to("cuda").eval()
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
         model.requires_grad_(False)
         model._unified_cfg = uni_cfg
         adim = int(uni_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform)
     else:
         model, adim = gip.load_gip_model(cfg.policy, epoch=cfg.get("ckpt_epoch", None))
-        model = model.to("cuda").eval()
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
         # multi-task ckpt: select this task's conditioning vector + set the env<->trained action pad boundary
