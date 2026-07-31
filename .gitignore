@@ -33,10 +33,7 @@ docs/proposal/papers/
 # Overleaf paper clone (its own git repo; managed via git.overleaf.com, not this repo)
 /overleaf/
 
-# ── AI-scratch / working docs (kept local, off GitHub) ──
-# infra/README docs (CLAUDE.md, README.md, merlin/MERLIN.md, docs/{CLAUDE,SETTINGS,MACHINE_TRANSFER}.md)
-# stay tracked on purpose; only handoff/experiment/design/proposal working notes are local-only.
-docs/*HANDOFF*.md
-docs/*_DESIGN.md
-docs/EXPERIMENTS.md
-docs/proposal/
+# ── AI-scratch / work-in-progress docs (kept local, off GitHub) ──
+# handoff + design working notes live under docs/wip/ and are ignored as a subdir;
+# EXPERIMENTS.md, docs/proposal/ (except papers/ above), and the infra/README docs stay tracked.
+docs/wip/
