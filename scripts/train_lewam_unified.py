@@ -1,32 +1,31 @@
 # LeWAM-Unified: the split (goal-conditioned action head + goal-conditioned dynamics) trained
-# SEQUENCE-PARALLEL over a CONTEXT window, with ONE shared context latent per position.
+# sequence-parallel over a context window, with one shared context latent per position.
 #
 #   sample a start t; context window = frames [t .. t+W-1], W = context_len (episode-clamped);
-#   encode window frames + each position's ONE goal frame in a single pass (2W+1 frames per item,
-#   independent of H_max -- goals are looked up by index, never a contiguous tail)
-#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator over states ONLY
+#   encode window frames + each position's one goal frame in a single pass (2W+1 frames per item,
+#   independent of H_max -- goals are looked up by index, not a contiguous tail)
+#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator over states only
 #   a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)           # per-position goal + horizon
-#   z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)          # dyn target z_{tau+1}, ALWAYS 1 step
+#   z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)          # dyn target z_{tau+1}, 1 step
 #
 #   L = w_act*MSE(a_pred, a) + w_dyn*MSE(z_pred, z[1:]) + w_reg*SIGReg(z) + w_cyc*consistency
 #       (all per-position, masked to the valid (non-pad) positions)
 #
 # Goal sampling, per window, two modes mixed by --p_shared:
 #   RANDOM (prob 1-p): each position independently draws h~U[1,H_max] and clamps its goal frame to
-#     the episode's last frame -- the split FramePairDataset's exact sampling (incl. the mass
-#     pile-up on the final frame near episode ends), so per position this IS a split example, just
-#     with an aggregated-context state. Maximal (goal,horizon) coverage; horizon uncorrelated with
-#     context length.
-#   SHARED (prob p): ONE goal for the whole window, drawn h~U[1,H_max] ahead of the LAST position
+#     the episode's last frame -- the split FramePairDataset's sampling (incl. the mass pile-up on
+#     the final frame near episode ends), so per position this is a split example with an
+#     aggregated-context state. Maximal (goal,horizon) coverage; horizon uncorrelated with context.
+#   SHARED (prob p): one goal for the whole window, drawn h~U[1,H_max] ahead of the last position
 #     (episode-clamped); horizons count down toward it across positions (h_norm clamps at 1.0 like
 #     eval's min(steps,H_max)/H_max). This is the structure eval runs -- one fixed goal, horizon
-#     decreasing over consecutive replans -- and what a future rollout loss would need.
+#     decreasing over consecutive replans -- and what a rollout loss needs.
 #
-# The window is NOT a start->goal cut (the original design made the sampled goal the window
-# endpoint: the last position always trained on horizon 1 with goal == its dynamics target, the
-# horizon marginal was short-skewed, and the goal sat inside the fed sequence, unlike eval).
-# Goals are encoder inputs but NEVER aggregator inputs. Each window is a FRESH start (no prior
-# history), matching both the eval episode start and the eval adapter's ctx_cap sliding window.
+# The window is not a start->goal cut (that made the sampled goal the window endpoint: the last
+# position always trained on horizon 1 with goal == its dynamics target, a short-skewed horizon
+# marginal, and the goal inside the fed sequence, unlike eval). Goals are encoder inputs but never
+# aggregator inputs. Each window is a fresh start (no prior history), matching the eval episode
+# start and the eval adapter's ctx_cap sliding window.
 #
 #   python scripts/train_lewam_unified.py --dataset_name reacher.h5 \
 #       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --context_len 5 --p_shared 0.5 \
@@ -252,6 +251,81 @@ def collate_pad(batch):
 
 
 # --------------------------------------------------------------------------- #
+# Prefix (Fast-LeWM) dataset. Same anchor points as SeqTrajDataset, but the window extends prefix_H  #
+# frames PAST the last anchor so every anchor has its world-model targets z_{t+1..t+H} in the window, #
+# plus a per-anchor H-action prefix. `prefix_valid[t,k]` marks anchor t's real horizons (episode end).#
+# --------------------------------------------------------------------------- #
+class PrefixSeqDataset(Dataset):
+    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, prefix_H,
+                 p_shared, close_bias=0.0):
+        self.frames = frames          # [N,3,H,W] fp16 CPU; all obs-frames
+        self.a_frame = a_frame        # [N,adim] fp16; a_frame[t] = block taken AT frame t (0 at ep-last)
+        self.t_gidx = t_gidx          # [M] episode-global frame index of each valid start
+        self.maxh = maxh              # [M] frames from that start to the episode's last frame
+        self.indices = indices        # [K] train/val subset of the M starts
+        self.h_max = int(h_max)
+        self.ctx_len = int(ctx_len)   # decision points (anchors) per window
+        self.prefix_H = int(prefix_H) # world-model prefix horizon
+        self.p_shared = float(p_shared)
+        self.close_bias = float(close_bias)
+
+    def __len__(self):
+        return self.indices.numel()
+
+    def __getitem__(self, i):
+        idx = int(self.indices[i])
+        start = int(self.t_gidx[idx])
+        frames_left = int(self.maxh[idx])                        # frames start..start+frames_left exist
+        n_anchor = min(self.ctx_len, frames_left)                # anchors 0..n_anchor-1 (each >=1 future frame)
+        prefix_H = self.prefix_H
+        win_len = min(n_anchor + prefix_H, frames_left + 1)      # window frames: states + WM targets
+        window = self.frames[start:start + win_len]              # (win_len, 3, H, W)
+        goal_offsets, horizon = sample_goal_offsets(n_anchor, frames_left, self.h_max,
+                                                    self.p_shared, self.close_bias)
+        goals = self.frames[start + goal_offsets]                # (n_anchor, 3, H, W) per-position policy goal
+        action_dim = self.a_frame.shape[1]
+        action_prefix = torch.zeros(n_anchor, prefix_H, action_dim, dtype=self.a_frame.dtype)
+        prefix_valid = torch.zeros(n_anchor, prefix_H, dtype=torch.bool)
+        for t in range(n_anchor):
+            # anchor t: horizon k=1..k_valid has target z_{t+k} in-window AND action a_{t+k-1} real
+            k_valid = min(prefix_H, win_len - 1 - t)
+            if k_valid > 0:
+                action_prefix[t, :k_valid] = self.a_frame[start + t:start + t + k_valid]
+                prefix_valid[t, :k_valid] = True
+        return window, goals, action_prefix, horizon, prefix_valid, n_anchor
+
+
+def collate_prefix(batch):
+    """Pad a batch of prefix windows. window -> (B, win_max, C, H, W) tail-padded with each item's LAST
+    REAL frame (BatchNorm safety); goals -> (B, anchor_max, C, H, W); action_prefix -> (B, anchor_max,
+    prefix_H, adim) zero-pad; horizon -> (B, anchor_max) pad 1; prefix_valid -> (B, anchor_max, prefix_H)
+    pad False; n_anchor -> (B,)."""
+    n_anchor = torch.tensor([item[5] for item in batch], dtype=torch.long)
+    anchor_max = int(n_anchor.max())
+    win_max = max(item[0].shape[0] for item in batch)
+    B = len(batch)
+    C, H, W = batch[0][0].shape[1:]
+    prefix_H, action_dim = batch[0][2].shape[1], batch[0][2].shape[2]
+    window = torch.zeros((B, win_max, C, H, W), dtype=batch[0][0].dtype)
+    goals = torch.zeros((B, anchor_max, C, H, W), dtype=batch[0][1].dtype)
+    action_prefix = torch.zeros((B, anchor_max, prefix_H, action_dim), dtype=batch[0][2].dtype)
+    horizon = torch.ones((B, anchor_max), dtype=torch.long)
+    prefix_valid = torch.zeros((B, anchor_max, prefix_H), dtype=torch.bool)
+    for i, (win, goal, act_pref, hz, pv, na) in enumerate(batch):
+        win_len = win.shape[0]
+        window[i, :win_len] = win
+        if win_len < win_max:
+            window[i, win_len:] = win[-1]                        # repeat last real frame (BatchNorm)
+        goals[i, :na] = goal
+        if na < anchor_max:
+            goals[i, na:] = goal[-1]
+        action_prefix[i, :na] = act_pref
+        horizon[i, :na] = hz
+        prefix_valid[i, :na] = pv
+    return window, goals, action_prefix, horizon, prefix_valid, n_anchor
+
+
+# --------------------------------------------------------------------------- #
 # Main training                                                                #
 # --------------------------------------------------------------------------- #
 def main():
@@ -266,9 +340,9 @@ def main():
     ap.add_argument("--agg_lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--H_max", type=int, default=50,
-                    help="max goal distance (horizon) in OBS-STEPS (frames are 1-per-obs-step, "
-                         "post-frameskip; NOT divided by frameskip); h~U[1,H_max], episode-clamped. "
-                         "DECOUPLED from the window length (see --context_len); does NOT affect "
+                    help="max goal distance (horizon) in obs-steps (frames are 1-per-obs-step, "
+                         "post-frameskip; not divided by frameskip); h~U[1,H_max], episode-clamped. "
+                         "Decoupled from the window length (see --context_len); does not affect "
                          "memory (goals are looked up per position, not loaded as a tail)")
     ap.add_argument("--context_len", type=int, default=5,
                     help="decision points per context window = the aggregator's max sequence length "
@@ -297,6 +371,13 @@ def main():
                     help="latent width feeding aggregator + heads (ViT-tiny cls is projected to this)")
     ap.add_argument("--encoder_size", type=str, default="tiny",
                     help="ViT backbone size: tiny | small | base — the main param-count lever")
+    ap.add_argument("--encoder_backbone", type=str, default="scratch",
+                    help="scratch = from-scratch ViT (SIGReg-trained); dinov3s = frozen pretrained "
+                         "DINOv3 ViT-small/16 (384-d CLS, embed_dim should be 384). Isolates whether "
+                         "joint encoder training is the bottleneck vs the dynamics.")
+    ap.add_argument("--encoder_ckpt", type=str, default="",
+                    help="state_dict .pt for the pretrained backbone, loaded at train init only "
+                         "(dinov3s). At eval the frozen weights live in the full checkpoint.")
     ap.add_argument("--img_size", type=int, default=224)
     ap.add_argument("--seed", type=int, default=3072)
     ap.add_argument("--run_name", type=str, default="reacher_lewam_unified")
@@ -309,40 +390,40 @@ def main():
     ap.add_argument("--ckpt_sync_dir", type=str, default=None,
                     help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into on "
                          "each improvement, so losing the worker's ephemeral disk never costs the run.")
-    # unified-specific (ablation arms; ALL present so every ckpt strict-loads under one adapter)
+    # unified-specific (ablation arms; all present so every ckpt strict-loads under one adapter)
     ap.add_argument("--agg_depth", type=int, default=4,
                     help="causal-transformer depth of the aggregator")
     ap.add_argument("--agg_heads", type=int, default=4)
     ap.add_argument("--agg_dim_head", type=int, default=0,
                     help="per-head dim of the aggregator attention; 0 = tied embed_dim//agg_heads "
-                         "(baseline). >0 DECOUPLES it so the aggregator (our 'predictor') can be widened "
+                         "(baseline). >0 decouples it so the aggregator can be widened "
                          "(heads*dim_head > embed_dim) to LeWM-predictor scale without touching the latent.")
     ap.add_argument("--agg_mlp_dim", type=int, default=0,
                     help="aggregator FFN width; 0 = 4*embed_dim (baseline). >0 widens the FFN.")
     ap.add_argument("--dyn_action_embed_dim", type=int, default=0,
                     help="0 = raw-concat the action into the dynamics head (baseline). >0 embeds the "
-                         "action (Linear->LayerNorm->GELU) to this width BEFORE concat, so it isn't "
-                         "drowned by the z_dim latents (stronger action pathway / action-sensitivity).")
+                         "action (Linear->LayerNorm->GELU) to this width before concat, so it isn't "
+                         "drowned by the z_dim latents (a stronger action pathway).")
     ap.add_argument("--perturb_data", type=str, default="",
-                    help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the DYNAMICS "
-                         "loss ONLY (DAgger-for-the-critic) -- the reactive/BC head stays purely on-policy.")
+                    help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
+                         "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
     ap.add_argument("--perturb_ratio", type=float, default=0.0,
                     help="dynamics-loss weight on off-policy transitions: loss_dyn=(1-r)*on + r*off. 0=baseline.")
     ap.add_argument("--agg_residual", action="store_true",
-                    help="c = z + Aggr(z) with a ZERO-INIT correction (boots as the split, "
+                    help="c = z + Aggr(z) with a zero-init correction (boots as the split, "
                          "identity at init); off (default) = c = Aggr(z), no residual")
     ap.add_argument("--agg_gate", action="store_true",
                     help="input-dependent sigmoid gate on the residual correction "
                          "(c = z + g(z)*Aggr(z); still boots as split). residual only.")
     ap.add_argument("--agg_action_cond", action="store_true",
                     help="condition each token z_tau (AdaLN) on the embedded previous action "
-                         "a_{tau-1} (null-action at the sequence start); conditioning, NOT tokens")
+                         "a_{tau-1} (null-action at the sequence start); conditioning, not tokens")
     ap.add_argument("--dyn_no_goal", action="store_true",
-                    help="drop z_goal from the DYNAMICS head -> a pure forward model f(z_t,a_t) "
+                    help="drop z_goal from the dynamics head -> a pure forward model f(z_t,a_t) "
                          "(the gc_head stays goal-conditioned). A goal-conditioned dynamics can "
                          "drift toward z_goal ignoring the action, flattening the planning cost "
-                         "surface; the pure forward model is the honest world model for CEM/planning.")
-    # dynamics-on-policy-action arm: feed the gc_head's PREDICTED action into the dynamics head
+                         "surface; the pure forward model avoids that (used for CEM/planning).")
+    # dynamics-on-policy-action arm: feed the gc_head's predicted action into the dynamics head
     # (a convex mix with the ground-truth action, weight alpha ramped by a schedule), closing the
     # train/rollout covariate gap. The action is still BC-supervised on ground truth, so it stays a
     # grounded action, not a latent-action model.
@@ -353,7 +434,7 @@ def main():
                     help="alpha(epoch) schedule for the policy-action mix: const|linear|cosine|"
                          "sigmoid. const = full alpha from epoch 0 (least stable, 'from the start').")
     ap.add_argument("--dyn_policy_alpha_max", type=float, default=1.0,
-                    help="max mix weight (1.0 = dynamics sees ONLY the policy action at the end)")
+                    help="max mix weight (1.0 = dynamics sees only the policy action at the end)")
     ap.add_argument("--dyn_policy_ramp_frac", type=float, default=0.5,
                     help="fraction of total epochs over which alpha ramps 0->alpha_max "
                          "(non-const schedules); after that alpha stays at alpha_max")
@@ -364,6 +445,40 @@ def main():
     # loss weights
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
+    ap.add_argument("--w_idm", type=float, default=0.0,
+                    help="inverse-dynamics aux-loss weight: recover a_t from (c_t, predicted z_{t+1}) -> "
+                         "forces the dynamics to be action-aware. 0 = off (baseline).")
+    ap.add_argument("--w_acons", type=float, default=0.0,
+                    help="action-consistency aux-loss weight (Minghao): decode the next action from the "
+                         "dynamics' own predicted latent -- a_hat_{t+1}=gc_head(z_hat_{t+1}, goal_{t+1}, "
+                         "h_{t+1}) supervised on a_{t+1}. Couples dynamics->policy so z_hat_{t+1} must land "
+                         "in a policy-decodable latent (the representation lever). Grad flows through both "
+                         "the dynamics (predicted latent) and the head (no detach). 0 = off. Non-prefix "
+                         "path only (run_batch).")
+    ap.add_argument("--rollout_k", type=int, default=1,
+                    help="V-JEPA2-style latent-rollout depth for the dynamics loss. 1 = teacher "
+                         "forcing only (baseline). 2 = one rollout step (feed the predicted z_{t+1} "
+                         "back to predict z_{t+2}); K>2 rolls deeper. State-only rollout (actions/goals "
+                         "stay ground truth) -> targets compounding error.")
+    ap.add_argument("--w_rollout", type=float, default=1.0,
+                    help="weight on the rollout term relative to the teacher-forced dyn term (both "
+                         "scaled by w_dyn): L_dyn = w_dyn*(L_tf + w_rollout*L_rollout). 1.0 = "
+                         "unweighted add (V-JEPA2). 0 disables even if rollout_k>1.")
+    ap.add_argument("--dyn_prefix", action="store_true",
+                    help="Fast-LeWM action-prefix dynamics: predict all H future latents per anchor in "
+                         "parallel from the aggregated context c_t (no autoregression, no compounding). "
+                         "Replaces the single-step dynamics + rollout_k. Uses PrefixSeqDataset (window "
+                         "extends prefix_H past the last anchor) + the dense prefix loss.")
+    ap.add_argument("--prefix_H", type=int, default=5,
+                    help="prefix horizon for --dyn_prefix (action blocks predicted per anchor); should "
+                         "match the eval plan horizon cem_H. Window frames/item = ctx_len + prefix_H.")
+    ap.add_argument("--dyn_prefix_goal", action="store_true",
+                    help="ablation: goal-condition the prefix dynamics (default goal-FREE = the honest "
+                         "forward model for planning). Feeds the per-anchor policy goal into the predictor.")
+    ap.add_argument("--prefix_depth", type=int, default=2,
+                    help="causal-transformer depth of the action-prefix encoder")
+    ap.add_argument("--prefix_heads", type=int, default=4,
+                    help="attention heads of the action-prefix encoder")
     ap.add_argument("--w_reg", type=float, default=0.04)
     ap.add_argument("--ablate_dynamics", action="store_true",
                     help="disable dynamics loss (w_dyn=0), keep gc_head only")
@@ -387,7 +502,7 @@ def main():
                          "<tag>.aux.npz instead of decoding the h5 (~1x-frames RAM vs classic "
                          "preload). Ignored when --max_eps set (falls back to classic preload).")
     ap.add_argument("--cache_mmap", action="store_true",
-                    help="OPT-IN (default off): memory-MAP the cache .frames.npy (np.load mmap_mode='r') "
+                    help="opt-in (default off): memory-map the cache .frames.npy (np.load mmap_mode='r') "
                          "instead of reading it fully into RAM. Peak RSS drops from ~1x-frames (143GB pusht) "
                          "to <1GB -- fits a 140GB H100 pod -- at the cost of fuse page-in latency on random "
                          "reads (hidden by --num_workers; warm after epoch 1). Default load stays full-RAM "
@@ -446,7 +561,13 @@ def main():
                          agg_action_cond=args.agg_action_cond,
                          dyn_goal_cond=not args.dyn_no_goal,
                          dyn_action_embed_dim=args.dyn_action_embed_dim,
-                         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H).to(device)
+                         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
+                         encoder_backbone=args.encoder_backbone,
+                         encoder_ckpt=(args.encoder_ckpt or None),
+                         use_idm=(args.w_idm > 0),
+                         use_prefix=args.dyn_prefix, prefix_H=args.prefix_H,
+                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads,
+                         dyn_prefix_goal=args.dyn_prefix_goal).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -510,10 +631,16 @@ def main():
     # supervises each decision point ~context_len times per epoch. Draw ~1x coverage per epoch
     # instead: n_starts / context_len windows. Re-randomized each epoch (RandomSampler), so over
     # many epochs all starts are still seen.
-    train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
-                              args.H_max, args.context_len, args.p_shared, args.goal_close_bias)
-    val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
-                            args.H_max, args.context_len, args.p_shared, 0.0)
+    if args.dyn_prefix:
+        train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max,
+                                    args.context_len, args.prefix_H, args.p_shared, args.goal_close_bias)
+        val_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max,
+                                  args.context_len, args.prefix_H, args.p_shared, 0.0)
+    else:
+        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
+                                  args.H_max, args.context_len, args.p_shared, args.goal_close_bias)
+        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
+                                args.H_max, args.context_len, args.p_shared, 0.0)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
@@ -521,7 +648,7 @@ def main():
     val_sampler = torch.utils.data.RandomSampler(val_ds, replacement=True, num_samples=n_va_ep)
     _loader_common = dict(
         batch_size=args.batch_size, pin_memory=True, drop_last=False,
-        num_workers=args.num_workers, collate_fn=collate_pad,
+        num_workers=args.num_workers, collate_fn=(collate_prefix if args.dyn_prefix else collate_pad),
     )
     if args.num_workers > 0:
         _loader_common.update(prefetch_factor=args.prefetch_factor, persistent_workers=True)
@@ -532,7 +659,7 @@ def main():
 
     # ---- optimizer: 4 param groups ----
     opt = torch.optim.AdamW([
-        {"params": list(model.encoder.parameters()), "lr": args.encoder_lr},
+        {"params": [p for p in model.encoder.parameters() if p.requires_grad], "lr": args.encoder_lr},
         {"params": list(model.aggregator.parameters()), "lr": args.agg_lr},
         {"params": model.gc_head.parameters(), "lr": args.head_lr},
         {"params": model.dynamics.parameters(), "lr": args.dynamics_lr},
@@ -571,6 +698,7 @@ def main():
     # ---- save config ----
     cfg_out = dict(
         model="lewam_unified", z_dim=args.embed_dim, encoder_size=args.encoder_size,
+        encoder_backbone=args.encoder_backbone,
         action_dim=action_block_dim,
         hidden_dim=args.hidden_dim, n_freqs=64, dropout=0.1,
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
@@ -581,7 +709,11 @@ def main():
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
-        w_act=args.w_act, w_dyn=args.w_dyn, w_reg=args.w_reg, w_cyc=args.w_cyc,
+        w_act=args.w_act, w_dyn=args.w_dyn, w_idm=args.w_idm, w_reg=args.w_reg, w_cyc=args.w_cyc,
+        w_acons=args.w_acons,
+        rollout_k=args.rollout_k, w_rollout=args.w_rollout,
+        use_prefix=args.dyn_prefix, prefix_H=args.prefix_H, prefix_depth=args.prefix_depth,
+        prefix_heads=args.prefix_heads, dyn_prefix_goal=args.dyn_prefix_goal,
         w_straight=args.w_straight, straight_target=args.straight_target,
         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
         ablate_dynamics=args.ablate_dynamics,
@@ -596,7 +728,7 @@ def main():
     (run_dir / "lewam_unified_config.json").write_text(json.dumps(cfg_out, indent=2))
     durable_sync([run_dir / "lewam_unified_config.json"], args.ckpt_sync_dir)
 
-    D = 192
+    D = args.embed_dim            # latent width (192 tiny default; 384 for dinov3s frozen encoder)
     Hmax = float(args.H_max)
 
     # --- off-policy transitions for the DAgger-for-the-critic dynamics mix (optional) ---
@@ -625,9 +757,9 @@ def main():
         horizon (B, max_pos)             distance to each position's goal, in prediction steps
         n_pos   (B,)                     valid decision points per item
 
-        Window + goal frames go through the encoder in ONE call (shared BatchNorm statistics,
-        like the split's cat-encode of its t/goal/next triple); only the window latents are
-        aggregator inputs. Losses are means over valid decision points."""
+        Window + goal frames go through the encoder in one call (shared BatchNorm statistics, like the
+        split's cat-encode of its t/goal/next triple); only the window latents are aggregator inputs.
+        Losses are means over valid decision points."""
         B = window.shape[0]
         max_pos = actions.shape[1]
         window = window.to(device, non_blocking=True)
@@ -657,29 +789,41 @@ def main():
             a_prev[:, 1:] = actions[:, :-1]           # a_{p-1}; position 0 gets the null embedding
             a_prev_mask = valid & (pos >= 1)
 
-        a_out, z_pred = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
-                                          dyn_action_mix=(dyn_mix if train else 0.0),
-                                          dyn_action_detach=args.dyn_policy_detach)
+        a_out, z_pred, a_idm = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
+                                                 dyn_action_mix=(dyn_mix if train else 0.0),
+                                                 dyn_action_detach=args.dyn_policy_detach)
 
         loss_mask = valid.unsqueeze(-1).float()
         n_valid = valid.sum().clamp(min=1)
         # per-sample action loss: MSE (mse head) or mixture NLL (gmm head). Float for NLL stability
         # (logsumexp/exp under bf16 autocast is lossy). Masked to valid decision points.
-        aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
-                                          actions.reshape(B * max_pos, actions.shape[-1]).float())
+        if getattr(model.gc_head, "head_type", "") == "flow" and model.flow_H > 1:
+            # action-CHUNK target: at position t the next flow_H blocks a_frame[t:t+H], masked past the
+            # valid horizon. Built from `actions`/`valid` via unfold -> no dataset/collate change.
+            fh, adim = model.flow_H, actions.shape[-1]
+            a_pad = torch.cat([actions, actions.new_zeros(B, fh - 1, adim)], dim=1)
+            chunk = a_pad.unfold(1, fh, 1).permute(0, 1, 3, 2)                 # (B, max_pos, fh, adim)
+            v_pad = torch.cat([valid, valid.new_zeros(B, fh - 1)], dim=1)
+            cmask = v_pad.unfold(1, fh, 1)                                     # (B, max_pos, fh)
+            aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
+                                              chunk.reshape(B * max_pos, fh, adim).float(),
+                                              mask=cmask.reshape(B * max_pos, fh).float())
+        else:
+            aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
+                                              actions.reshape(B * max_pos, actions.shape[-1]).float())
         loss_act = (aloss * valid.reshape(-1).float()).sum() / n_valid
         loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)  # no stop-grad (like split)
         if train and OP is not None:
             # DAgger-for-the-critic: mix an off-policy dynamics term (env-rendered (ctx,a',next) with a'
-            # perturbed in z-scored space). DYNAMICS only -- the BC/action loss above stays on-policy so
+            # perturbed in z-scored space). Dynamics only -- the BC/action loss above stays on-policy, so
             # the reactive head is untouched. loss_dyn = (1-r)*on + r*off holds the dyn budget fixed.
             r = float(args.perturb_ratio); cap_op = OP["ctx"].shape[1]
             bso = min(32, OP["ctx"].shape[0])
             ix = torch.randint(0, OP["ctx"].shape[0], (bso,))
-            # DECOUPLED: encode+aggregate the off-policy context/goal/next under no_grad so the
-            # off-policy loss trains ONLY the dynamics head (GoalCondDynamics), never the SHARED
-            # encoder/aggregator. Coupling them let a heavy off-policy dose corrupt the shared c and
-            # kill the reactive policy (r=0.15 collapse); this isolates the critic from the policy rep.
+            # Decoupled: encode+aggregate the off-policy context/goal/next under no_grad so the off-policy
+            # loss trains only the dynamics head (GoalCondDynamics), never the shared encoder/aggregator.
+            # Coupling them let a heavy off-policy dose corrupt the shared c and kill the reactive policy
+            # (r=0.15 collapse); this isolates the critic from the policy representation.
             with torch.no_grad():
                 zc = _enc_op(OP["ctx"][ix].reshape(bso * cap_op, 224, 224, 3)).reshape(bso, cap_op, D)
                 a_pv = a_pm = None
@@ -691,6 +835,18 @@ def main():
             z_pred_op = model.dynamics(c_op, OP["act"][ix].to(device), zg_op)   # grad -> dynamics head only
             loss_dyn_op = ((z_pred_op - zn_op) ** 2).mean()
             loss_dyn = (1.0 - r) * loss_dyn + r * loss_dyn_op
+        # inverse-dynamics aux loss: recover a_t from (c_t, predicted z_{t+1}); c_t is pre-action so the
+        # action can only come through z_pred -> forces the dynamics to be action-aware (MSE on z-scored a).
+        loss_idm = torch.zeros((), device=device)
+        if a_idm is not None:
+            loss_idm = ((a_idm - actions) ** 2 * loss_mask).sum() / (n_valid * a_idm.shape[-1])
+        # V-JEPA2 latent rollout (train-only): feed the model's own predicted z_{t+1} back and
+        # supervise deeper predictions -> L_dyn = L_tf + L_rollout. z_pred is the depth-1 pred from
+        # forward_seq above; reusing it keeps grads flowing depth-1<-depth-2 (multi-step consistency).
+        loss_rollout = torch.zeros((), device=device)
+        if train and args.rollout_k > 1 and args.w_rollout > 0:
+            loss_rollout = model.rollout_dyn(states, z_pred, next_tgt, z_goal, actions, n_pos,
+                                             args.rollout_k, a_prev, a_prev_mask)
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)
@@ -698,14 +854,30 @@ def main():
             z_cyc = model.dynamics(c.reshape(B * max_pos, D), a_pt,
                                    z_goal.reshape(B * max_pos, D)).reshape(B, max_pos, D)
             loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * loss_mask).sum() / (n_valid * D)
+        # action-consistency (Minghao): the dynamics' OWN predicted latent must decode to the NEXT
+        # action. Anchor t predicts z_hat_{t+1}=z_pred[:,t]; require gc_head(z_hat_{t+1}, goal_{t+1},
+        # h_{t+1}) == a_{t+1}. Couples dynamics->policy -- z_hat_{t+1} is pushed into a policy-decodable
+        # latent (grad flows through both the dynamics that made z_hat and the head that reads it, no
+        # detach). Valid where both t and t+1 are real decision points (consecutive in-window anchors).
+        loss_acons = torch.zeros((), device=device)
+        if train and args.w_acons > 0 and max_pos >= 2:
+            n_pair = B * (max_pos - 1)
+            z_next = z_pred[:, :-1].reshape(n_pair, D)                    # z_hat_{t+1}, t=0..max_pos-2
+            goal_next = z_goal[:, 1:].reshape(n_pair, D)                  # position t+1's goal
+            h_next = h_norm[:, 1:].reshape(n_pair)                        # position t+1's horizon
+            a_next = actions[:, 1:].reshape(n_pair, actions.shape[-1])    # a_{t+1}
+            acons_out = model.gc_head(z_next, goal_next, h_next)
+            acons_loss = model.gc_head.action_loss(acons_out.float(), a_next.float())
+            pair_valid = (valid[:, 1:] & valid[:, :-1]).reshape(-1).float()   # t AND t+1 real
+            loss_acons = (acons_loss * pair_valid).sum() / pair_valid.sum().clamp(min=1)
         # SIGReg over the valid decision-point latents only -- the split regularizes z_t, not the
         # goal/target frames, and states IS the per-position z_t set here.
         loss_reg = sigreg(states[valid].unsqueeze(0)) if train else torch.zeros((), device=device)
-        # temporal straightening: w*(1 - cos(v_t, v_{t+1})) over consecutive latent velocities WITHIN
-        # each window. `seq` is UNFLATTENED (B, T, D) -> velocities never bleed across sequences.
-        # target z (encoder latents, traditional) is also the dynamics-target/cost space, so it
-        # directly straightens what planning rolls and scores; `c` (aggregated context) is an ablation.
-        # Masked to real (non-pad) triples: cos(v_t, v_{t+1}) needs frames t, t+1, t+2 all real.
+        # temporal straightening: w*(1 - cos(v_t, v_{t+1})) over consecutive latent velocities within
+        # each window. seq is unflattened (B, T, D) -> velocities never bleed across sequences. target z
+        # (encoder latents) is also the dynamics-target/cost space, so it straightens what planning rolls
+        # and scores; c (aggregated context) is an ablation. Masked to real (non-pad) triples: cos(v_t,
+        # v_{t+1}) needs frames t, t+1, t+2 all real.
         loss_straight = torch.zeros((), device=device)
         if train and args.w_straight > 0:
             if args.straight_target == "c":
@@ -719,7 +891,55 @@ def main():
             tpos = torch.arange(csim.shape[1], device=device).unsqueeze(0)
             vmask = tpos < (nreal.unsqueeze(1) - 2)                     # real triple t,t+1,t+2
             loss_straight = ((1.0 - csim) * vmask.float()).sum() / vmask.sum().clamp(min=1)
-        return loss_act, loss_dyn, loss_reg, loss_cyc, loss_straight, int(n_valid.item())
+        return (loss_act, loss_dyn, loss_reg, loss_cyc, loss_straight, loss_idm, loss_rollout,
+                loss_acons, int(n_valid.item()))
+
+    def run_batch_prefix(window, goals, action_prefix, horizon, prefix_valid, n_anchor, train):
+        """One Fast-LeWM prefix step. Encodes the window (anchor states + WM targets) + policy goals in
+        one pass; the policy head trains on the anchor action a_t (prefix block 0), the world model on
+        the dense prefix loss ‖ẑ_{t+k}−z_{t+k}‖² over the valid (anchor, horizon) pairs. Returns the same
+        9-tuple as run_batch (cyc/straight/idm/rollout/acons are 0) so the train loop stays uniform."""
+        B, win_max = window.shape[0], window.shape[1]
+        anchor_max, prefix_H, action_dim = action_prefix.shape[1], action_prefix.shape[2], action_prefix.shape[3]
+        window = window.to(device, non_blocking=True)
+        goals = goals.to(device, non_blocking=True)
+        action_prefix = action_prefix.to(device, non_blocking=True).float()
+        horizon = horizon.to(device, non_blocking=True)
+        prefix_valid = prefix_valid.to(device, non_blocking=True)
+        n_anchor = n_anchor.to(device, non_blocking=True)
+        n_win = B * win_max
+        frames_all = torch.cat([window.reshape(n_win, *window.shape[2:]),
+                                goals.reshape(B * anchor_max, *goals.shape[2:])]).float()
+        z_all = model.encode(frames_all)
+        z_window = z_all[:n_win].reshape(B, win_max, D).float()             # anchor states + WM targets
+        z_goal = z_all[n_win:].reshape(B, anchor_max, D).float()           # per-position policy goal
+        state_seq = z_window[:, :anchor_max].float()                       # anchors 0..anchor_max-1
+        pos = torch.arange(anchor_max, device=device).unsqueeze(0)         # (1, anchor_max)
+        anchor_valid = pos < n_anchor.unsqueeze(1)                         # (B, anchor_max)
+        horizon_norm = horizon.clamp(max=args.H_max).float() / Hmax
+        a_prev = a_prev_mask = None
+        if model.agg_action_cond:
+            anchor_action = action_prefix[:, :, 0]                         # a_t at each anchor
+            a_prev = torch.zeros_like(anchor_action); a_prev[:, 1:] = anchor_action[:, :-1]
+            a_prev_mask = anchor_valid & (pos >= 1)
+        action_out, pred_seq = model.forward_seq_prefix(state_seq, z_goal, horizon_norm,
+                                                        action_prefix, a_prev, a_prev_mask)
+        # policy BC loss on the anchor action (prefix block 0), masked to valid anchors
+        anchor_action = action_prefix[:, :, 0]                            # (B, anchor_max, adim)
+        aloss = model.gc_head.action_loss(action_out.reshape(B * anchor_max, -1).float(),
+                                          anchor_action.reshape(B * anchor_max, action_dim).float())
+        n_valid_anchor = anchor_valid.sum().clamp(min=1)
+        loss_act = (aloss * anchor_valid.reshape(-1).float()).sum() / n_valid_anchor
+        # dense prefix WM loss: target z_{t+k} = z_window[:, t+k]  (clamp OOB -> masked out by prefix_valid)
+        horizon_k = torch.arange(1, prefix_H + 1, device=device)          # (prefix_H,)
+        tgt_idx = (pos.reshape(-1, 1) + horizon_k.reshape(1, -1)).clamp(max=win_max - 1)  # (anchor_max, prefix_H)
+        target_seq = z_window[:, tgt_idx]                                 # (B, anchor_max, prefix_H, D)
+        prefix_mask = prefix_valid.float().unsqueeze(-1)                  # (B, anchor_max, prefix_H, 1)
+        n_prefix = prefix_valid.sum().clamp(min=1)
+        loss_dyn = ((pred_seq - target_seq) ** 2 * prefix_mask).sum() / (n_prefix * D)
+        loss_reg = sigreg(state_seq[anchor_valid].unsqueeze(0)) if train else torch.zeros((), device=device)
+        zero = torch.zeros((), device=device)
+        return loss_act, loss_dyn, loss_reg, zero, zero, zero, zero, zero, int(n_valid_anchor.item())
 
     # ---- training loop ----
     best_val = float("inf")
@@ -730,14 +950,22 @@ def main():
 
         # ---- train ----
         model.train()
-        tr_act, tr_dyn, tr_reg, tr_cyc, tr_str, tr_count = 0.0, 0.0, 0.0, 0.0, 0.0, 0
-        for window, goals, actions, horizon, n_pos in train_loader:
+        tr_act, tr_dyn, tr_reg, tr_cyc, tr_str, tr_idm, tr_roll, tr_acons, tr_count = (
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        for batch in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, nval = run_batch(
-                    window, goals, actions, horizon, n_pos, train=True, dyn_mix=alpha)
+                if args.dyn_prefix:
+                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, nval = \
+                        run_batch_prefix(*batch, train=True)
+                else:
+                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, nval = run_batch(
+                        *batch, train=True, dyn_mix=alpha)
+                # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout): the rollout rides the same dyn weight
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
+                        + args.w_dyn * args.w_rollout * loss_roll
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc
-                        + args.w_straight * loss_str)
+                        + args.w_straight * loss_str + args.w_idm * loss_idm
+                        + args.w_acons * loss_acons)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -747,6 +975,9 @@ def main():
             tr_reg += loss_reg.item() * nval
             tr_cyc += loss_cyc.item() * nval
             tr_str += loss_str.item() * nval
+            tr_idm += loss_idm.item() * nval
+            tr_roll += loss_roll.item() * nval
+            tr_acons += loss_acons.item() * nval
             tr_count += nval
         sched.step()
 
@@ -754,25 +985,31 @@ def main():
         model.eval()
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
-            for window, goals, actions, horizon, n_pos in val_loader:
+            for batch in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    loss_act, loss_dyn, _, _, _, nval = run_batch(
-                        window, goals, actions, horizon, n_pos, train=False)
+                    if args.dyn_prefix:
+                        loss_act, loss_dyn, _, _, _, _, _, _, nval = run_batch_prefix(*batch, train=False)
+                    else:
+                        loss_act, loss_dyn, _, _, _, _, _, _, nval = run_batch(*batch, train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
                 va_count += nval
 
         tr_a = tr_act / max(tr_count, 1); tr_d = tr_dyn / max(tr_count, 1)
         tr_r = tr_reg / max(tr_count, 1); tr_c = tr_cyc / max(tr_count, 1)
-        tr_s = tr_str / max(tr_count, 1)
+        tr_s = tr_str / max(tr_count, 1); tr_i = tr_idm / max(tr_count, 1)
+        tr_ro = tr_roll / max(tr_count, 1); tr_ac = tr_acons / max(tr_count, 1)
         va_a = va_act / max(va_count, 1); va_d = va_dyn / max(va_count, 1)
         lrs = sched.get_last_lr()
         dt = time.time() - t0
         cyc_str = f"  cyc={tr_c:.5f}" if args.w_cyc > 0 else ""
         dyn_str = f"  a={alpha:.2f}" if args.dyn_action_from_policy else ""
         str_str = f"  straight={tr_s:.4f}(cos~{1-tr_s:.3f})" if args.w_straight > 0 else ""
+        idm_str = f"  idm={tr_i:.5f}" if args.w_idm > 0 else ""
+        roll_str = f"  roll{args.rollout_k}={tr_ro:.5f}" if args.rollout_k > 1 else ""
+        acons_str = f"  acons={tr_ac:.5f}" if args.w_acons > 0 else ""
         print(f"[lewam-uni] ep {ep+1}/{args.epochs}  "
-              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}  "
+              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}  "
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----

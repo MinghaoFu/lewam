@@ -19,19 +19,17 @@ from torch import nn
 from lewam.models.module import AdaLNBlock, sinusoidal_embedding, ViTEncoder
 
 class GCHead(nn.Module):
-    """cat[state, z_goal] -> 3 AdaLN blocks -> action head. `state` is one z_dim vector by
-    default (the split's z_t); `state_dim` widens it so a caller can pass a concatenated
-    state (e.g. the unified model's [z_t, c_t] skip). Defaulting state_dim=z_dim keeps the
-    split's head byte-identical (in_dim = 2*z_dim).
+    """cat[state, z_goal] -> 3 AdaLN blocks -> action head. state is one z_dim vector by default (the
+    split's z_t); state_dim widens it so a caller can pass a concatenated state (e.g. the unified
+    model's [z_t, c_t] skip). state_dim=z_dim keeps the split's head unchanged (in_dim = 2*z_dim).
 
     head_type:
-      'mse' (default) -- deterministic point action, MSE loss (byte-identical to the old head).
-      'gmm' -- a K-component diagonal-Gaussian Mixture Density Network: the final layer emits
-        K mixture logits + K means (d each) + K log-sigmas (d each); trained by mixture NLL; a
-        SAMPLE draws a component ~ Cat(pi) then reparameterizes within it. Captures multimodal
-        expert actions, so sampling yields diverse ON-MANIFOLD candidates the world model can
-        verify -- the enabler of policy-proposal planning. `forward` returns the RAW head output;
-        consume it with .action_loss / .point / .rsample / .sample (all no-ops passthrough for mse)."""
+      'mse' (default) -- deterministic point action, MSE loss.
+      'gmm' -- a K-component diagonal-Gaussian mixture density network: the final layer emits K logits
+        + K means (d each) + K log-sigmas (d each), trained by mixture NLL; a sample draws a component
+        ~ Cat(pi) then reparameterizes within it. Captures multimodal expert actions, so sampling gives
+        diverse on-manifold candidates for policy-proposal planning. forward returns the raw head
+        output; consume it with .action_loss / .point / .rsample / .sample (passthrough for mse)."""
 
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
                  n_freqs=64, cond_dim=128, dropout=0.1, state_dim=None,
@@ -79,9 +77,9 @@ class GCHead(nn.Module):
         return -torch.logsumexp(logpi + logcomp, dim=-1)                        # (N,)
 
     def point(self, out):
-        """Deterministic action (N,d): identity for mse; for gmm the MOST-LIKELY component's mean
-        mu_{argmax pi} -- a valid MODE. NOT the mixture mean sum_k pi_k mu_k, which for multimodal
-        data lands in the low-density valley BETWEEN modes (an invalid averaged action)."""
+        """Deterministic action (N,d): identity for mse; for gmm the most-likely component's mean
+        mu_{argmax pi} (a valid mode), not the mixture mean sum_k pi_k mu_k, which for multimodal data
+        lands in the low-density valley between modes."""
         if self.head_type != "gmm":
             return out
         logits, mu, _ = self._gmm_params(out)
@@ -101,12 +99,11 @@ class GCHead(nn.Module):
         return mu_s + sig_s * torch.randn_like(mu_s)
 
     def sample(self, out, n, noise=True):
-        """n samples per row (N,n,d) for planning: mse -> mean repeated; gmm -> component~Cat then draw.
-        noise=True: full reparam draw mu + sigma*eps (diverse modes AND within-mode Gaussian). noise=False:
-        the drawn component's MEAN mu_k with NO within-mode Gaussian -- diverse in WHICH MODE but each
-        candidate is a CLEAN on-manifold mode, not corrupted by the (often inflated) sigma. The diagnostic
-        showed sigma~0.33 blows sample error 0.25->0.44, sinking WM-verified policy-proposal; proposing
-        clean modes (noise=False) lets the world model route among the actual modes it can verify."""
+        """n samples per row (N,n,d) for planning: mse -> mean repeated; gmm -> component ~ Cat then draw.
+        noise=True: full reparam draw mu + sigma*eps (diverse modes and within-mode Gaussian).
+        noise=False: the drawn component's mean mu_k, no within-mode Gaussian -- diverse in which mode but
+        each candidate is a clean on-manifold mode, not corrupted by the (often inflated) sigma. Measured:
+        sigma~0.33 blows sample error 0.25->0.44, so clean modes plan better under WM verification."""
         if self.head_type != "gmm":
             return out.unsqueeze(1).expand(-1, n, -1)
         logits, mu, logsig = self._gmm_params(out)
@@ -120,20 +117,20 @@ class GCHead(nn.Module):
 
 
 class GoalCondDynamics(nn.Module):
-    """cat[z_t, a_t, z_goal] -> z_{t+1}. With goal_cond=False it becomes a PURE forward model
-    cat[z_t, a_t] -> z_{t+1} (no goal input) -- the honest world model for planning: a
-    goal-conditioned dynamics can drift toward z_goal using the goal input, partly ignoring a_t,
-    which makes a CEM/planning cost surface flat and exploitable. forward() keeps the 3-arg
-    signature either way (z_goal is simply unused when goal_cond=False) so callers don't change."""
+    """cat[z_t, a_t, z_goal] -> z_{t+1}. With goal_cond=False it becomes a pure forward model
+    cat[z_t, a_t] -> z_{t+1} (no goal input) -- the forward model for planning: a goal-conditioned
+    dynamics can drift toward z_goal and partly ignore a_t, flattening the planning cost surface.
+    forward() keeps the 3-arg signature either way (z_goal unused when goal_cond=False) so callers
+    don't change."""
 
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=512, goal_cond=True, action_embed_dim=0):
         super().__init__()
         self.goal_cond = bool(goal_cond)
-        # action pathway: the raw z-scored action (action_dim) is tiny next to the z_dim latents and
-        # gets drowned in the concat. action_embed_dim>0 projects+normalizes it (Linear -> LayerNorm
-        # -> GELU) to a comparable width BEFORE concat, giving the MLP a real action pathway (stronger
-        # action-sensitivity). 0 = the raw-concat baseline. Note the projection is rank<=action_dim,
-        # so it rebalances the concat width, it does not add action information.
+        # action pathway: the raw z-scored action (action_dim) is tiny next to the z_dim latents and gets
+        # drowned in the concat. action_embed_dim>0 projects+normalizes it (Linear -> LayerNorm -> GELU)
+        # to a comparable width before concat, giving the MLP a real action pathway. 0 = raw-concat
+        # baseline. The projection is rank<=action_dim, so it rebalances the concat width without adding
+        # action information.
         self.action_embed_dim = int(action_embed_dim)
         if self.action_embed_dim > 0:
             self.a_proj = nn.Sequential(

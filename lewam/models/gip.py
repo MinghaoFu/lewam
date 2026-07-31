@@ -263,6 +263,7 @@ def load_lewam_unified_model(run_name, which="best"):
     proj_hidden = int(proj_w.shape[0]) if proj_w is not None else None
     model = LeWAMUnified(
         encoder_size=str(cfg.get("encoder_size", "tiny")),
+        encoder_backbone=str(cfg.get("encoder_backbone", "scratch")),
         embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
@@ -276,6 +277,12 @@ def load_lewam_unified_model(run_name, which="best"):
         head_type=str(cfg.get("head_type", "mse")), n_mix=int(cfg.get("n_mix", 5)),
         flow_H=int(cfg.get("flow_H", 1)),
         dyn_action_embed_dim=int(cfg.get("dyn_action_embed_dim", 0) or 0),
+        use_idm=bool(float(cfg.get("w_idm", 0) or 0) > 0),
+        use_prefix=bool(cfg.get("use_prefix", False)),
+        prefix_H=int(cfg.get("prefix_H", 5)),
+        prefix_depth=int(cfg.get("prefix_depth", 2)),
+        prefix_heads=int(cfg.get("prefix_heads", 4)),
+        dyn_prefix_goal=bool(cfg.get("dyn_prefix_goal", False)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
@@ -840,21 +847,20 @@ class LeWAMSplitPolicy(BasePolicy):
 
 # LeWAM-Unified eval adapter (mode: unified_policy = reactive, full-causal from episode start)
 class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
-    """Eval adapter for LeWAM-Unified. Full-causal from the episode start, mirroring training
-    (each start is a fresh start). Per env it CACHES the encoded latent of every observed frame
-    (encoder is deterministic at eval, so each frame is encoded once), re-runs the causal
-    aggregator over the growing latent history, and reads the current (last) position:
+    """Eval adapter for LeWAM-Unified. Full-causal from the episode start, mirroring training (each
+    start is a fresh start). Per env it caches the encoded latent of every observed frame (encoder is
+    deterministic at eval, so each frame is encoded once), re-runs the causal aggregator over the
+    growing latent history, and reads the current (last) position:
 
       z_t   = model.encode(current frame)          # appended to the per-env latent cache
       c_t   = model.aggregate([z_start..z_t])[-1]  # causal, over the whole history so far
       a     = model.gc_head(c_t, z_goal, h_norm)   # (block_dim) z-scored action block
 
-    The goal is the FIXED goal frame (encoded each replan); horizon counts down from
-    goal_offset/action_block. If agg_action_cond, the per-env cache of the executed z-scored
-    blocks (the block that led into each frame; null at the start) supplies a_{tau-1}. Live envs
-    generally share a history length, but lengths are padded per batch and each env's LAST valid
-    position is read, so unequal lengths are handled. Un-z-score / action-unstack / model.eval()
-    are inherited from LeWAMSplitPolicy."""
+    The goal is the fixed goal frame (encoded each replan); horizon counts down from
+    goal_offset/action_block. If agg_action_cond, the per-env cache of executed z-scored blocks (the
+    block that led into each frame; null at the start) supplies a_{tau-1}. Lengths are padded per batch
+    and each env's last valid position is read, so unequal history lengths are handled. Un-z-score /
+    action-unstack / model.eval() are inherited from LeWAMSplitPolicy."""
 
     def __init__(self, model, cfg, *a, **kw):
         # ctx_cap>0 -> aggregate only the LAST k cached latents (a sliding context window), for the
@@ -927,7 +933,7 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             gpx = info_dict["goal"][replan]
             gpx = gpx[:, -1] if gpx.ndim == 5 else gpx  # (R,C,H,W) single goal frame
             cpx = px[:, -1] if px.ndim == 5 else px     # (R,C,H,W) current frame
-            # encode the new current frame ONCE and cache it; cache the prev emitted block too
+            # encode the new current frame once and cache it; cache the prev emitted block too
             z_new = self.model.encode(cpx.to(dev).float())         # (R, D)
             z_g = self.model.encode(gpx.to(dev).float())           # (R, D) fixed goal
             for row, i in enumerate(replan):
@@ -958,7 +964,7 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
                     pblk = self._pblk_buf[i]
                     if self.ctx_cap and self.ctx_cap > 0:
                         if len(pblk) > self.ctx_cap:
-                            # Truncated window: training always presents a window's FIRST position
+                            # Truncated window: training always presents a window's first position
                             # with the null action (fresh start), so the capped window must too --
                             # feeding the real pre-window block here is a train/eval mismatch
                             # (owner-confirmed bug, 2026-07-20).
@@ -994,11 +1000,10 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
-# LeWAM-Unified CEM PLANNER (mode: unified_cem) -- plans with the goal-conditioned DYNAMICS head
-# instead of the reactive gc_head. Diagnostic: if CEM reaches goals where the reactive policy fails,
-# the world model is fine and the reactive head/rollout is the weak link (undertraining); if CEM
-# also fails, the encoder/dynamics is the problem. Also the base for "does a policy trained in
-# parallel to the dynamics improve the dynamics" (compare CEM SR with/without the action head).
+# LeWAM-Unified CEM planner (mode: unified_cem) -- plans with the dynamics head instead of the
+# reactive gc_head. Diagnostic: if CEM reaches goals the reactive policy fails, the world model is
+# fine and the reactive head/rollout is the weak link (undertraining); if CEM also fails, the
+# encoder/dynamics is the problem.
 class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
     """Receding-horizon CEM over z-scored action BLOCKS, scored by predicted latent distance to the
     goal. Rollout: z_0 = encode(current); z_{h+1} = model.dynamics(z_h, a_h, z_goal); cost = sum_h
@@ -1011,182 +1016,225 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
         self.cem_H = int(kw.pop("cem_H", 5))         # plan horizon (blocks)
         self.cem_std = float(kw.pop("cem_std", 1.0))  # init std (z-scored actions ~ unit var)
         self.cem_warm = bool(kw.pop("cem_warm", False))  # seed CEM mean from the reactive gc_head plan
-        # cem_state: 'c' feeds dynamics the AGGREGATED context c=Aggr([z..]) it was TRAINED on
-        # (rollout re-aggregates the sliding window each step -- the faithful world-model loop);
-        # 'z' feeds the raw last latent (the old shortcut, kept as an ablation to measure the gap).
+        # cem_state: 'c' feeds dynamics the aggregated context c=Aggr([z..]) it was trained on (rollout
+        # re-aggregates the sliding window each step -- the faithful world-model loop); 'z' feeds the raw
+        # last latent (the old shortcut, kept as an ablation to measure the gap).
         self.cem_state = str(kw.pop("cem_state", "c"))
-        # receding-horizon MPC scheme: False (default) executes only a_0 then replans EVERY frame
-        # (max feedback); True executes the ENTIRE optimized H-block plan before replanning (LeWM's
-        # scheme -- replan cadence = the horizon, open-loop within it).
+        # receding-horizon MPC scheme: False (default) executes only a_0 then replans every frame (max
+        # feedback); True executes the entire optimized H-block plan before replanning (LeWM's scheme --
+        # replan cadence = the horizon, open-loop within it).
         self.cem_exec_full = bool(kw.pop("cem_exec_full", False))
         # 'cem' (default) = Gaussian sample+refine around the warm-start; 'policy' = sample K candidate
         # sequences from the (GMM) head and keep the WM-verified best (on-manifold, no refinement).
         self.cem_propose = str(kw.pop("cem_propose", "cem"))
-        # cem_cost: 'sum' (default) accumulates ||z_h - z_goal||^2 over EVERY rollout step -- penalizes
-        # intermediate states for not already being at the goal, so it rewards rushing to the goal region
-        # ASAP (and the correct gradual approach, which is far from the goal mid-trajectory, is penalized).
-        # 'final' (DEFAULT) scores ONLY the terminal ||z_H - z_goal||^2 -- LeWM's objective, matching the
-        # goal being defined H steps ahead (the plan just has to LAND on it, path unconstrained). Measured
-        # +15 SR over 'sum' warm on pushT off25 (62.4 -> 77.2, 5 seeds); 'sum' kept as an ablation.
+        # cem_cost: 'sum' accumulates ||z_h - z_goal||^2 over every rollout step -- penalizes intermediate
+        # states for not already being at the goal, rewarding a rush to the goal region (the correct gradual
+        # approach is far from the goal mid-trajectory, so it's penalized). 'final' (default) scores only the
+        # terminal ||z_H - z_goal||^2 -- LeWM's objective, matching the goal defined H steps ahead (the plan
+        # just has to land on it, path unconstrained). Measured +15 SR over 'sum' warm on pushT off25
+        # (62.4 -> 77.2, 5 seeds); 'sum' kept as an ablation.
         self.cem_cost = str(kw.pop("cem_cost", "final"))
+        # cem_dyn_mode: how the world model scores a candidate. 'prefix' = Fast-LeWM one-forward parallel
+        # prefix prediction from the fixed anchor (no compounding); 'rollout' = classic autoregressive
+        # H-step rollout (the prefix model's k=1 head is the one-step transition). Default 'prefix' for a
+        # prefix model, 'rollout' for single-step GoalCondDynamics (which has no prefix path).
+        _dyn_mode = str(kw.pop("cem_dyn_mode", "auto"))
+        self.cem_dyn_mode = (("prefix" if getattr(model, "use_prefix", False) else "rollout")
+                             if _dyn_mode == "auto" else _dyn_mode)
+        # dedicated RNG for CEM sampling, seeded from the eval seed -> reproducible warm-CEM. The
+        # global torch RNG state at the sampling point depends on everything consumed before it, so a
+        # shared stream makes CEM non-deterministic run-to-run (~±2 SR); a seeded generator pins it.
+        self._cem_seed = int(kw.pop("cem_seed", 0))
+        self._cem_gen = None
         super().__init__(model, cfg, *a, **kw)
         assert self.ctx_cap and self.ctx_cap > 0, "unified_cem needs ctx_cap>0 (the trained context_len)"
         self.type = f"lewam_unified_cem_{self.cem_state}" + ("_warm" if self.cem_warm else "")
 
-    def _agg_c(self, win, vlen):
-        """Context at each row's last valid position: c = aggregate(win)[vlen-1]. win (B,cap,D)
-        left-aligned (real/imagined content in [0:vlen], zero-pad after; causal so the pad is
-        never attended by the read position). Returns (B, D)."""
-        a_prev = a_prev_mask = None
-        if getattr(self, "action_cond", False):
-            # AdaLN aggregator needs a real (non-None) a_prev tensor; feed null-action everywhere
-            # (mask all-False -> the trained null_action conditioning, the fresh-start default).
-            B, cap = win.shape[0], win.shape[1]
-            a_prev = torch.zeros(B, cap, self.block_dim, device=win.device, dtype=win.dtype)
-            a_prev_mask = torch.zeros(B, cap, dtype=torch.bool, device=win.device)
-        c = self.model.aggregate(win, a_prev, a_prev_mask)               # (B, cap, D)
-        return c[torch.arange(win.shape[0], device=win.device), (vlen - 1).clamp(min=0)]
+    def _dyn_step(self, ctx, action, z_goal):
+        """One-step latent transition, dynamics-agnostic. PrefixDynamics -> the k=1 prefix head (an
+        H-invariant one-step model); single-step GoalCondDynamics -> called directly. Lets the
+        autoregressive rollout / warm-start loops work for both dynamics types."""
+        if getattr(self.model, "use_prefix", False):
+            goal_in = z_goal if self.model.dynamics.goal_cond else None
+            return self.model.dynamics(ctx, action.unsqueeze(1), goal_in)[:, 0]
+        return self.model.dynamics(ctx, action, z_goal)
 
-    def _slide(self, win, vlen, z, cap):
-        """Append latent z to the sliding window: rows with room place z at index vlen; full rows
-        shift left (drop oldest) and put z last. Keeps win (B,cap,D) left-aligned, newest last."""
-        B = win.shape[0]
-        full = (vlen >= cap)
-        win_shift = torch.cat([win[:, 1:], z[:, None]], dim=1)           # (B,cap,D) drop idx0, add z
-        win_place = win.clone()
-        win_place[torch.arange(B, device=win.device), vlen.clamp(max=cap - 1)] = z
-        win_new = torch.where(full[:, None, None], win_shift, win_place)
-        return win_new, torch.clamp(vlen + 1, max=cap)
+    def _context_at_head(self, window, win_len):
+        """Aggregated world-model context at each row's newest valid position:
+        context = aggregate(window)[win_len - 1]. `window` is (batch, ctx_cap, latent_dim),
+        left-aligned (real/imagined latents in [0:win_len], zero-padded after; the aggregator is
+        causal so the padding is never attended by the read position). Returns (batch, latent_dim)."""
+        prev_action = prev_action_mask = None
+        if getattr(self, "action_cond", False):
+            # the AdaLN aggregator needs a real (non-None) prev-action tensor; feed the null action
+            # everywhere (mask all-False -> trained null_action conditioning, the fresh-start default).
+            batch, ctx_cap = window.shape[0], window.shape[1]
+            prev_action = torch.zeros(batch, ctx_cap, self.block_dim, device=window.device, dtype=window.dtype)
+            prev_action_mask = torch.zeros(batch, ctx_cap, dtype=torch.bool, device=window.device)
+        context = self.model.aggregate(window, prev_action, prev_action_mask)   # (batch, ctx_cap, latent_dim)
+        rows = torch.arange(window.shape[0], device=window.device)
+        return context[rows, (win_len - 1).clamp(min=0)]
+
+    def _append_latent(self, window, win_len, latent, ctx_cap):
+        """Append `latent` to the sliding window. Rows with room place it at index win_len; full
+        rows shift left (drop the oldest) and put it last. Keeps `window` (batch, ctx_cap,
+        latent_dim) left-aligned, newest last. Returns (updated_window, updated_win_len)."""
+        batch = window.shape[0]
+        is_full = (win_len >= ctx_cap)
+        window_shifted = torch.cat([window[:, 1:], latent[:, None]], dim=1)   # drop idx0, append latent
+        window_placed = window.clone()
+        rows = torch.arange(batch, device=window.device)
+        window_placed[rows, win_len.clamp(max=ctx_cap - 1)] = latent
+        window_next = torch.where(is_full[:, None, None], window_shifted, window_placed)
+        return window_next, torch.clamp(win_len + 1, max=ctx_cap)
 
     @torch.no_grad()
     def get_action(self, info_dict, **kw):
         info_dict = self._prepare_info(info_dict)
-        n = self.env.num_envs
-        dev = next(self.model.parameters()).device
+        n_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        if self._cem_gen is None:                                   # seed CEM sampling from the eval seed
+            self._cem_gen = torch.Generator(device=device); self._cem_gen.manual_seed(self._cem_seed)
         self._call += 1
         if self._action_buffer is None:
-            self._action_buffer = [deque() for _ in range(n)]
-            self._steps_left = np.full(n, self.horizon0, dtype=np.float64)
+            self._action_buffer = [deque() for _ in range(n_envs)]
+            self._steps_left = np.full(n_envs, self.horizon0, dtype=np.float64)
         if self._lat_buf is None:
-            self._lat_buf = [[] for _ in range(n)]
+            self._lat_buf = [[] for _ in range(n_envs)]
         flush = info_dict.pop("_needs_flush", None)
         if flush is not None:
-            for i in range(n):
-                if flush[i]:
-                    self._action_buffer[i].clear()
-                    self._lat_buf[i].clear()                             # new episode: fresh history
-                    self._steps_left[i] = self.horizon0
+            for env_i in range(n_envs):
+                if flush[env_i]:
+                    self._action_buffer[env_i].clear()
+                    self._lat_buf[env_i].clear()                        # new episode: fresh history
+                    self._steps_left[env_i] = self.horizon0
         term = info_dict.get("terminated")
-        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n, dtype=bool)
-        replan = [i for i in range(n) if len(self._action_buffer[i]) == 0 and not dead[i]]
-        if replan:
-            px = info_dict["pixels"][replan]
+        is_dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n_envs, dtype=bool)
+        # only envs whose action buffer has drained (and aren't done) need a fresh plan this step
+        replan_envs = [i for i in range(n_envs) if len(self._action_buffer[i]) == 0 and not is_dead[i]]
+        if replan_envs:
+            cur_px = info_dict["pixels"][replan_envs]
             assert "goal" in info_dict, "LeWAM-Unified CEM needs info_dict['goal']"
-            gpx = info_dict["goal"][replan]
-            gpx = gpx[:, -1] if gpx.ndim == 5 else gpx
-            cpx = px[:, -1] if px.ndim == 5 else px
-            z_new = self.model.encode(cpx.to(dev).float())               # (R, D) current latent
-            zg = self.model.encode(gpx.to(dev).float())                 # (R, D) goal latent
-            for row, i in enumerate(replan):
-                self._lat_buf[i].append(z_new[row])                     # cache the REAL latent
+            goal_px = info_dict["goal"][replan_envs]
+            goal_px = goal_px[:, -1] if goal_px.ndim == 5 else goal_px
+            cur_px = cur_px[:, -1] if cur_px.ndim == 5 else cur_px
+            z_cur = self.model.encode(cur_px.to(device).float())        # (n_replan, latent_dim) current latent
+            z_goal = self.model.encode(goal_px.to(device).float())      # (n_replan, latent_dim) goal latent
+            for row, env_i in enumerate(replan_envs):
+                self._lat_buf[env_i].append(z_cur[row])                 # cache the REAL latent
             if self.log_latents:                                        # executed real dist-to-goal probe
-                for row, i in enumerate(replan):
-                    self._lat_log.append((self._call, int(i),
-                                          z_new[row].detach().cpu(), zg[row].detach().cpu()))
-            R, D = z_new.shape
-            K, M, H, bd = self.cem_K, self.cem_M, self.cem_H, self.block_dim
-            cap = int(self.ctx_cap)                                     # trained context window (=context_len)
-            # initial window = last `cap` REAL latents per env, left-aligned in a (R,cap,D) buffer
-            win0 = torch.zeros(R, cap, D, device=dev)
-            vlen0 = torch.empty(R, dtype=torch.long, device=dev)
-            for row, i in enumerate(replan):
-                w = torch.stack(self._lat_buf[i][-cap:], dim=0)         # (li, D), li<=cap
-                win0[row, : w.shape[0]] = w
-                vlen0[row] = w.shape[0]
-            zgk = zg.unsqueeze(1).expand(R, K, D).reshape(R * K, D)
-            # ---- propose candidate H-block plans, keep the WM-verified best -> `mean` (R,H,bd) ----
+                for row, env_i in enumerate(replan_envs):
+                    self._lat_log.append((self._call, int(env_i),
+                                          z_cur[row].detach().cpu(), z_goal[row].detach().cpu()))
+            n_replan, latent_dim = z_cur.shape
+            n_samples, n_elites = self.cem_K, self.cem_M
+            plan_horizon, block_dim = self.cem_H, self.block_dim        # horizon in action-BLOCKS
+            ctx_cap = int(self.ctx_cap)                                 # trained context window (=context_len)
+            # initial window = last `ctx_cap` REAL latents per env, left-aligned in (n_replan,ctx_cap,latent_dim)
+            window0 = torch.zeros(n_replan, ctx_cap, latent_dim, device=device)
+            win_len0 = torch.empty(n_replan, dtype=torch.long, device=device)
+            for row, env_i in enumerate(replan_envs):
+                real_latents = torch.stack(self._lat_buf[env_i][-ctx_cap:], dim=0)   # (len, latent_dim), len<=ctx_cap
+                window0[row, : real_latents.shape[0]] = real_latents
+                win_len0[row] = real_latents.shape[0]
+            # goal replicated once per candidate sample: (n_replan*n_samples, latent_dim)
+            z_goal_rep = z_goal.unsqueeze(1).expand(n_replan, n_samples, latent_dim).reshape(n_replan * n_samples, latent_dim)
+            # ---- propose candidate H-block plans, keep the WM-verified best -> `plan_mean` (n_replan,H,block_dim) ----
             if self.cem_propose in ("policy", "policy_modes"):
-                # POLICY-PROPOSAL MPC: sample K sequences from the (GMM) head AUTOREGRESSIVELY, roll each
-                # through the dynamics, score sum ||z_h - z_goal||^2, keep the best per env. No isotropic
-                # CEM noise, no refinement -> candidates stay on the policy's ACTION MANIFOLD (where the WM
-                # is accurate, per the diagnostic), so the verify step is honest and can't be exploited.
-                # 'policy'       -> full reparam draws mu+sigma*eps (the diagnostic showed the inflated
-                #                   sigma~0.33 blurs every candidate to 0.44 err, worse than the clean mode).
-                # 'policy_modes' -> the drawn components' MEANS only (noise=False): K CLEAN modes, diverse in
-                #                   WHICH mode, so the WM does the routing the weight head pi under-does
-                #                   (oracle comp 0.19 << mode 0.27). Needs a stochastic head (gmm); an mse
-                #                   head has one point -> both reduce to reactive.
-                _pnoise = (self.cem_propose == "policy")
-                win = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D).clone()
-                vlen = vlen0.unsqueeze(1).expand(R, K).reshape(R * K).clone()
-                steps = np.repeat(np.maximum(self._steps_left[replan], 1.0).astype(np.float64), K)  # (R*K,)
-                cost = torch.zeros(R * K, device=dev); acts = []
-                for _h in range(H):
-                    hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
-                                      device=dev, dtype=torch.float32)
-                    c = self._agg_c(win, vlen)                          # (R*K, D)
-                    a_h = self.model.gc_head.sample(self.model.gc_head(c, zgk, hn), 1, noise=_pnoise).squeeze(1)  # (R*K, bd)
-                    acts.append(a_h)
-                    z_nx = self.model.dynamics(c, a_h, zgk)             # (R*K, D)
-                    _step = ((z_nx - zgk) ** 2).sum(-1)
-                    cost = _step if self.cem_cost == "final" else cost + _step
-                    win, vlen = self._slide(win, vlen, z_nx, cap)
-                    steps = np.maximum(steps - 1.0, 1.0)
-                best = cost.reshape(R, K).argmin(dim=1)                 # (R,) WM-verified best candidate
-                mean = torch.stack(acts, dim=1).reshape(R, K, H, bd)[torch.arange(R, device=dev), best]  # (R,H,bd)
+                # policy-proposal MPC: sample n_samples sequences from the (GMM) head autoregressively, roll
+                # each through the dynamics, score sum ||z_h - z_goal||^2, keep the best per env. No isotropic
+                # CEM noise, no refinement -> candidates stay on the policy's action manifold (where the WM is
+                # accurate), so the verify step is honest and can't be exploited.
+                # 'policy'       -> full reparam draws mu+sigma*eps (measured: inflated sigma~0.33 blurs every
+                #                   candidate to 0.44 err, worse than the clean mode).
+                # 'policy_modes' -> the drawn components' means only (noise=False): clean modes, diverse in
+                #                   which mode, so the WM routes among modes the weight head pi under-does
+                #                   (oracle comp 0.19 << mode 0.27). Needs a stochastic head (gmm); an mse head
+                #                   has one point -> both reduce to reactive.
+                sample_noise = (self.cem_propose == "policy")
+                window = window0.unsqueeze(1).expand(n_replan, n_samples, ctx_cap, latent_dim).reshape(n_replan * n_samples, ctx_cap, latent_dim).clone()
+                win_len = win_len0.unsqueeze(1).expand(n_replan, n_samples).reshape(n_replan * n_samples).clone()
+                steps_left = np.repeat(np.maximum(self._steps_left[replan_envs], 1.0).astype(np.float64), n_samples)
+                cost = torch.zeros(n_replan * n_samples, device=device); action_blocks = []
+                for _h in range(plan_horizon):
+                    horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
+                                                device=device, dtype=torch.float32)
+                    context = self._context_at_head(window, win_len)    # (n_replan*n_samples, latent_dim)
+                    action_blk = self.model.gc_head.sample(self.model.gc_head(context, z_goal_rep, horizon_norm), 1, noise=sample_noise).squeeze(1)
+                    action_blocks.append(action_blk)
+                    z_next = self._dyn_step(context, action_blk, z_goal_rep)          # WM imagines next latent (k=1 for prefix)
+                    step_cost = ((z_next - z_goal_rep) ** 2).sum(-1)
+                    cost = step_cost if self.cem_cost == "final" else cost + step_cost
+                    window, win_len = self._append_latent(window, win_len, z_next, ctx_cap)
+                    steps_left = np.maximum(steps_left - 1.0, 1.0)
+                best_sample = cost.reshape(n_replan, n_samples).argmin(dim=1)         # (n_replan,) WM-verified best
+                plan_mean = torch.stack(action_blocks, dim=1).reshape(n_replan, n_samples, plan_horizon, block_dim)[torch.arange(n_replan, device=device), best_sample]
             else:
-                # warm-start mean: AR-roll gc_head + dynamics through the SAME windowed context (R-batched)
+                # warm-start mean: AR-roll gc_head + dynamics through the same windowed context (batched over replans)
                 if self.cem_warm:
-                    steps = np.maximum(self._steps_left[replan], 1.0).astype(np.float64)
-                    win, vlen, _warm = win0.clone(), vlen0.clone(), []
-                    for _h in range(H):
-                        hn = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
-                                          device=dev, dtype=torch.float32)
-                        c = self._agg_c(win, vlen)                      # (R, D) trained context
-                        a_h = self.model.gc_head.point(self.model.gc_head(c, zg, hn))   # (R, bd) mixture mean for gmm
-                        _warm.append(a_h)
-                        win, vlen = self._slide(win, vlen, self.model.dynamics(c, a_h, zg), cap)
-                        steps = np.maximum(steps - 1.0, 1.0)
-                    mean = torch.stack(_warm, dim=1)                    # (R, H, bd)
+                    steps_left = np.maximum(self._steps_left[replan_envs], 1.0).astype(np.float64)
+                    window, win_len, warm_blocks = window0.clone(), win_len0.clone(), []
+                    for _h in range(plan_horizon):
+                        horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
+                                                    device=device, dtype=torch.float32)
+                        context = self._context_at_head(window, win_len)    # (n_replan, latent_dim) trained context
+                        action_blk = self.model.gc_head.point(self.model.gc_head(context, z_goal, horizon_norm))  # mixture mean for gmm
+                        warm_blocks.append(action_blk)
+                        window, win_len = self._append_latent(window, win_len, self._dyn_step(context, action_blk, z_goal), ctx_cap)
+                        steps_left = np.maximum(steps_left - 1.0, 1.0)
+                    plan_mean = torch.stack(warm_blocks, dim=1)             # (n_replan, plan_horizon, block_dim)
                 else:
-                    mean = torch.zeros(R, H, bd, device=dev)
-                std = torch.full((R, H, bd), self.cem_std, device=dev)
-                win0k = win0.unsqueeze(1).expand(R, K, cap, D).reshape(R * K, cap, D)
-                vlen0k = vlen0.unsqueeze(1).expand(R, K).reshape(R * K)
-                arangeRK = torch.arange(R * K, device=dev)
+                    plan_mean = torch.zeros(n_replan, plan_horizon, block_dim, device=device)
+                plan_std = torch.full((n_replan, plan_horizon, block_dim), self.cem_std, device=device)
+                # window/win_len for every (replan, sample) candidate, seeded from the real window
+                window0_rep = window0.unsqueeze(1).expand(n_replan, n_samples, ctx_cap, latent_dim).reshape(n_replan * n_samples, ctx_cap, latent_dim)
+                win_len0_rep = win_len0.unsqueeze(1).expand(n_replan, n_samples).reshape(n_replan * n_samples)
+                flat_rows = torch.arange(n_replan * n_samples, device=device)
                 for _ in range(self.cem_iter):
-                    samp = mean.unsqueeze(1) + std.unsqueeze(1) * torch.randn(R, K, H, bd, device=dev)
-                    sampk = samp.reshape(R * K, H, bd)
-                    win, vlen = win0k.clone(), vlen0k.clone()
-                    cost = torch.zeros(R * K, device=dev)
-                    for h in range(H):
-                        if self.cem_state == "z":                      # ablation: raw last latent
-                            c = win[arangeRK, (vlen - 1).clamp(min=0)]
-                        else:                                          # correct: aggregated context
-                            c = self._agg_c(win, vlen)
-                        z_nx = self.model.dynamics(c, sampk[:, h], zgk)  # (R*K, D)
-                        _step = ((z_nx - zgk) ** 2).sum(-1)
-                        cost = _step if self.cem_cost == "final" else cost + _step
-                        win, vlen = self._slide(win, vlen, z_nx, cap)
-                    cost = cost.reshape(R, K)
-                    idx = cost.argsort(dim=1)[:, :M]                   # (R, M) best
-                    elites = torch.gather(samp, 1, idx[:, :, None, None].expand(R, M, H, bd))
-                    mean = elites.mean(1)
-                    std = elites.std(1).clamp(min=1e-3)
-            # execute a_0 only (replan every frame), or the whole H-block plan (LeWM receding MPC)
-            n_exec = self.cem_H if self.cem_exec_full else 1
-            for h in range(n_exec):
-                z_blk = mean[:, h]                                      # (R, bd) block h of the plan
-                raw = (z_blk.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
-                raw = raw.reshape(R, self.action_block, self.action_dim).cpu()
-                for row, i in enumerate(replan):
-                    self._action_buffer[i].extend(raw[row])
-            for row, i in enumerate(replan):
-                self._steps_left[i] = max(self._steps_left[i] - float(n_exec), 1.0)
-        action = torch.full((n, self.action_dim), float("nan"))
-        for i in range(n):
-            if not dead[i]:
-                action[i] = self._action_buffer[i].popleft()
+                    action_seqs = plan_mean.unsqueeze(1) + plan_std.unsqueeze(1) * torch.randn(n_replan, n_samples, plan_horizon, block_dim, device=device, generator=self._cem_gen)
+                    action_seqs_flat = action_seqs.reshape(n_replan * n_samples, plan_horizon, block_dim)
+                    if self.cem_dyn_mode == "prefix":
+                        # Fast-LeWM: one forward predicts all H prefix latents from the fixed anchor
+                        # context (no sliding, no latent feedback -> no compounding); score the terminal.
+                        anchor_ctx = self._context_at_head(window0_rep, win_len0_rep)   # (n_replan*n_samples, D)
+                        goal_in = z_goal_rep if self.model.dynamics.goal_cond else None
+                        pred_seq = self.model.dynamics(anchor_ctx, action_seqs_flat, goal_in)   # (RK, H, D)
+                        if self.cem_cost == "final":
+                            cost = ((pred_seq[:, -1] - z_goal_rep) ** 2).sum(-1)
+                        else:
+                            cost = ((pred_seq - z_goal_rep.unsqueeze(1)) ** 2).sum(-1).sum(-1)
+                    else:
+                        # classic autoregressive rollout: feed each predicted latent back, re-aggregate.
+                        window, win_len = window0_rep.clone(), win_len0_rep.clone()
+                        cost = torch.zeros(n_replan * n_samples, device=device)
+                        for h in range(plan_horizon):
+                            if self.cem_state == "z":                  # ablation: raw last latent
+                                context = window[flat_rows, (win_len - 1).clamp(min=0)]
+                            else:                                      # correct: aggregated context
+                                context = self._context_at_head(window, win_len)
+                            z_next = self._dyn_step(context, action_seqs_flat[:, h], z_goal_rep)  # WM imagines next latent
+                            step_cost = ((z_next - z_goal_rep) ** 2).sum(-1)
+                            cost = step_cost if self.cem_cost == "final" else cost + step_cost
+                            window, win_len = self._append_latent(window, win_len, z_next, ctx_cap)
+                    cost = cost.reshape(n_replan, n_samples)
+                    elite_idx = cost.argsort(dim=1)[:, :n_elites]       # (n_replan, n_elites) best candidates
+                    elite_seqs = torch.gather(action_seqs, 1, elite_idx[:, :, None, None].expand(n_replan, n_elites, plan_horizon, block_dim))
+                    plan_mean = elite_seqs.mean(1)
+                    plan_std = elite_seqs.std(1).clamp(min=1e-3)
+            # execute block 0 only (replan every frame), or the whole H-block plan (LeWM receding MPC)
+            n_exec_blocks = self.cem_H if self.cem_exec_full else 1
+            for h in range(n_exec_blocks):
+                block = plan_mean[:, h]                                 # (n_replan, block_dim) block h of the plan
+                raw_action = (block.reshape(n_replan, self.frameskip, self.raw_adim) * self._astd + self._amean)
+                raw_action = raw_action.reshape(n_replan, self.action_block, self.action_dim).cpu()
+                for row, env_i in enumerate(replan_envs):
+                    self._action_buffer[env_i].extend(raw_action[row])
+            for row, env_i in enumerate(replan_envs):
+                self._steps_left[env_i] = max(self._steps_left[env_i] - float(n_exec_blocks), 1.0)
+        action = torch.full((n_envs, self.action_dim), float("nan"))
+        for env_i in range(n_envs):
+            if not is_dead[env_i]:
+                action[env_i] = self._action_buffer[env_i].popleft()
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
@@ -1257,6 +1305,8 @@ def build_policy(cfg, model, adim, process, transform):
                 cem_exec_full=bool(ge.get("cem_exec_full", False)),
                 cem_propose=str(ge.get("cem_propose", "cem")),
                 cem_cost=str(ge.get("cem_cost", "final")),
+                cem_dyn_mode=str(ge.get("cem_dyn_mode", "auto")),   # prefix | rollout | auto (model-based)
+                cem_seed=int(cfg.seed),                              # seed CEM sampling -> reproducible warm-CEM
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config): the

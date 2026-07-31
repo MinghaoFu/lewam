@@ -400,13 +400,32 @@ class ViTEncoder(nn.Module):
     """ViT encoder + projector"""
 
     def __init__(self, img_size=224, size="tiny", output_type="cls",
-                output_dim=192, proj_mlp_scale=4, proj_hidden=None):
+                output_dim=192, proj_mlp_scale=4, proj_hidden=None,
+                backbone="scratch", backbone_ckpt=None):
         super().__init__()
         self.output_type = output_type
+        self.backbone = backbone
 
-        self.vit = vit_hf(size=size, patch_size=14, image_size=img_size,
-                              pretrained=False, use_mask_token=False)
-        mlp_in = self.vit.config.hidden_size
+        if backbone == "scratch":
+            self.vit = vit_hf(size=size, patch_size=14, image_size=img_size,
+                                  pretrained=False, use_mask_token=False)
+            mlp_in = self.vit.config.hidden_size
+        elif backbone == "dinov3s":
+            # FROZEN pretrained DINOv3 ViT-small/16 (timm). CLS features (384). Same ImageNet
+            # mean/std as the pipeline, so no normalization change. Built at the model's default
+            # config so the pretrained state_dict matches; 224 input is handled by pos-embed
+            # interpolation. backbone_ckpt (a state_dict .pt) is loaded ONLY at train init; at eval
+            # the frozen weights are already inside the full checkpoint (strict load overwrites).
+            import timm
+            self.vit = timm.create_model("vit_small_patch16_dinov3", pretrained=False, num_classes=0)
+            if backbone_ckpt:
+                self.vit.load_state_dict(torch.load(backbone_ckpt, map_location="cpu"), strict=True)
+            for p in self.vit.parameters():
+                p.requires_grad_(False)
+            self.vit.eval()
+            mlp_in = self.vit.num_features
+        else:
+            raise ValueError(f"unknown encoder backbone {backbone!r}")
         # maps to representation space using a MLP with Batch Normalization.
         # necessary because the final ViT layer applies Layer Normalization, which prevents
         # SIGReg being optimized effectively.
@@ -416,12 +435,23 @@ class ViTEncoder(nn.Module):
                              hidden_dim=(proj_hidden if proj_hidden else proj_mlp_scale * output_dim),
                              norm_fn=nn.BatchNorm1d, norm_first=False)
 
+    def train(self, mode=True):
+        super().train(mode)
+        if self.backbone != "scratch":
+            self.vit.eval()  # keep the frozen pretrained backbone in eval mode always
+        return self
+
     def forward(self, pixels):
         """pixels: (N, 3, H, W)"""
-        out = self.vit(pixels, interpolate_pos_encoding=True)
-        if self.output_type == "cls":
-            return self.projector(out.last_hidden_state[:, 0])  # (N, D)
-        return self.projector(out.last_hidden_state[:, 1:])  # (N, n_patch, D)
+        if self.backbone == "scratch":
+            out = self.vit(pixels, interpolate_pos_encoding=True)
+            if self.output_type == "cls":
+                return self.projector(out.last_hidden_state[:, 0])  # (N, D)
+            return self.projector(out.last_hidden_state[:, 1:])  # (N, n_patch, D)
+        # frozen pretrained backbone (timm): pooled CLS features, no graph through the backbone
+        with torch.no_grad():
+            feat = self.vit(pixels)  # (N, num_features)
+        return self.projector(feat)
 
 
 class ARPredictor(nn.Module):

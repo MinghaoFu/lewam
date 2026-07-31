@@ -1,16 +1,17 @@
 """GIP step-1 success-rate eval.
 
-Reuses eval.py's env/dataset machinery; the policy is chosen by ONE knob:
+Reuses eval.py's env/dataset machinery; the policy is chosen by gip_eval.mode:
 
-    gip_eval.mode = bc | guided | planning      (default: bc)
-
-  bc        action head run directly as a reactive policy (action head only)
-  guided    intention-guided planning -- action head warm-starts CEM, the
-            world-model state head rolls candidates to the goal (JOINT metric)
-  planning  plain world-model CEM planning (state head only; LeWM baseline)
+  unified_policy        LeWAM-Unified reactive: the goal-conditioned action head run directly (the
+                        representation channel; never touches the dynamics)
+  unified_cem           LeWAM-Unified CEM: the dynamics head rolls candidate action blocks to the goal
+  split_policy          LeWAM-Split reactive action head
+  seq_policy / seq_cem  LeWAM-Seq reactive / CEM
+  gcidm                 frozen-LeWM + GCIDM head baseline
+  bc (default)          a plain GIP action head run as a reactive policy
 
 Example:
-  python eval_gip.py --config-name pusht policy=gip_pusht +gip_eval.mode=guided
+  python eval_gip.py --config-name pusht policy=<run_name> +gip_eval.mode=unified_policy
 """
 
 import stable_worldmodel.data.formats.hdf5  # HDF5 self-registers on import
@@ -45,6 +46,88 @@ def run(cfg: DictConfig):
     dataset = gip.get_dataset(cfg, cfg.eval.dataset_name)
     process = gip.build_process(cfg, dataset)
     episodes, starts = gip.sample_eval_episodes(cfg, dataset)
+
+    # -- optional random goals (reachable by construction): from each real init state, roll the sim
+    # forward goal_rollout_steps env-steps of random actions and take the resulting state as the goal.
+    # This is off the expert's path (random != expert actions) so it isn't BC, yet it's reachable (a
+    # random policy just reached it) so a competent planner can too -- fixing the "fully-random frame is
+    # unreachable" confound. Precompute goals via a throwaway sim rollout (world.evaluate resets
+    # afterward), then monkey-patch swm's module-global _extract_init_goal to serve them. Off by default.
+    if bool(cfg.get("gip_eval", {}).get("random_goal", False)):
+        import numpy as _np
+        import stable_worldmodel.world.world as _wmod
+        from stable_worldmodel.world.world import _apply_callables as _apply_cb
+        _orig_eig = _wmod._extract_init_goal
+        _rng = _np.random.default_rng(int(cfg.seed) + 20240729)
+        _H = int(cfg.get("gip_eval", {}).get("goal_rollout_steps", cfg.eval.goal_offset_steps))
+        _cbs = OmegaConf.to_container(cfg.eval.get("callables"), resolve=True) or []
+        # goal-setting callables consume goal_* columns; everything else sets the INIT (task-agnostic:
+        # pusht/tworoom use _set_state, reacher/cube use set_state(qpos,qvel)).
+        _GOAL_METHODS = {"_set_goal_state", "set_target_qpos", "set_target_pos"}
+        _init_cbs = [c for c in _cbs if c.get("method") not in _GOAL_METHODS]
+        _cols = [c for c in dataset.column_names if not str(c).startswith("goal")]
+        # Generate random actions the same way the policy does -> un-z-score N(0,1) with the model's
+        # action_mean/std. The raw dataset action column can live in a different (larger) space than the
+        # env step's action-space box accepts (traced on tworoom: policy actions pass, raw dataset actions
+        # don't); un-z-scored actions match the policy's valid output. Clamp for safety.
+        _dbg = [True]
+
+        def _rollout_goal(init_state, n):
+            world.reset(seed=init_state.get("seed"))
+            for i in range(n):                                        # set each env to its real init
+                _apply_cb(world.envs.envs[i].unwrapped, _init_cbs, {k: v[i] for k, v in init_state.items()})
+            _ucfg = getattr(model, "_unified_cfg", None) or {}
+            _am = _np.asarray(_ucfg.get("action_mean", [0.0]), _np.float32).reshape(-1)
+            _as = _np.asarray(_ucfg.get("action_std", [1.0]), _np.float32).reshape(-1)
+            _aspc = world.envs.envs[0].unwrapped.action_space
+            _lo, _hi = _np.asarray(_aspc.low, _np.float32), _np.asarray(_aspc.high, _np.float32)
+            if _dbg[0]:
+                print(f"[GIP] rollout act: mean={_am} std={_as} env_box=[{_lo},{_hi}]", flush=True); _dbg[0] = False
+            infos = None
+            for _ in range(_H):                                      # policy-space random actions
+                acts = (_rng.standard_normal((n, len(_as))).astype(_np.float32) * _as + _am)
+                acts = _np.clip(acts, _lo, _hi)
+                _, _, _, _, infos = world.envs.step(acts.reshape(*world.envs.action_space.shape))
+            if _dbg[0]:
+                print(f"[GIP] random-goal rollout infos keys: {sorted(infos.keys())}; "
+                      f"dataset cols: {sorted(map(str,_cols))}", flush=True); _dbg[0] = False
+            # emit all goal_* columns from the post-rollout env info, so each task's goal callable
+            # (goal_state / goal_qpos / goal_privileged_* / goal_proprio) finds what it needs.
+            goal_state = {}
+            for col in _cols:
+                if col == "pixels":
+                    f = infos["pixels"]
+                    goal_state["goal"] = _np.stack([_np.asarray(f[i][-1] if _np.ndim(f[i]) > 3 else f[i])
+                                                    for i in range(n)])
+                elif col in infos:
+                    v = _np.asarray(infos[col])
+                    # infos may carry a stack/history dim (e.g. pusht state is (n,1,7)); the dataset goal
+                    # columns are (n, dim) -> take the last stacked frame so eval_state/callables match.
+                    goal_state["goal_" + col] = v[:, -1] if v.ndim > 2 else v
+            # DIAG (trivial-goal check): how far did agent/block actually move over the random rollout?
+            # pusht state = [agent_x, agent_y, block_x, block_y, block_angle]. A goal where the block
+            # barely moved reduces to agent-navigation (easier) -> would skew SR up.
+            _gs, _is = goal_state.get("goal_state"), init_state.get("state")
+            if _gs is not None and _is is not None:
+                _isb = _np.asarray(_is); _isb = _isb[:, -1] if _isb.ndim > 2 else _isb
+                _gsb = _np.asarray(_gs)
+                _blk = _np.linalg.norm(_gsb[:, 2:4] - _isb[:, 2:4], axis=-1)
+                _agt = _np.linalg.norm(_gsb[:, 0:2] - _isb[:, 0:2], axis=-1)
+                _ang = _np.abs(_gsb[:, 4] - _isb[:, 4]); _ang = _np.minimum(_ang, 2 * _np.pi - _ang)
+                print(f"[DIAG] H={_H} n={n}  BLOCK-move mean={_blk.mean():.1f} med={_np.median(_blk):.1f} "
+                      f"frac<5px={( _blk<5).mean():.2f} frac>20px={(_blk>20).mean():.2f}  "
+                      f"ANGLE-move med={_np.median(_ang):.3f}rad(<pi/9={( _ang<_np.pi/9).mean():.2f})  "
+                      f"AGENT-move med={_np.median(_agt):.1f}", flush=True)
+            return goal_state
+
+        def _random_goal_extract(ds, episodes_idx, start_steps, goal_offset):
+            init_state, _drop, vids = _orig_eig(ds, episodes_idx, start_steps, 0)   # keep REAL init
+            goal_state = _rollout_goal(init_state, len(episodes_idx))
+            return init_state, goal_state, vids
+
+        _wmod._extract_init_goal = _random_goal_extract
+        print(f"[GIP] RANDOM-GOAL (rollout) eval ON: goal = init + {_H} random-action steps, "
+              f"seed {int(cfg.seed)+20240729}", flush=True)
 
     # -- model + policy (mode is the single switch)
     # mode=gcidm loads its own frozen-LeWM + GCIDMHead, not the JEPA-checkpoint loader
@@ -93,6 +176,18 @@ def run(cfg: DictConfig):
                   f"action pad {d_raw}x{f} -> trained block")
         policy = gip.build_policy(cfg, model, adim, process, transform)
     print(f"[GIP] eval mode={mode} policy={type(policy).__name__}")
+
+    # random-goal eval: a goal-conditioned policy fed an off-distribution goal can extrapolate to
+    # out-of-box actions, which strict-checker envs (tworoom Box[-1,1]) reject -> crash (pusht clips, so
+    # it was fine). Clamp executed actions to the env's action box so the eval runs; on-path actions are
+    # already in-box, so this is a no-op there. Only when random_goal is on.
+    if bool(cfg.get("gip_eval", {}).get("random_goal", False)):
+        import numpy as _np2
+        _albox = world.envs.envs[0].unwrapped.action_space
+        _clo, _chi = _np2.asarray(_albox.low, _np2.float32), _np2.asarray(_albox.high, _np2.float32)
+        _orig_ga = policy.get_action
+        policy.get_action = lambda *a, **k: _np2.clip(
+            _np2.asarray(_orig_ga(*a, **k), _np2.float32), _clo, _chi)
 
     results_path = Path(swm.data.utils.get_cache_dir(), "gip_eval", mode, cfg.policy)
     results_path.mkdir(parents=True, exist_ok=True)
