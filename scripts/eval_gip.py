@@ -6,7 +6,6 @@ Reuses eval.py's env/dataset machinery; the policy is chosen by gip_eval.mode:
                         representation channel; never touches the dynamics)
   unified_cem           LeWAM-Unified CEM: the dynamics head rolls candidate action blocks to the goal
   split_policy          LeWAM-Split reactive action head
-  seq_policy / seq_cem  LeWAM-Seq reactive / CEM
   gcidm                 frozen-LeWM + GCIDM head baseline
   bc (default)          a plain GIP action head run as a reactive policy
 
@@ -133,14 +132,6 @@ def run(cfg: DictConfig):
     # mode=gcidm loads its own frozen-LeWM + GCIDMHead, not the JEPA-checkpoint loader
     if mode == "gcidm":
         policy = gip.build_policy(cfg, None, None, process, transform)
-    elif mode in ("seq_policy", "seq_cem"):
-        # LeWAM-Seq: its own loader + config; adim = the model's z-scored action block dim.
-        model, seq_cfg = gip.load_lewam_seq_model(cfg.policy, which=cfg.get("seq_which", "best"))
-        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
-        model.requires_grad_(False)
-        model._seq_cfg = seq_cfg
-        adim = int(seq_cfg["action_dim"])
-        policy = gip.build_policy(cfg, model, adim, process, transform)
     elif mode == "split_policy":
         # LeWAM-Split: its own loader + config; adim = the model's z-scored action block dim.
         model, split_cfg = gip.load_lewam_split_model(cfg.policy, which=cfg.get("seq_which", "best"))
