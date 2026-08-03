@@ -543,8 +543,7 @@ def main():
                          encoder_ckpt=(args.encoder_ckpt or None),
                          use_idm=(args.w_idm > 0),
                          use_prefix=args.dyn_prefix, prefix_H=args.prefix_H,
-                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads,
-                         dyn_prefix_goal=args.dyn_prefix_goal).to(device)
+                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -685,7 +684,7 @@ def main():
         w_acons=args.w_acons,
         rollout_k=args.rollout_k, w_rollout=args.w_rollout,
         use_prefix=args.dyn_prefix, prefix_H=args.prefix_H, prefix_depth=args.prefix_depth,
-        prefix_heads=args.prefix_heads, dyn_prefix_goal=args.dyn_prefix_goal,
+        prefix_heads=args.prefix_heads,
         w_straight=args.w_straight, straight_target=args.straight_target,
         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
         ablate_dynamics=args.ablate_dynamics,

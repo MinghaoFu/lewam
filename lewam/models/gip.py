@@ -268,7 +268,6 @@ def load_lewam_unified_model(run_name, which="best"):
         prefix_H=int(cfg.get("prefix_H", 5)),
         prefix_depth=int(cfg.get("prefix_depth", 2)),
         prefix_heads=int(cfg.get("prefix_heads", 4)),
-        dyn_prefix_goal=bool(cfg.get("dyn_prefix_goal", False)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "

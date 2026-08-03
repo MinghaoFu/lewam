@@ -108,7 +108,7 @@ class GCHead(nn.Module):
             return out.unsqueeze(1).expand(-1, n, -1)
         logits, mu, logsig = self._gmm_params(out)
         N, K, d = mu.shape
-        comp = torch.multinomial(F.softmax(logits, dim=-1), n, replacement=True)  # (N,n)
+        comp = torch.multinomial(F.softmax(logits, dim=-1), n, replacement=True, generator=generator)  # (N,n)
         idx = comp.unsqueeze(-1).expand(N, n, d)
         draw = mu.gather(1, idx)
         if noise:
