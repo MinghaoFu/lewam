@@ -410,16 +410,21 @@ class ViTEncoder(nn.Module):
             self.vit = vit_hf(size=size, patch_size=14, image_size=img_size,
                                   pretrained=False, use_mask_token=False)
             mlp_in = self.vit.config.hidden_size
-        elif backbone == "dinov3s":
-            # FROZEN pretrained DINOv3 ViT-small/16 (timm). CLS features (384). Same ImageNet
-            # mean/std as the pipeline, so no normalization change. Built at the model's default
-            # config so the pretrained state_dict matches; 224 input is handled by pos-embed
-            # interpolation. backbone_ckpt (a state_dict .pt) is loaded ONLY at train init; at eval
-            # the frozen weights are already inside the full checkpoint (strict load overwrites).
+        elif backbone == "dinov3":
+            # FROZEN pretrained DINOv3
             import timm
-            self.vit = timm.create_model("vit_small_patch16_dinov3", pretrained=False, num_classes=0)
+            size_to_model = {
+                "tiny": "vit_small_patch16_dinov3",  # a true "tiny" does not exist
+                "small": "vit_small_patch16_dinov3",
+                "base": "vit_base_patch16_dinov3",
+                "large": "vit_large_patch16_dinov3"
+            }
             if backbone_ckpt:
+                self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
                 self.vit.load_state_dict(torch.load(backbone_ckpt, map_location="cpu"), strict=True)
+            else:
+                self.vit = timm.create_model(size_to_model[size], pretrained=True, num_classes=0)
+
             for p in self.vit.parameters():
                 p.requires_grad_(False)
             self.vit.eval()

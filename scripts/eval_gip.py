@@ -48,10 +48,7 @@ def run(cfg: DictConfig):
 
     # -- optional random goals (reachable by construction): from each real init state, roll the sim
     # forward goal_rollout_steps env-steps of random actions and take the resulting state as the goal.
-    # This is off the expert's path (random != expert actions) so it isn't BC, yet it's reachable (a
-    # random policy just reached it) so a competent planner can too -- fixing the "fully-random frame is
-    # unreachable" confound. Precompute goals via a throwaway sim rollout (world.evaluate resets
-    # afterward), then monkey-patch swm's module-global _extract_init_goal to serve them. Off by default.
+    # NOTE: this is not recommended for pick-and-place style tasks where random actions only move the agent, not the object
     if bool(cfg.get("gip_eval", {}).get("random_goal", False)):
         import numpy as _np
         import stable_worldmodel.world.world as _wmod
@@ -103,20 +100,6 @@ def run(cfg: DictConfig):
                     # infos may carry a stack/history dim (e.g. pusht state is (n,1,7)); the dataset goal
                     # columns are (n, dim) -> take the last stacked frame so eval_state/callables match.
                     goal_state["goal_" + col] = v[:, -1] if v.ndim > 2 else v
-            # DIAG (trivial-goal check): how far did agent/block actually move over the random rollout?
-            # pusht state = [agent_x, agent_y, block_x, block_y, block_angle]. A goal where the block
-            # barely moved reduces to agent-navigation (easier) -> would skew SR up.
-            _gs, _is = goal_state.get("goal_state"), init_state.get("state")
-            if _gs is not None and _is is not None:
-                _isb = _np.asarray(_is); _isb = _isb[:, -1] if _isb.ndim > 2 else _isb
-                _gsb = _np.asarray(_gs)
-                _blk = _np.linalg.norm(_gsb[:, 2:4] - _isb[:, 2:4], axis=-1)
-                _agt = _np.linalg.norm(_gsb[:, 0:2] - _isb[:, 0:2], axis=-1)
-                _ang = _np.abs(_gsb[:, 4] - _isb[:, 4]); _ang = _np.minimum(_ang, 2 * _np.pi - _ang)
-                print(f"[DIAG] H={_H} n={n}  BLOCK-move mean={_blk.mean():.1f} med={_np.median(_blk):.1f} "
-                      f"frac<5px={( _blk<5).mean():.2f} frac>20px={(_blk>20).mean():.2f}  "
-                      f"ANGLE-move med={_np.median(_ang):.3f}rad(<pi/9={( _ang<_np.pi/9).mean():.2f})  "
-                      f"AGENT-move med={_np.median(_agt):.1f}", flush=True)
             return goal_state
 
         def _random_goal_extract(ds, episodes_idx, start_steps, goal_offset):

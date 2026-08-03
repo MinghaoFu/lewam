@@ -1,35 +1,11 @@
-# LeWAM-Unified: the split (goal-conditioned action head + goal-conditioned dynamics) trained
-# sequence-parallel over a context window, with one shared context latent per position.
-#
-#   sample a start t; context window = frames [t .. t+W-1], W = context_len (episode-clamped);
-#   encode window frames + each position's one goal frame in a single pass (2W+1 frames per item,
-#   independent of H_max -- goals are looked up by index, not a contiguous tail)
-#   c_tau = z_tau + g*Aggr(z_<=tau)                          # causal aggregator over states only
-#   a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)           # per-position goal + horizon
-#   z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)          # dyn target z_{tau+1}, 1 step
-#
-#   L = w_act*MSE(a_pred, a) + w_dyn*MSE(z_pred, z[1:]) + w_reg*SIGReg(z) + w_cyc*consistency
-#       (all per-position, masked to the valid (non-pad) positions)
-#
-# Goal sampling, per window, two modes mixed by --p_shared:
-#   RANDOM (prob 1-p): each position independently draws h~U[1,H_max] and clamps its goal frame to
-#     the episode's last frame -- the split FramePairDataset's sampling (incl. the mass pile-up on
-#     the final frame near episode ends), so per position this is a split example with an
-#     aggregated-context state. Maximal (goal,horizon) coverage; horizon uncorrelated with context.
-#   SHARED (prob p): one goal for the whole window, drawn h~U[1,H_max] ahead of the last position
-#     (episode-clamped); horizons count down toward it across positions (h_norm clamps at 1.0 like
-#     eval's min(steps,H_max)/H_max). This is the structure eval runs -- one fixed goal, horizon
-#     decreasing over consecutive replans -- and what a rollout loss needs.
-#
-# The window is not a start->goal cut (that made the sampled goal the window endpoint: the last
-# position always trained on horizon 1 with goal == its dynamics target, a short-skewed horizon
-# marginal, and the goal inside the fed sequence, unlike eval). Goals are encoder inputs but never
-# aggregator inputs. Each window is a fresh start (no prior history), matching the eval episode
-# start and the eval adapter's ctx_cap sliding window.
-#
-#   python scripts/train_lewam_unified.py --dataset_name reacher.h5 \
-#       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --context_len 5 --p_shared 0.5 \
-#       --agg_depth 2 --ckpt_sync_dir /mnt/hdfs/.../reacher_lewam_unified
+"""
+Training script for LeWAM-Unified
+
+Example:
+>>> python scripts/train_lewam_unified.py --dataset_name reacher.h5 \
+       --run_name reacher_lewam_unified --epochs 50 --H_max 50 --context_len 5 --p_shared 0.5 \
+       --agg_depth 4 --ckpt_sync_dir /hdfs/.../reacher_lewam_unified
+"""
 import argparse
 import json
 import math
@@ -76,7 +52,7 @@ def durable_sync(files, dst_dir):
 
 
 # --------------------------------------------------------------------------- #
-# Data loading (identical to train_lewam_gc.py)                                #
+# Data loading (identical to train_lewam_gc.py)                               
 # --------------------------------------------------------------------------- #
 def preload_flat(base, img_t, act_mean, act_std, frameskip, max_eps=None):
     """Preload episodes DIRECTLY into ONE preallocated flat frame tensor (never a per-episode
@@ -142,16 +118,17 @@ def preload_flat(base, img_t, act_mean, act_std, frameskip, max_eps=None):
 
 
 # --------------------------------------------------------------------------- #
-# Context-window Dataset. Each item is one window of up to `context_len` decision points plus     #
-# exactly the frames those decision points use:                                                   #
-#   window  frames [start .. start+n_pos]   (n_pos+1: each position's state AND its z_{p+1} target)#
-#   goals   one frame per position, at the sampled goal offsets (RANDOM or SHARED mode, see the   #
-#           file header) -- looked up by index, so memory per item is ~2*context_len+1 frames     #
-#           REGARDLESS of H_max                                                                   #
-#   actions the action block taken AT each decision point                                         #
-#   horizon each position's distance to its goal in prediction steps                              #
-# Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior  #
-# history), like an eval episode / the eval adapter's sliding window.                             #
+# Context-window Dataset
+# Each item is one window of up to `context_len` decision points plus
+# exactly the frames those decision points use:                                                  
+#   window  frames [start .. start+n_pos]   (n_pos+1: each position's state AND its z_{p+1} target)
+#   goals   one frame per position, at the sampled goal offsets (RANDOM or SHARED mode, see the
+#           file header) -- looked up by index, so memory per item is ~2*context_len+1 frames
+#           REGARDLESS of H_max
+#   actions the action block taken AT each decision point
+#   horizon each position's distance to its goal in prediction steps
+# Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior
+# history), like an eval episode / the eval adapter's sliding window.
 # --------------------------------------------------------------------------- #
 def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
     """Sample each position's goal offset (obs-frames from the window start) + horizon.
@@ -166,9 +143,19 @@ def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
     precision-limited tasks plateau): h = 1 + floor((h_max-1) * u^(1+close_bias)), u~U[0,1];
     close_bias=0 recovers the uniform U[1,h_max]. Higher bias -> more mass near h=1.
 
-    Returns (goal_offsets (n_pos,) long, horizon (n_pos,) long). horizon can exceed h_max in
-    SHARED mode (earlier positions are farther); the trainer clamps h_norm at 1.0 exactly like
-    the eval countdown's min(steps, H_max)/H_max."""
+    Args:
+        n_pos (int): number of decision positions in this window.
+        frames_left (int): obs-frames remaining to the episode's last frame from the window start
+            (the clamp ceiling for goal_offsets).
+        h_max (int): max horizon (obs-steps) to draw h from.
+        p_shared (float): probability of SHARED mode vs. RANDOM mode (see above).
+        close_bias (float): >0 skews h toward small values (see above); 0 = uniform U[1,h_max].
+
+    Returns:
+        tuple: (goal_offsets (n_pos,) long, horizon (n_pos,) long). horizon can exceed h_max in
+        SHARED mode (earlier positions are farther); the trainer clamps h_norm at 1.0 exactly like
+        the eval countdown's min(steps, H_max)/H_max.
+    """
     def _draw(shape):
         if close_bias > 0:
             u = torch.rand(shape)
@@ -330,7 +317,31 @@ def collate_prefix(batch):
 # --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser()
+    # train config
+    ap.add_argument("--seed", type=int, default=3072)
+    ap.add_argument("--run_name", type=str, default="reacher_lewam_unified")
+    ap.add_argument("--train_split", type=float, default=0.9)
+    ap.add_argument("--max_eps", type=int, default=0)
+    ap.add_argument("--dataset_name", type=str, default="reacher.h5")
+    ap.add_argument("--keys_to_load", type=str, default="pixels,action")
+    ap.add_argument("--run_dir", type=str, default=None)
+    ap.add_argument("--ckpt_sync_dir", type=str, default=None,
+                    help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into on "
+                            "each improvement, so losing the worker's ephemeral disk never costs the run.")
+    ap.add_argument("--num_workers", type=int, default=6)
+    ap.add_argument("--prefetch_factor", type=int, default=3)
+    ap.add_argument("--frames_cache", type=str, default="auto",
+                    help="prebuilt-cache dir | 'auto' (env LEWAM_CACHE_DIR or the default HDFS "
+                            "preload_cache) | 'off'. HIT -> np.load the shared <tag>.frames.npy + "
+                            "<tag>.aux.npz instead of decoding the h5 (~1x-frames RAM vs classic "
+                            "preload). Ignored when --max_eps set (falls back to classic preload).")
+    ap.add_argument("--cache_mmap", action="store_true",
+                    help="memory-map the cache .frames.npy (np.load mmap_mode='r') "
+                            "instead of reading it fully into RAM. "
+                            "Peak RSS drops at the cost of fuse page-in latency on random "
+                            "reads (hidden by --num_workers; warm after epoch 1). Default load stays full-RAM.")
     ap.add_argument("--epochs", type=int, default=50)
+    ap.add_argument("--warmup_epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=128,
                     help="windows per batch (each carries up to context_len decision points, so the "
                          "effective decision-point batch is larger; raise/lower per GPU mem)")
@@ -340,14 +351,14 @@ def main():
     ap.add_argument("--agg_lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--H_max", type=int, default=50,
-                    help="max goal distance (horizon) in obs-steps (frames are 1-per-obs-step, "
-                         "post-frameskip; not divided by frameskip); h~U[1,H_max], episode-clamped. "
+                    help="max goal distance (horizon) in obs-steps (no frameskip); "
+                         "each goal is at horizon h~U[1,H_max], episode-clamped. "
                          "Decoupled from the window length (see --context_len); does not affect "
                          "memory (goals are looked up per position, not loaded as a tail)")
     ap.add_argument("--context_len", type=int, default=5,
                     help="decision points per context window = the aggregator's max sequence length "
                          "at train (eval defaults its ctx_cap to this). Frames per item = "
-                         "2*context_len+1, so batch x context_len sets GPU memory")
+                         "2*context_len+1, so batch * context_len determines GPU memory")
     ap.add_argument("--p_shared", type=float, default=0.0,
                     help="fraction of windows trained in SHARED-goal mode (one goal ahead of the "
                          "window, horizons counting down -- the structure eval runs); the rest use "
@@ -356,7 +367,13 @@ def main():
                     help="skew the training goal-distance draw toward SMALL h (more close-to-goal "
                          "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
                          "Applied to train only; val stays uniform for a comparable metric.")
-    ap.add_argument("--hidden_dim", type=int, default=512)
+    #ap.add_argument("--perturb_data", type=str, default="",
+    #                help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
+    #                     "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
+    #ap.add_argument("--perturb_ratio", type=float, default=0.0,
+    #                help="dynamics-loss weight on off-policy transitions: loss_dyn=(1-r)*on + r*off. 0=baseline.")
+
+    # model config
     ap.add_argument("--head_type", type=str, default="mse",
                     help="gc_head output: 'mse' (deterministic point, MSE loss), 'gmm' (K-component "
                          "diagonal-Gaussian mixture density net, mixture-NLL loss), or 'flow' "
@@ -369,46 +386,24 @@ def main():
                          "drop-in (current data path), H>1 (chunking) needs (N,H,d) targets + mask")
     ap.add_argument("--embed_dim", type=int, default=192,
                     help="latent width feeding aggregator + heads (ViT-tiny cls is projected to this)")
+    ap.add_argument("--hidden_dim", type=int, default=512,
+                    help="hidden width for gc_head/dynamics/idm_head MLPs.")
     ap.add_argument("--encoder_size", type=str, default="tiny",
-                    help="ViT backbone size: tiny | small | base — the main param-count lever")
+                    help="ViT backbone size: tiny | small | base | large")
     ap.add_argument("--encoder_backbone", type=str, default="scratch",
-                    help="scratch = from-scratch ViT (SIGReg-trained); dinov3s = frozen pretrained "
-                         "DINOv3 ViT-small/16 (384-d CLS, embed_dim should be 384). Isolates whether "
-                         "joint encoder training is the bottleneck vs the dynamics.")
+                    help="scratch = from-scratch ViT (SIGReg-trained); dinov3 = frozen pretrained "
+                         "DINOv3 ViT-{encoder_size}/16")
     ap.add_argument("--encoder_ckpt", type=str, default="",
                     help="state_dict .pt for the pretrained backbone, loaded at train init only "
-                         "(dinov3s). At eval the frozen weights live in the full checkpoint.")
+                         "(dinov3). At eval the frozen weights live in the full checkpoint.")
     ap.add_argument("--img_size", type=int, default=224)
-    ap.add_argument("--seed", type=int, default=3072)
-    ap.add_argument("--run_name", type=str, default="reacher_lewam_unified")
-    ap.add_argument("--train_split", type=float, default=0.9)
-    ap.add_argument("--max_eps", type=int, default=0)
-    ap.add_argument("--dataset_name", type=str, default="reacher.h5")
-    ap.add_argument("--keys_to_load", type=str, default="pixels,action")
-    ap.add_argument("--warmup_epochs", type=int, default=10)
-    ap.add_argument("--run_dir", type=str, default=None)
-    ap.add_argument("--ckpt_sync_dir", type=str, default=None,
-                    help="durable dir (e.g. an HDFS mount) to mirror config + best ckpt into on "
-                         "each improvement, so losing the worker's ephemeral disk never costs the run.")
-    # unified-specific (ablation arms; all present so every ckpt strict-loads under one adapter)
     ap.add_argument("--agg_depth", type=int, default=4,
                     help="causal-transformer depth of the aggregator")
     ap.add_argument("--agg_heads", type=int, default=4)
     ap.add_argument("--agg_dim_head", type=int, default=0,
-                    help="per-head dim of the aggregator attention; 0 = tied embed_dim//agg_heads "
-                         "(baseline). >0 decouples it so the aggregator can be widened "
-                         "(heads*dim_head > embed_dim) to LeWM-predictor scale without touching the latent.")
+                    help="per-head dim of the aggregator attention; 0 = embed_dim//agg_heads.")
     ap.add_argument("--agg_mlp_dim", type=int, default=0,
                     help="aggregator FFN width; 0 = 4*embed_dim (baseline). >0 widens the FFN.")
-    ap.add_argument("--dyn_action_embed_dim", type=int, default=0,
-                    help="0 = raw-concat the action into the dynamics head (baseline). >0 embeds the "
-                         "action (Linear->LayerNorm->GELU) to this width before concat, so it isn't "
-                         "drowned by the z_dim latents (a stronger action pathway).")
-    ap.add_argument("--perturb_data", type=str, default="",
-                    help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
-                         "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
-    ap.add_argument("--perturb_ratio", type=float, default=0.0,
-                    help="dynamics-loss weight on off-policy transitions: loss_dyn=(1-r)*on + r*off. 0=baseline.")
     ap.add_argument("--agg_residual", action="store_true",
                     help="c = z + Aggr(z) with a zero-init correction (boots as the split, "
                          "identity at init); off (default) = c = Aggr(z), no residual")
@@ -418,11 +413,12 @@ def main():
     ap.add_argument("--agg_action_cond", action="store_true",
                     help="condition each token z_tau (AdaLN) on the embedded previous action "
                          "a_{tau-1} (null-action at the sequence start); conditioning, not tokens")
-    ap.add_argument("--dyn_no_goal", action="store_true",
-                    help="drop z_goal from the dynamics head -> a pure forward model f(z_t,a_t) "
-                         "(the gc_head stays goal-conditioned). A goal-conditioned dynamics can "
-                         "drift toward z_goal ignoring the action, flattening the planning cost "
-                         "surface; the pure forward model avoids that (used for CEM/planning).")
+    ap.add_argument("--dyn_action_embed_dim", type=int, default=128,
+                        help="0 = raw-concat the action into the dynamics head (baseline). >0 embeds the "
+                             "action (Linear->LayerNorm->GELU) to this width before concat, so it isn't "
+                             "drowned by the z_dim latents (a stronger action pathway).")
+    ap.add_argument("--dyn_goal_cond", action="store_true",
+                    help="use z_goal in the dynamics head")
     # dynamics-on-policy-action arm: feed the gc_head's predicted action into the dynamics head
     # (a convex mix with the ground-truth action, weight alpha ramped by a schedule), closing the
     # train/rollout covariate gap. The action is still BC-supervised on ground truth, so it stays a
@@ -430,9 +426,9 @@ def main():
     ap.add_argument("--dyn_action_from_policy", action="store_true",
                     help="feed a mix of the policy's predicted action into the dynamics head "
                          "(alpha per --dyn_policy_schedule); off = dynamics on ground-truth actions")
-    ap.add_argument("--dyn_policy_schedule", type=str, default="cosine",
+    ap.add_argument("--dyn_policy_schedule", type=str, default="const",
                     help="alpha(epoch) schedule for the policy-action mix: const|linear|cosine|"
-                         "sigmoid. const = full alpha from epoch 0 (least stable, 'from the start').")
+                         "sigmoid. const = full alpha from epoch 0")
     ap.add_argument("--dyn_policy_alpha_max", type=float, default=1.0,
                     help="max mix weight (1.0 = dynamics sees only the policy action at the end)")
     ap.add_argument("--dyn_policy_ramp_frac", type=float, default=0.5,
@@ -442,46 +438,41 @@ def main():
                     help="stop-gradient the policy action into dynamics (dynamics adapts to the "
                          "policy's actions, but the dyn loss never reshapes the BC policy). "
                          "default: gradients flow policy->dynamics (coupled 'unified' arm)")
-    # loss weights
+    ap.add_argument("--dyn_prefix", action="store_true",
+                        help="Fast-LeWM action-prefix dynamics: predict all H future latents per anchor in "
+                             "parallel from the aggregated context c_t (no autoregression, no compounding). "
+                             "Replaces the single-step dynamics + rollout_k. Uses PrefixSeqDataset (window "
+                             "extends prefix_H past the last anchor) + the dense prefix loss.")
+    ap.add_argument("--prefix_H", type=int, default=5,
+                    help="prefix horizon for --dyn_prefix (action blocks predicted per anchor); should "
+                            "match the eval plan horizon cem_H. Window frames/item = ctx_len + prefix_H.")
+    ap.add_argument("--prefix_depth", type=int, default=2,
+                    help="causal-transformer depth of the action-prefix encoder")
+    ap.add_argument("--prefix_heads", type=int, default=4,
+                    help="attention heads of the action-prefix encoder")
+    # loss
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
     ap.add_argument("--w_idm", type=float, default=0.0,
-                    help="inverse-dynamics aux-loss weight: recover a_t from (c_t, predicted z_{t+1}) -> "
+                    help="inverse-dynamics aux-loss weight: recover a_t from (z_t, predicted z_{t+1}) -> "
                          "forces the dynamics to be action-aware. 0 = off (baseline).")
     ap.add_argument("--w_acons", type=float, default=0.0,
-                    help="action-consistency aux-loss weight (Minghao): decode the next action from the "
+                    help="action-consistency aux-loss weight: decode the next action from the "
                          "dynamics' own predicted latent -- a_hat_{t+1}=gc_head(z_hat_{t+1}, goal_{t+1}, "
                          "h_{t+1}) supervised on a_{t+1}. Couples dynamics->policy so z_hat_{t+1} must land "
                          "in a policy-decodable latent (the representation lever). Grad flows through both "
                          "the dynamics (predicted latent) and the head (no detach). 0 = off. Non-prefix "
                          "path only (run_batch).")
     ap.add_argument("--rollout_k", type=int, default=1,
-                    help="V-JEPA2-style latent-rollout depth for the dynamics loss. 1 = teacher "
+                    help="latent-rollout depth for the dynamics loss. 1 = teacher "
                          "forcing only (baseline). 2 = one rollout step (feed the predicted z_{t+1} "
                          "back to predict z_{t+2}); K>2 rolls deeper. State-only rollout (actions/goals "
                          "stay ground truth) -> targets compounding error.")
     ap.add_argument("--w_rollout", type=float, default=1.0,
                     help="weight on the rollout term relative to the teacher-forced dyn term (both "
-                         "scaled by w_dyn): L_dyn = w_dyn*(L_tf + w_rollout*L_rollout). 1.0 = "
-                         "unweighted add (V-JEPA2). 0 disables even if rollout_k>1.")
-    ap.add_argument("--dyn_prefix", action="store_true",
-                    help="Fast-LeWM action-prefix dynamics: predict all H future latents per anchor in "
-                         "parallel from the aggregated context c_t (no autoregression, no compounding). "
-                         "Replaces the single-step dynamics + rollout_k. Uses PrefixSeqDataset (window "
-                         "extends prefix_H past the last anchor) + the dense prefix loss.")
-    ap.add_argument("--prefix_H", type=int, default=5,
-                    help="prefix horizon for --dyn_prefix (action blocks predicted per anchor); should "
-                         "match the eval plan horizon cem_H. Window frames/item = ctx_len + prefix_H.")
-    ap.add_argument("--dyn_prefix_goal", action="store_true",
-                    help="ablation: goal-condition the prefix dynamics (default goal-FREE = the honest "
-                         "forward model for planning). Feeds the per-anchor policy goal into the predictor.")
-    ap.add_argument("--prefix_depth", type=int, default=2,
-                    help="causal-transformer depth of the action-prefix encoder")
-    ap.add_argument("--prefix_heads", type=int, default=4,
-                    help="attention heads of the action-prefix encoder")
-    ap.add_argument("--w_reg", type=float, default=0.04)
-    ap.add_argument("--ablate_dynamics", action="store_true",
-                    help="disable dynamics loss (w_dyn=0), keep gc_head only")
+                         "scaled by w_dyn): L_dyn = w_dyn*(L_tf + w_rollout*L_rollout)")
+    ap.add_argument("--w_reg", type=float, default=0.04,
+                    help="SIGReg regularization weight")
     ap.add_argument("--w_cyc", type=float, default=0.0,
                     help="FDM-IDM consistency loss weight (0=without, 1.0=with)")
     ap.add_argument("--w_straight", type=float, default=0.0,
@@ -493,20 +484,9 @@ def main():
     ap.add_argument("--straight_target", type=str, default="z",
                     help="what to straighten: 'z' (encoder latents; traditional AND the "
                          "dynamics-target/cost space) or 'c' (aggregated context). z recommended.")
-    # data-pipeline knobs (no effect on loss/model logic)
-    ap.add_argument("--num_workers", type=int, default=6)
-    ap.add_argument("--prefetch_factor", type=int, default=3)
-    ap.add_argument("--frames_cache", type=str, default="auto",
-                    help="prebuilt-cache dir | 'auto' (env LEWAM_CACHE_DIR or the default HDFS "
-                         "preload_cache) | 'off'. HIT -> np.load the shared <tag>.frames.npy + "
-                         "<tag>.aux.npz instead of decoding the h5 (~1x-frames RAM vs classic "
-                         "preload). Ignored when --max_eps set (falls back to classic preload).")
-    ap.add_argument("--cache_mmap", action="store_true",
-                    help="opt-in (default off): memory-map the cache .frames.npy (np.load mmap_mode='r') "
-                         "instead of reading it fully into RAM. Peak RSS drops from ~1x-frames (143GB pusht) "
-                         "to <1GB -- fits a 140GB H100 pod -- at the cost of fuse page-in latency on random "
-                         "reads (hidden by --num_workers; warm after epoch 1). Default load stays full-RAM "
-                         "(faster) so this never changes the fast path unless explicitly requested.")
+    ap.add_argument("--ablate_dynamics", action="store_true",
+                        help="disable dynamics loss (w_dyn=0), train only a policy. "
+                             "Behavior is idential to w_dyn=0")
     args = ap.parse_args()
 
     if args.ablate_dynamics:
@@ -542,9 +522,6 @@ def main():
     else:
         run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
-    # HARD RULE (owner 2026-07-24): never write checkpoints under $HOME -- big .pt in the shared
-    # home fs filled it and crashed the box. Entry scripts pass --run_dir to /opt/tiger (local
-    # scratch); warn LOUD if anything resolves under home so it can't happen silently.
     if os.path.realpath(run_dir).startswith(os.path.realpath(os.path.expanduser("~"))):
         print(f"[lewam-uni] WARN run_dir under $HOME ({run_dir}); checkpoints in home can fill the "
               f"shared fs -- pass --run_dir to local scratch (/opt/tiger/...) or HDFS", flush=True)
@@ -559,7 +536,7 @@ def main():
                          agg_mlp_dim=(args.agg_mlp_dim or None),
                          agg_residual=args.agg_residual, agg_gate=args.agg_gate,
                          agg_action_cond=args.agg_action_cond,
-                         dyn_goal_cond=not args.dyn_no_goal,
+                         dyn_goal_cond=args.dyn_goal_cond,
                          dyn_action_embed_dim=args.dyn_action_embed_dim,
                          head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
                          encoder_backbone=args.encoder_backbone,
@@ -593,11 +570,10 @@ def main():
             _t0 = time.time()
             print(f"[lewam-uni] frames-cache HIT {_fp}"
                   + (" (mmap: low-RAM, fuse-latency)" if args.cache_mmap else ""), flush=True)
-            # mmap keeps the 143GB tensor on disk/fuse (kernel-evictable pages) -> <1GB peak RSS;
-            # default (mmap off) reads it fully into RAM (fast). Read-only either way (dataset only slices).
+            # mmap keeps large tensor on disk/fuse (kernel-evictable pages)
             Frames = torch.from_numpy(np.load(_fp, mmap_mode="r" if args.cache_mmap else None))
             _aux = np.load(_ap)
-            # The cache is built by the GC pipeline: A_flat is per-SAMPLE (one action block per
+            # cache built by the GC pipeline: A_flat is per-SAMPLE (one action block per
             # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
             # A_flat back to a per-FRAME tensor A_frame[t_gidx]=A_flat: every frame the window
             # dataset reads (frames[start:start+n_pos], all valid starts) is thereby set, so this
@@ -627,10 +603,6 @@ def main():
           f"action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
-    # Each item is a context window (~context_len decision points), so iterating EVERY start
-    # supervises each decision point ~context_len times per epoch. Draw ~1x coverage per epoch
-    # instead: n_starts / context_len windows. Re-randomized each epoch (RandomSampler), so over
-    # many epochs all starts are still seen.
     if args.dyn_prefix:
         train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max,
                                     args.context_len, args.prefix_H, args.p_shared, args.goal_close_bias)
@@ -704,7 +676,7 @@ def main():
         agg_depth=args.agg_depth, agg_heads=args.agg_heads,
         agg_dim_head=args.agg_dim_head, agg_mlp_dim=args.agg_mlp_dim,
         agg_residual=args.agg_residual, agg_gate=args.agg_gate,
-        agg_action_cond=args.agg_action_cond, dyn_goal_cond=not args.dyn_no_goal,
+        agg_action_cond=args.agg_action_cond, dyn_goal_cond=args.dyn_goal_cond,
         dyn_action_embed_dim=args.dyn_action_embed_dim,
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         frameskip=frameskip, action_raw_dim=raw_adim,
@@ -728,7 +700,7 @@ def main():
     (run_dir / "lewam_unified_config.json").write_text(json.dumps(cfg_out, indent=2))
     durable_sync([run_dir / "lewam_unified_config.json"], args.ckpt_sync_dir)
 
-    D = args.embed_dim            # latent width (192 tiny default; 384 for dinov3s frozen encoder)
+    D = args.embed_dim
     Hmax = float(args.H_max)
 
     # --- off-policy transitions for the DAgger-for-the-critic dynamics mix (optional) ---
@@ -789,17 +761,17 @@ def main():
             a_prev[:, 1:] = actions[:, :-1]           # a_{p-1}; position 0 gets the null embedding
             a_prev_mask = valid & (pos >= 1)
 
+        # model forward
         a_out, z_pred, a_idm = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
                                                  dyn_action_mix=(dyn_mix if train else 0.0),
                                                  dyn_action_detach=args.dyn_policy_detach)
-
+        
         loss_mask = valid.unsqueeze(-1).float()
         n_valid = valid.sum().clamp(min=1)
-        # per-sample action loss: MSE (mse head) or mixture NLL (gmm head). Float for NLL stability
-        # (logsumexp/exp under bf16 autocast is lossy). Masked to valid decision points.
+
+        # action loss (split by head type)
         if getattr(model.gc_head, "head_type", "") == "flow" and model.flow_H > 1:
-            # action-CHUNK target: at position t the next flow_H blocks a_frame[t:t+H], masked past the
-            # valid horizon. Built from `actions`/`valid` via unfold -> no dataset/collate change.
+            # action-CHUNK target: at position t the next flow_H blocks a_frame[t:t+H], masked past valid
             fh, adim = model.flow_H, actions.shape[-1]
             a_pad = torch.cat([actions, actions.new_zeros(B, fh - 1, adim)], dim=1)
             chunk = a_pad.unfold(1, fh, 1).permute(0, 1, 3, 2)                 # (B, max_pos, fh, adim)
@@ -812,18 +784,18 @@ def main():
             aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
                                               actions.reshape(B * max_pos, actions.shape[-1]).float())
         loss_act = (aloss * valid.reshape(-1).float()).sum() / n_valid
-        loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)  # no stop-grad (like split)
+
+        # dynamics loss
+        loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)
+
+        # DAgger for dynamics 
         if train and OP is not None:
-            # DAgger-for-the-critic: mix an off-policy dynamics term (env-rendered (ctx,a',next) with a'
+            # mix an off-policy dynamics term (env-rendered (ctx,a',next) with a'
             # perturbed in z-scored space). Dynamics only -- the BC/action loss above stays on-policy, so
             # the reactive head is untouched. loss_dyn = (1-r)*on + r*off holds the dyn budget fixed.
             r = float(args.perturb_ratio); cap_op = OP["ctx"].shape[1]
             bso = min(32, OP["ctx"].shape[0])
             ix = torch.randint(0, OP["ctx"].shape[0], (bso,))
-            # Decoupled: encode+aggregate the off-policy context/goal/next under no_grad so the off-policy
-            # loss trains only the dynamics head (GoalCondDynamics), never the shared encoder/aggregator.
-            # Coupling them let a heavy off-policy dose corrupt the shared c and kill the reactive policy
-            # (r=0.15 collapse); this isolates the critic from the policy representation.
             with torch.no_grad():
                 zc = _enc_op(OP["ctx"][ix].reshape(bso * cap_op, 224, 224, 3)).reshape(bso, cap_op, D)
                 a_pv = a_pm = None
@@ -835,18 +807,19 @@ def main():
             z_pred_op = model.dynamics(c_op, OP["act"][ix].to(device), zg_op)   # grad -> dynamics head only
             loss_dyn_op = ((z_pred_op - zn_op) ** 2).mean()
             loss_dyn = (1.0 - r) * loss_dyn + r * loss_dyn_op
-        # inverse-dynamics aux loss: recover a_t from (c_t, predicted z_{t+1}); c_t is pre-action so the
-        # action can only come through z_pred -> forces the dynamics to be action-aware (MSE on z-scored a).
+
+        # inverse-dynamics loss
         loss_idm = torch.zeros((), device=device)
         if a_idm is not None:
             loss_idm = ((a_idm - actions) ** 2 * loss_mask).sum() / (n_valid * a_idm.shape[-1])
-        # V-JEPA2 latent rollout (train-only): feed the model's own predicted z_{t+1} back and
-        # supervise deeper predictions -> L_dyn = L_tf + L_rollout. z_pred is the depth-1 pred from
-        # forward_seq above; reusing it keeps grads flowing depth-1<-depth-2 (multi-step consistency).
+
+        # rollout loss
         loss_rollout = torch.zeros((), device=device)
         if train and args.rollout_k > 1 and args.w_rollout > 0:
             loss_rollout = model.rollout_dyn(states, z_pred, next_tgt, z_goal, actions, n_pos,
                                              args.rollout_k, a_prev, a_prev_mask)
+
+        # cycle consistency loss
         loss_cyc = torch.zeros((), device=device)
         if train and args.w_cyc > 0:
             c = model.aggregate(states, a_prev, a_prev_mask)
@@ -854,7 +827,8 @@ def main():
             z_cyc = model.dynamics(c.reshape(B * max_pos, D), a_pt,
                                    z_goal.reshape(B * max_pos, D)).reshape(B, max_pos, D)
             loss_cyc = ((z_cyc - next_tgt.detach()) ** 2 * loss_mask).sum() / (n_valid * D)
-        # action-consistency (Minghao): the dynamics' OWN predicted latent must decode to the NEXT
+
+        # action-consistency lozz: the dynamics' OWN predicted latent must decode to the NEXT
         # action. Anchor t predicts z_hat_{t+1}=z_pred[:,t]; require gc_head(z_hat_{t+1}, goal_{t+1},
         # h_{t+1}) == a_{t+1}. Couples dynamics->policy -- z_hat_{t+1} is pushed into a policy-decodable
         # latent (grad flows through both the dynamics that made z_hat and the head that reads it, no
@@ -870,14 +844,14 @@ def main():
             acons_loss = model.gc_head.action_loss(acons_out.float(), a_next.float())
             pair_valid = (valid[:, 1:] & valid[:, :-1]).reshape(-1).float()   # t AND t+1 real
             loss_acons = (acons_loss * pair_valid).sum() / pair_valid.sum().clamp(min=1)
+
         # SIGReg over the valid decision-point latents only -- the split regularizes z_t, not the
         # goal/target frames, and states IS the per-position z_t set here.
         loss_reg = sigreg(states[valid].unsqueeze(0)) if train else torch.zeros((), device=device)
+
         # temporal straightening: w*(1 - cos(v_t, v_{t+1})) over consecutive latent velocities within
-        # each window. seq is unflattened (B, T, D) -> velocities never bleed across sequences. target z
-        # (encoder latents) is also the dynamics-target/cost space, so it straightens what planning rolls
-        # and scores; c (aggregated context) is an ablation. Masked to real (non-pad) triples: cos(v_t,
-        # v_{t+1}) needs frames t, t+1, t+2 all real.
+        # each window. Velocities never bleed across sequences. target z.
+        #  Masked to real (non-pad) triples: cos(v_t, v_{t+1}) needs frames t, t+1, t+2 all real.
         loss_straight = torch.zeros((), device=device)
         if train and args.w_straight > 0:
             if args.straight_target == "c":
@@ -891,6 +865,7 @@ def main():
             tpos = torch.arange(csim.shape[1], device=device).unsqueeze(0)
             vmask = tpos < (nreal.unsqueeze(1) - 2)                     # real triple t,t+1,t+2
             loss_straight = ((1.0 - csim) * vmask.float()).sum() / vmask.sum().clamp(min=1)
+        
         return (loss_act, loss_dyn, loss_reg, loss_cyc, loss_straight, loss_idm, loss_rollout,
                 loss_acons, int(n_valid.item()))
 
@@ -1000,8 +975,10 @@ def main():
         tr_s = tr_str / max(tr_count, 1); tr_i = tr_idm / max(tr_count, 1)
         tr_ro = tr_roll / max(tr_count, 1); tr_ac = tr_acons / max(tr_count, 1)
         va_a = va_act / max(va_count, 1); va_d = va_dyn / max(va_count, 1)
+
         lrs = sched.get_last_lr()
         dt = time.time() - t0
+
         cyc_str = f"  cyc={tr_c:.5f}" if args.w_cyc > 0 else ""
         dyn_str = f"  a={alpha:.2f}" if args.dyn_action_from_policy else ""
         str_str = f"  straight={tr_s:.4f}(cos~{1-tr_s:.3f})" if args.w_straight > 0 else ""
@@ -1013,13 +990,8 @@ def main():
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
-        # the full model state_dict (encoder./aggregator./gc_head./dynamics.[/gate_proj.]) loads
-        # strict into a LeWAMUnified rebuilt from the config (gip.load_lewam_unified_model).
         full_sd = model.state_dict()
         torch.save(full_sd, run_dir / "lewam_unified_latest.pt")
-        # sync latest.pt EVERY epoch (not just best.pt on improvement) so a killed/reclaimed pod
-        # never loses more than one epoch of progress -- best.pt alone can freeze on an early
-        # improvement epoch for the rest of the run, silently discarding everything trained after it.
         durable_sync([run_dir / "lewam_unified_config.json",
                       run_dir / "lewam_unified_latest.pt"], args.ckpt_sync_dir)
 

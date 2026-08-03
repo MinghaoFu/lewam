@@ -4,6 +4,9 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
+from pathlib import Path
+from omegaconf import OmegaConf
+from hydra.utils import instantiate as hydra_instantiate
 
 # AdaLN-Zero horizon conditioning, reused from gcidm.py (sinusoidal(64)->MLP->(scale,shift)).
 from lewam.models.gcidm import _sinusoidal_embedding
@@ -467,3 +470,59 @@ class JEPA(nn.Module):
         cost = self.criterion(info_dict)
         
         return cost
+
+
+################
+#  Build/Load  #
+################
+def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224, action_block_dim=25):
+    """Instantiate the LeWM JEPA (vit-tiny-192) and load the frozen weights.
+    Mirrors train.py's init_from path so z = encode({pixels})['emb'][:,0] is the
+    exact LeWM latent. Encoder/projector frozen; action_encoder kept for key match."""
+    model_cfg = OmegaConf.create({
+        "_target_": "lewam.models.jepa.JEPA",
+        "use_action_history": True,
+        "use_proprio": False,
+        "encoder": {
+            "_target_": "stable_pretraining.backbone.utils.vit_hf",
+            "size": "tiny", "patch_size": 14, "image_size": img_size,
+            "pretrained": False, "use_mask_token": False,
+        },
+        "predictor": {
+            "_target_": "lewam.models.lewm.ARPredictor",
+            "num_frames": history_size, "input_dim": embed_dim, "hidden_dim": embed_dim,
+            "output_dim": embed_dim, "depth": 6, "heads": 16, "mlp_dim": 2048,
+            "dim_head": 64, "dropout": 0.1, "emb_dropout": 0.0,
+        },
+        "action_encoder": {
+            "_target_": "lewam.models.module.Embedder", "input_dim": action_block_dim, "emb_dim": embed_dim,
+        },
+        "projector": {
+            "_target_": "lewam.models.lewm.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
+            "hidden_dim": 2048, "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
+        },
+        "pred_proj": {
+            "_target_": "lewam.models.lewm.MLP", "input_dim": embed_dim, "output_dim": embed_dim,
+            "hidden_dim": 2048, "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
+        },
+    })
+    model = hydra_instantiate(model_cfg)
+    if weights_path in (None, "self", "scratch"):
+        # end-to-end / from-scratch model: the encoder weights live in the caller's
+        # full-model checkpoint (loaded by load_gcidm_model), not a separate frozen
+        # file. Here we only build the architecture.
+        model.requires_grad_(False)
+        model.eval()
+        model.interpolate_pos_encoding = True
+        return model
+    sd = torch.load(weights_path, map_location="cpu", weights_only=False)
+    if isinstance(sd, dict) and "state_dict" in sd:
+        sd = sd["state_dict"]
+    res = model.load_state_dict(sd, strict=False)
+    print(f"[gcidm-train] frozen LeWM <- {Path(weights_path).name}: "
+          f"missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
+    assert not res.unexpected_keys, f"unexpected keys: {res.unexpected_keys[:5]}"
+    model.requires_grad_(False)
+    model.eval()
+    model.interpolate_pos_encoding = True
+    return model

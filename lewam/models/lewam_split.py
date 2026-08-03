@@ -58,7 +58,7 @@ class GCHead(nn.Module):
         x = self.block3(x, cond)
         return self.out(x)
 
-    # ---- GMM consumers (all identity/passthrough when head_type == 'mse') ----
+    # GMM functions (identity if head_type == "mse")
     def _gmm_params(self, out):
         """(N, K*(1+2d)) -> logits (N,K), mu (N,K,d), logsig (N,K,d) clamped for stability."""
         N, K, d = out.shape[0], self.n_mix, self.action_dim
@@ -98,7 +98,7 @@ class GCHead(nn.Module):
         sig_s = logsig.gather(1, idx).squeeze(1).exp()
         return mu_s + sig_s * torch.randn_like(mu_s)
 
-    def sample(self, out, n, noise=True):
+    def sample(self, out, n, noise=True, generator=None):
         """n samples per row (N,n,d) for planning: mse -> mean repeated; gmm -> component ~ Cat then draw.
         noise=True: full reparam draw mu + sigma*eps (diverse modes and within-mode Gaussian).
         noise=False: the drawn component's mean mu_k, no within-mode Gaussian -- diverse in which mode but
@@ -112,7 +112,7 @@ class GCHead(nn.Module):
         idx = comp.unsqueeze(-1).expand(N, n, d)
         draw = mu.gather(1, idx)
         if noise:
-            draw = draw + logsig.gather(1, idx).exp() * torch.randn(N, n, d, device=out.device)
+            draw = draw + logsig.gather(1, idx).exp() * torch.randn(N, n, d, device=out.device, generator=generator)
         return draw
 
 

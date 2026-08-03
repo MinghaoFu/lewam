@@ -1,25 +1,15 @@
-"""LeWAM-Unified: ViT encoder -> a causal state aggregator -> a shared context latent c that feeds
-both the goal-conditioned action head and the goal-conditioned dynamics. Over a context window:
+"""LeWAM-Unified: 
 
-  pixels_t..t+W-1 (+ per-position goal frames) -> encoder -> z_t..z_{t+W-1}
-  c_tau = z_tau + g(z_tau) * Aggr(z_<=tau)          # causal aggregator, per-position residual (zero-init)
-  a_pred_tau = gc_head(c_tau, z_goal_tau, h_tau)    # goal = z_{tau+h}, h ~ U[1, H_max], per position
-  z_pred_tau = dynamics(c_tau, a_tau, z_goal_tau)   # dynamics reads the same shared c
+Over a context window:
+  o_t..t+W-1 -> encoder -> z_t..z_{t+W-1}
+  c_t = z_t + g(z_t) * Aggr(z_<=t)          # causal aggregator, per-position residual (zero-init)
+  a_pred_t = gc_head(c_t, z_goal_t, h_t)    # goal = z_{t+h}, h ~ U[1, H_max], per position
+  z_pred_{t+1} = dynamics(c_t, a_t, z_goal_t)   # dynamics reads the same shared c
 
-The aggregator is a causal Transformer over the state-latent sequence (sinusoidal positions): one pass
-emits c_tau at every position (tau attends only to z_<=tau), so training is sequence-parallel. The
-residual is zero-init, so at init c_tau == z_tau and the model boots as the single-frame split. Goals
-and actions are never aggregator inputs (no leak); optional action history enters as AdaLN conditioning
-on a_{tau-1} (ConditionalBlock), not as extra tokens.
-
-Two entry points:
-  forward_seq(seq, z_goal, h, a_t, ...) -> (a_pred[B,L,.], z_pred[B,L,.]): sequence-parallel training,
-    every position supervised from one causal pass.
-  gc_action(seq, z_goal, h, ...): last-position reactive readout, the eval path (arm-agnostic).
-
-One model spans all ablation arms so every checkpoint strict-loads under the single eval adapter; the
-trainer's config fully determines the architecture. GCHead/GoalCondDynamics come from lewam_split; the
-new module here is the aggregator.
+The aggregator is a causal Transformer over the state-latent sequence:
+one pass emits c_t at every position (c_t attends only to z_<=t), so training is sequence-parallel. 
+The residual is zero-init, so at init c_t == z_t and the model boots as the single-frame split. 
+Ooptional action history enters as AdaLN conditioning on a_{t-1} (ConditionalBlock).
 """
 
 import math
@@ -44,18 +34,27 @@ def sinusoidal_position_encoding(length, dim, device, dtype):
     return pe.to(dtype)
 
 
-class CausalStateAggregator(nn.Module):
-    """Causal Transformer over a state-latent sequence z_0..z_t -> a per-position correction (B, L, D),
-    position tau depending only on z_<=tau. Sinusoidal positions; causal blocks. With zero_init the
-    output projection starts at zero, so a residual model boots as the single-frame split (correction 0
-    at init).
+class StateAggregator(nn.Module):
+    """Causal Transformer over a state-latent sequence z_0..z_t 
+    -> a per-position history aggregated context {c_k}_{k=0..t} (B, L, D),."""
 
-    With action_cond, each token z_tau is AdaLN-conditioned (ConditionalBlock) on the embedded previous
-    action a_{tau-1}; the sequence start (no valid previous action) uses a learnable null-action
-    embedding. Actions are conditioning here, never sequence tokens."""
-
-    def __init__(self, z_dim=192, depth=2, heads=4, dim_head=48,
+    def __init__(self, z_dim=192, depth=4, heads=4, dim_head=48,
                  mlp_dim=None, dropout=0.0, zero_init=True, action_cond=False, action_dim=25):
+        """
+        Args:
+            z_dim (int): hidden dim of state-latent sequence
+            depth (int(: number of transformer blocks
+            heads (int): number of attention heads
+            dim_head (int): attention head dim (heads*dim_head = attention inner dim)
+            mlp_dim (int): FFN hidden dim; if None, defaults to 4 * z_dim
+            dropout (float): dropout p (0-1) in attention, FFN
+            zero_init (bool): the aggregator output start at zero, so a residual model inits to
+                              `lewam.models.lewam_split.LeWAMSplit`
+            action_cond (bool): if true, each state z_t is AdaLN-conditioned (ConditionalBlock)
+                                on the embedded previous action a_{t-1}; 
+                                the sequence start (no valid previous action) uses a 
+                                learnable null-action embedding.
+        """
         super().__init__()
         self.z_dim = int(z_dim)
         self.action_cond = bool(action_cond)
@@ -69,16 +68,20 @@ class CausalStateAggregator(nn.Module):
         self.norm = nn.LayerNorm(z_dim)
         self.out_proj = nn.Linear(z_dim, z_dim)
         if zero_init:
-            nn.init.zeros_(self.out_proj.weight)  # corr==0 at init -> residual c == z (per position)
+            nn.init.zeros_(self.out_proj.weight)
             nn.init.zeros_(self.out_proj.bias)
         if self.action_cond:
             self.action_embed = MLP(action_dim, z_dim, z_dim, act_fn=nn.SiLU)
             self.null_action = nn.Parameter(torch.zeros(z_dim))
 
     def forward(self, seq, a_prev=None, a_prev_mask=None):
-        """seq: (B, L, D) oldest..current. a_prev: (B, L, action_dim) previous action per token
-        (used when action_cond); a_prev_mask: (B, L) bool, False -> null-action.
-        Returns the correction at every position: (B, L, D)."""
+        """
+        Args:
+            seq: (B, L, D) latent states oldest..current
+            a_prev: (B, L, action_dim) previous action per token (used when action_cond=True)
+            a_prev_mask: (B, L) bool, False -> fill with null-action.
+        Returns:
+            the aggregated context at every position: (B, L, D)."""
         L = seq.shape[1]
         x = seq + sinusoidal_position_encoding(L, self.z_dim, seq.device, seq.dtype).unsqueeze(0)
         if self.action_cond:
@@ -94,12 +97,11 @@ class CausalStateAggregator(nn.Module):
 
 
 class PrefixDynamics(nn.Module):
-    """Fast-LeWM action-prefix dynamics (arXiv 2606.26217, adapted). Predicts, in parallel from a single
-    anchor context, the future latent reached after each action prefix -- no autoregressive latent
+    """Fast-LeWM action-prefix dynamics (arXiv 2606.26217, adapted). 
+    Predicts, in parallel from a single anchor context, the future latent reached after each action prefix -- no autoregressive latent
     feedback, so multi-step predictions don't accumulate error. Drop-in alternative to GoalCondDynamics;
-    the anchor is the aggregated context c_t (a generalization of the paper's single-frame z_t).
 
-        ẑ_{t+k} = predictor(c_t, p_{t,k}),   p_{t,k} = prefix token over actions a_t..a_{t+k-1},  k=1..H
+        ẑ_{t+k} = predictor(c_t, p_{t,k}),  p_{t,k} = prefix token over actions a_t..a_{t+k-1},  k=1..H
 
     Action-prefix encoder: a causal Transformer over [state_token(c_t), tok(a_t)..tok(a_{t+H-1})]. Under
     the causal mask the k-th action position attends only to the state token and a_t..a_{t+k-1}, so it
@@ -147,6 +149,9 @@ class PrefixDynamics(nn.Module):
         return self.predictor(pin.reshape(N * H, -1)).reshape(N, H, D)
 
 
+###########
+#  Model  #
+###########
 class LeWAMUnified(nn.Module):
     """Shared ViT encoder + a causal state aggregator producing a per-position context latent c
     feeding both the goal-conditioned action head and the goal-conditioned dynamics."""
@@ -154,11 +159,45 @@ class LeWAMUnified(nn.Module):
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
                  agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False,
-                 dyn_goal_cond=True, head_type="mse", n_mix=5, flow_H=1,
+                 dyn_goal_cond=False, head_type="mse", n_mix=5, flow_H=1,
                  agg_dim_head=None, agg_mlp_dim=None, dyn_action_embed_dim=0,
                  encoder_backbone="scratch", encoder_ckpt=None, use_idm=False,
-                 use_prefix=False, prefix_H=5, prefix_depth=2, prefix_heads=4,
-                 dyn_prefix_goal=False):
+                 use_prefix=False, prefix_H=5, prefix_depth=2, prefix_heads=4):
+        """
+        Args:
+            img_size (int): input image side length.
+            encoder_size (str): ViT backbone size passed to ViTEncoder ("tiny", "small", "base", or "large").
+            encoder_backbone (str): ViTEncoder backbone source.
+            encoder_ckpt (str, optional): backbone checkpoint path to pretrained weights
+            embed_dim (int): shared latent width (encoder output = aggregator = gc_head/dynamics input).
+            action_dim (int): raw action-block dim.
+            hidden_dim (int): hidden width for gc_head/dynamics/idm_head MLPs.
+            dropout (float): dropout used across encoder/aggregator/heads.
+            proj_hidden (int, optional): encoder projector hidden width; None -> ViTEncoder default.
+            agg_depth (int): number of StateAggregator transformer blocks.
+            agg_heads (int): number of StateAggregator attention heads.
+            agg_residual (bool): if True, c_t = z_t + Agg(z_t) (Agg is zero-init)
+                If False, c_t is the aggregator's raw output.
+            agg_gate (bool): if True (and agg_residual), the residual is scaled by an input-dependent
+                sigmoid gate (bias zero-init -> g=0.5 at init); ignored when agg_residual=False.
+            agg_action_cond (bool): if True, the aggregator is AdaLN-conditioned on the previous
+                action (StateAggregator's action_cond).
+            agg_dim_head (int, optional): aggregator attention head dim; None -> embed_dim // agg_heads.
+                Lets the aggregator's attention width scale independent of embed_dim.
+            agg_mlp_dim (int, optional): aggregator FFN hidden width; None -> StateAggregator default (4x).
+            head_type (str): "mse" | "gmm" | "flow" -> GCHead variant, or FlowPolicyHead if "flow".
+            n_mix (int): number of mixture components when head_type="gmm".
+            flow_H (int): action-chunk length for the flow head (H=1 fits the single-block data path).
+            dyn_action_embed_dim (int): GoalCondDynamics action-embedding width (0 -> its default).
+            dyn_goal_cond (bool): if True, dynamics head also sees z_goal (jointly goal-conditioned
+                with gc_head); if False, dynamics is a pure forward model regardless of the head.
+            use_idm (bool): if True, add idm_head (inverse-dynamics aux loss recovering a_t from
+                (z_t, z_pred); train-only, weighted by w_idm elsewhere).
+            use_prefix (bool): if True, dynamics = PrefixDynamics (Fast-LeWM parallel prefix prediction)
+            prefix_H (int): PrefixDynamics max prefix length (only used if use_prefix).
+            prefix_depth (int): PrefixDynamics transformer depth (only used if use_prefix).
+            prefix_heads (int): PrefixDynamics attention heads (only used if use_prefix).
+        """
         super().__init__()
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
@@ -167,11 +206,9 @@ class LeWAMUnified(nn.Module):
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden,
                                   backbone=encoder_backbone, backbone_ckpt=encoder_ckpt)
-        # aggregator width knobs. agg_dim_head>0 decouples the attention inner dim (heads*dim_head) from
-        # embed_dim, agg_mlp_dim widens the FFN -- so the aggregator can be scaled to LeWM-predictor size
-        # without touching the encoder latent width.
+        # aggregator
         _agg_dh = int(agg_dim_head) if agg_dim_head else max(embed_dim // agg_heads, 1)
-        self.aggregator = CausalStateAggregator(
+        self.aggregator = StateAggregator(
             z_dim=embed_dim, depth=agg_depth, heads=agg_heads,
             dim_head=_agg_dh, mlp_dim=(int(agg_mlp_dim) if agg_mlp_dim else None),
             zero_init=self.agg_residual,
@@ -180,6 +217,7 @@ class LeWAMUnified(nn.Module):
             # input-dependent sigmoid gate on the correction; bias zero-init -> g == 0.5 at init.
             self.gate_proj = nn.Linear(embed_dim, embed_dim)
             nn.init.zeros_(self.gate_proj.bias)
+        # policy / action head
         self.flow_H = int(flow_H)
         if head_type == "flow":
             # flow-matching action-chunk head (dynamics unchanged). H=1 fits the single-block data path;
@@ -191,32 +229,39 @@ class LeWAMUnified(nn.Module):
             self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
                                   hidden_dim=hidden_dim, dropout=dropout,
                                   head_type=head_type, n_mix=n_mix)
-        # dynamics goal-conditioning is independent of the gc_head's: the policy stays goal-conditioned;
-        # dyn_goal_cond=False makes only the dynamics a pure forward model. use_prefix swaps the
-        # single-step GoalCondDynamics for the Fast-LeWM PrefixDynamics. Both expose a dynamics(...)
-        # module; the trainer/eval pick the matching forward path.
+        # dynamics head
         self.use_prefix = bool(use_prefix)
         self.prefix_H = int(prefix_H)
         if self.use_prefix:
             self.dynamics = PrefixDynamics(z_dim=embed_dim, action_dim=action_dim,
                                            hidden_dim=hidden_dim, depth=int(prefix_depth),
-                                           heads=int(prefix_heads), goal_cond=bool(dyn_prefix_goal))
+                                           heads=int(prefix_heads), goal_cond=bool(dyn_goal_cond))
         else:
             self.dynamics = GoalCondDynamics(z_dim=embed_dim, action_dim=action_dim,
                                              hidden_dim=hidden_dim, goal_cond=bool(dyn_goal_cond),
                                              action_embed_dim=int(dyn_action_embed_dim))
-        # inverse-dynamics head: recover a_t from (c_t, predicted z_{t+1}); c_t is pre-action, so the
-        # action can only be recovered through the dynamics' prediction -> forces the dynamics to be
-        # action-aware. Train-only aux loss (w_idm).
+        # inverse-dynamics head (optional)
         self.idm_head = MLP(input_dim=2 * embed_dim, output_dim=action_dim,
                             hidden_dim=hidden_dim) if use_idm else None
 
     def encode(self, pixels):
-        """pixels: (N, 3, H, W) -> (N, embed_dim) cls latent."""
+        """
+        Args:
+            pixels (Tensor): (N, 3, H, W) input images.
+        Returns:
+            Tensor: (N, embed_dim) latents.
+        """
         return self.encoder(pixels)
 
     def aggregate(self, seq, a_prev=None, a_prev_mask=None):
-        """seq: (B, L, embed_dim) -> per-position context latent c: (B, L, embed_dim)."""
+        """
+        Args:
+            seq (Tensor): (B, L, embed_dim) state-latent sequence.
+            a_prev (Tensor, optional): (B, L, action_dim) previous action per token, if agg_action_cond.
+            a_prev_mask (Tensor, optional): (B, L) bool, False -> null-action fill.
+        Returns:
+            Tensor: (B, L, embed_dim) per-position context latent c.
+        """
         u = self.aggregator(seq, a_prev, a_prev_mask)
         if not self.agg_residual:
             return u
@@ -227,9 +272,7 @@ class LeWAMUnified(nn.Module):
     def forward_seq(self, seq, z_goal, h_norm, a_t, a_prev=None, a_prev_mask=None,
                     dyn_action_mix=0.0, dyn_action_detach=False):
         """Sequence-parallel training path: one causal pass -> c at every position, heads applied
-        per-position. seq: (B,L,D); z_goal: (B,L,D); h_norm: (B,L); a_t: (B,L,action_dim);
-        a_prev/a_prev_mask: (B,L,action_dim)/(B,L) if action_cond. Returns
-        (a_pred (B,L,action_dim), z_pred (B,L,D)).
+        per-position.
 
         dyn_action_mix (alpha) in [0,1] feeds the dynamics a convex mix of the policy action and the
         ground-truth action: a_dyn = alpha*a_pred + (1-alpha)*a_t. alpha=0 (default) = dynamics on
@@ -237,7 +280,23 @@ class LeWAMUnified(nn.Module):
         on the policy's own actions). dyn_action_detach stop-gradients the policy action into dynamics
         (dynamics adapts to the policy's actions without the dyn loss reshaping the BC policy); otherwise
         gradients flow policy->dynamics. The action is still BC-supervised on a_pred, so this is not a
-        latent-action model."""
+        latent-action model.
+
+        Args:
+            seq (Tensor): (B, L, D) state-latent sequence.
+            z_goal (Tensor): (B, L, D) per-position goal latent.
+            h_norm (Tensor): (B, L) per-position normalized horizon.
+            a_t (Tensor): (B, L, action_dim) ground-truth action per position.
+            a_prev (Tensor, optional): (B, L, action_dim) previous action per token, if agg_action_cond.
+            a_prev_mask (Tensor, optional): (B, L) bool, False -> null-action fill.
+            dyn_action_mix (float): convex-mix weight fed to the dynamics (see above); 0 = ground truth.
+            dyn_action_detach (bool): stop-gradient the policy action before mixing into dynamics.
+
+        Returns:
+            tuple: (a_pred (B,L,action_dim) raw gc_head output -- consume via gc_head.action_loss;
+            z_pred (B,L,D) predicted next latent; a_idm (B,L,action_dim) or None -- inverse-dynamics
+            prediction if idm_head is enabled).
+        """
         B, L, D = seq.shape
         c = self.aggregate(seq, a_prev, a_prev_mask)                      # (B,L,D)
         cf = c.reshape(B * L, D)                                          # flatten for the per-vector heads
@@ -256,8 +315,6 @@ class LeWAMUnified(nn.Module):
         z_pred = self.dynamics(cf, af, gf).reshape(B, L, D)
         a_idm = None
         if self.idm_head is not None:                                    # inverse dynamics: (z_t, z_pred)->a_t
-            # z_t (raw encoder latent), not c_t: same z-space as z_pred, and the action can only be
-            # recovered via z_pred -> forces the dynamics to be action-aware.
             a_idm = self.idm_head(torch.cat([seq.reshape(B * L, D), z_pred.reshape(B * L, D)], dim=-1)
                                   ).reshape(B, L, -1)
         return a_out, z_pred, a_idm                                      # a_out: consume via gc_head.action_loss
@@ -267,19 +324,29 @@ class LeWAMUnified(nn.Module):
         """Fast-LeWM prefix training path. One causal aggregation -> shared per-position context; the
         policy head reads it per position (as in forward_seq), and PrefixDynamics predicts all H prefix
         latents per anchor in parallel (no autoregression).
-          state_seq:         (B, L, D)        z_t at each decision point (aggregator input)
-          goal_seq:          (B, L, D)        per-position policy goal (gc_head; also the WM goal when
-                                              dyn_prefix_goal)
-          horizon_norm:      (B, L)           per-position horizon for gc_head
-          action_prefix_seq: (B, L, H, adim)  per anchor, action blocks a_t..a_{t+H-1} (the WM prefix)
-        Returns (action_out (B,L,.), pred_seq (B,L,H,D)); pred_seq[...,k-1] = ẑ_{t+k}. action_out is the
-        raw gc_head output (consume via gc_head.action_loss on the anchor action a_t = prefix block 0)."""
+
+        Args:
+            state_seq (Tensor): (B, L, D) z_t at each decision point (aggregator input).
+            goal_seq (Tensor): (B, L, D) per-position policy goal (gc_head; also the WM goal when
+                dyn_goal_cond).
+            horizon_norm (Tensor): (B, L) per-position horizon for gc_head.
+            action_prefix_seq (Tensor): (B, L, H, action_dim) per anchor, action blocks a_t..a_{t+H-1}
+                (the WM prefix).
+            a_prev (Tensor, optional): (B, L, action_dim) previous action per token, if agg_action_cond.
+            a_prev_mask (Tensor, optional): (B, L) bool, False -> null-action fill.
+
+        Returns:
+            action_out: (B, L, .) raw gc_head output
+            pred_seq: (B, L, H, D) where pred_seq[...,k-1] = ẑ_{t+k}).
+        """
         B, L, D = state_seq.shape
         H, action_dim = action_prefix_seq.shape[2], action_prefix_seq.shape[3]
         ctx_seq = self.aggregate(state_seq, a_prev, a_prev_mask)          # (B, L, D) shared context c_t
         ctx_flat = ctx_seq.reshape(B * L, D)
+
         action_out = self.gc_head(ctx_flat, goal_seq.reshape(B * L, D),
                                   horizon_norm.reshape(B * L)).reshape(B, L, -1)
+        
         goal_flat = goal_seq.reshape(B * L, D) if self.dynamics.goal_cond else None
         pred_seq = self.dynamics(ctx_flat, action_prefix_seq.reshape(B * L, H, action_dim),
                                  goal_flat).reshape(B, L, H, D)
@@ -287,61 +354,82 @@ class LeWAMUnified(nn.Module):
 
     def rollout_dyn(self, states, z_pred, next_tgt, z_goal, actions, n_pos, K,
                     a_prev=None, a_prev_mask=None):
-        """V-JEPA2-style K-step latent rollout for the dynamics, trained alongside teacher forcing
-        (L_dyn = L_tf + L_rollout). Feeds the model's own predicted latent back in for up to K-1 steps
+        """K-step latent rollout loss for the dynamics.
+        Feeds the model's own predicted latent back in for up to K-1 steps
         and supervises the deeper predictions against the real future latents, targeting compounding
-        (exposure bias). Only the state is rolled; actions and goals stay ground truth, isolating
-        state-compounding from action-awareness. Full BPTT -> depth-1 preds are pushed to be good
-        rollout inputs too.
+        (exposure bias). 
+        Only the state is rolled; actions and goals stay ground truth
 
-        states:   (B, L, D)  real z_p at each decision point (the aggregator input, p=0..L-1)
-        z_pred:   (B, L, D)  depth-1 teacher-forced prediction ẑ_{p+1} (reused from forward_seq)
-        next_tgt: (B, L, D)  real z_{p+1} target (z_window[:, 1:])
-        z_goal:   (B, L, D)  per-position goal latent;  actions: (B, L, adim);  n_pos: (B,)
-        K:        rollout length (K=2 == ONE rollout step; K<=1 -> no rollout, returns 0)
+        Anchor t at depth k (k=1..K-1) predicts ẑ_{t+k+1} from the causal sequence
+        [z_0..z_t, ẑ_{t+1}..ẑ_{t+k}] (real prefix + k predicted states) + a_{t+k}.
+        target = real z_{t+k+1}. Anchors are masked to (t+k < n_pos).
 
-        Anchor t at depth s (s=1..K-1) predicts ẑ_{t+s+1} from the causal sequence
-        [z_0..z_t, ẑ_{t+1}..ẑ_{t+s}] (real prefix + the s predicted states) with the REAL action
-        a_{t+s} and goal g_{t+s}; target = real z_{t+s+1}. Anchors are masked to (t+s < n_pos).
-        Returns a scalar per-element MSE over all valid (anchor, depth) terms (same scale as L_tf)."""
+        Args:
+            states (Tensor): (B, L, D) real z_p at each decision point (the aggregator input, p=0..L-1).
+            z_pred (Tensor): (B, L, D) depth-1 teacher-forced prediction ẑ_{p+1} (reused from forward_seq).
+            next_tgt (Tensor): (B, L, D) real z_{p+1} target (z_window[:, 1:]).
+            z_goal (Tensor): (B, L, D) per-position goal latent.
+            actions (Tensor): (B, L, action_dim) ground-truth actions.
+            n_pos (Tensor): (B,) valid sequence length per batch element.
+            K (int): rollout length (K = 2 is ONE rollout step; K <= 1 -> no rollout, returns 0).
+            a_prev (Tensor, optional): (B, L, action_dim) previous action per token, if agg_action_cond.
+            a_prev_mask (Tensor, optional): (B, L) bool, False -> null-action fill.
+
+        Returns:
+            Tensor: scalar per-element MSE over all valid (anchor, depth) terms (same scale as L_tf).
+        """
         B, L, D = states.shape
         dev = states.device
         if K <= 1 or L <= 1:
             return states.new_zeros(())
+        
         idx = torch.arange(L, device=dev)
         # a_prev is per-token (B,L,.), identical across anchors -> broadcast onto the anchor batch
         ap_e = am_e = None
         if a_prev is not None:
             ap_e = a_prev.unsqueeze(1).expand(B, L, L, a_prev.shape[-1]).reshape(B * L, L, -1)
             am_e = a_prev_mask.unsqueeze(1).expand(B, L, L).reshape(B * L, L)
-        frontier = [z_pred]                                # frontier[j-1][:, t] = ẑ_{t+j}
+
+        frontier = [z_pred]            # frontier[j-1][:, t] = ẑ_{t+j}
         tot_sq = states.new_zeros(())
         tot_n = states.new_zeros(())
-        for s in range(1, K):
-            # per-anchor sequence copy: seq[:, t] starts as the real states, then positions t+1..t+s
-            # are overwritten with this anchor's own rollout predictions (causal read at t+s ignores
-            # the untouched positions > t+s, so the real states left there are inert).
+        for k in range(1, K):
+            # per-anchor sequence copy: seq[:, t] starts as the real states, then positions t+1..t+k
+            # are overwritten with this anchor's own rollout predictions (causal read at t+k ignores
+            # the untouched positions > t+k, so the real states left there are inert).
             seq = states.unsqueeze(1).expand(B, L, L, D).clone()      # (B, anchor, pos, D)
-            for j in range(1, s + 1):
+            for j in range(1, k + 1):
                 keep = (idx + j) <= (L - 1)                           # in-range positions only
                 ai = idx[keep]
-                # frontier preds come out of the autocast dynamics (bf16); seq is fp32 (states.float()).
-                # index_put requires matching dtypes -> cast the source to seq's dtype.
                 seq[:, ai, ai + j, :] = frontier[j - 1][:, ai, :].to(seq.dtype)
+
             c = self.aggregate(seq.reshape(B * L, L, D), ap_e, am_e).reshape(B, L, L, D)
-            rp = (idx + s).clamp(max=L - 1)                           # read position t+s (clamp: masked anyway)
-            c_read = c[:, idx, rp, :]                                 # (B, L, D)  anchor t reads pos t+s
+            rp = (idx + k).clamp(max=L - 1)                          
+            c_read = c[:, idx, rp, :]                                 # (B, L, D)  anchor t reads pos t+k
+
             z_next = self.dynamics(c_read.reshape(B * L, D),
                                    actions[:, rp, :].reshape(B * L, actions.shape[-1]),
                                    z_goal[:, rp, :].reshape(B * L, D)).reshape(B, L, D)
-            frontier.append(z_next)                                  # feed back for depth s+1
-            m = ((idx.unsqueeze(0) + s) < n_pos.unsqueeze(1)).float()  # (B, L) valid anchors
+            
+            frontier.append(z_next)                                  # feed back for depth k+1
+            m = ((idx.unsqueeze(0) + k) < n_pos.unsqueeze(1)).float()  # (B, L) valid anchors
             tot_sq = tot_sq + ((z_next - next_tgt[:, rp, :]) ** 2 * m.unsqueeze(-1)).sum()
             tot_n = tot_n + m.sum()
+
         return tot_sq / (tot_n.clamp(min=1) * D)
 
     def gc_action(self, seq, z_goal, h_norm, a_prev=None, a_prev_mask=None):
-        """Reactive LAST-position action from a sequence (the eval path; arm-agnostic).
-        seq: (B,L,D); z_goal: (B,D); h_norm: (B,). Returns a_pred: (B, action_dim)."""
+        """Reactive / BC current-step action prediction.
+
+        Args:
+            seq (Tensor): (B, L, D) state-latent sequence.
+            z_goal (Tensor): (B, D) goal latent.
+            h_norm (Tensor): (B,) normalized horizon.
+            a_prev (Tensor, optional): (B, L, action_dim) previous action per token, if agg_action_cond.
+            a_prev_mask (Tensor, optional): (B, L) bool, False -> null-action fill.
+
+        Returns:
+            Tensor: (B, action_dim) point action (mixture mean for gmm).
+        """
         c_last = self.aggregate(seq, a_prev, a_prev_mask)[:, -1]          # (B,D)
         return self.gc_head.point(self.gc_head(c_last, z_goal, h_norm))   # point action (mixture mean for gmm)
