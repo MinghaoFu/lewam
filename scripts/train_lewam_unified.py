@@ -367,11 +367,14 @@ def main():
                     help="skew the training goal-distance draw toward SMALL h (more close-to-goal "
                          "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
                          "Applied to train only; val stays uniform for a comparable metric.")
-    #ap.add_argument("--perturb_data", type=str, default="",
-    #                help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
-    #                     "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
-    #ap.add_argument("--perturb_ratio", type=float, default=0.0,
-    #                help="dynamics-loss weight on off-policy transitions: loss_dyn=(1-r)*on + r*off. 0=baseline.")
+    # Restored: the 0497f88 cleanup commented these two flags out but left their three usage
+    # sites (args.perturb_data at ~L707/709, args.perturb_ratio at ~L716/795), so ANY run died at
+    # startup with AttributeError. Defaults keep the feature off, exactly as before the cleanup.
+    ap.add_argument("--perturb_data", type=str, default="",
+                    help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
+                         "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
+    ap.add_argument("--perturb_ratio", type=float, default=0.0,
+                    help="dynamics-loss weight on off-policy transitions: loss_dyn=(1-r)*on + r*off. 0=baseline.")
 
     # model config
     ap.add_argument("--head_type", type=str, default="mse",
