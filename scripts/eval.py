@@ -52,6 +52,25 @@ def get_dataset(cfg, dataset_name):
     )
     return dataset
 
+
+# WF8 env modules register their gym ids on import (side effect); nothing on this eval path
+# imported them (lewam/envs/__init__.py is deliberately empty). Same lookup as eval_gip.py.
+_ENV_MODULES = {
+    "swm/RoboMimicGC-v0": "lewam.envs.robomimic_gc_env",
+    "swm/DexMimicGen-v0": "lewam.envs.dexmimicgen_env",
+    "swm/PointMaze-v0": "lewam.envs.pointmaze_env",
+    "swm/RoboMimic-v0": "lewam.envs.robomimic_env",
+}
+
+
+def _register_env(env_name):
+    mod = _ENV_MODULES.get(str(env_name))
+    if mod:
+        import importlib
+
+        importlib.import_module(mod)
+
+
 @hydra.main(version_base=None, config_path="../configs/eval", config_name="pusht")
 def run(cfg: DictConfig):
     """Run evaluation of dinowm vs random policy."""
@@ -60,6 +79,7 @@ def run(cfg: DictConfig):
     ), "Planning horizon must be smaller than or equal to eval_budget"
 
     cfg.world.max_episode_steps = 2 * cfg.eval.eval_budget
+    _register_env(cfg.world.env_name)
     world = swm.World(**cfg.world, image_shape=(224, 224))
 
     transform = {

@@ -47,6 +47,9 @@ import stable_worldmodel as swm
 
 from lewam.utils import get_img_preprocessor, get_column_normalizer
 import lewam.models.gcidm as gcidm
+# 0497f88 moved build_frozen_lewm to lewam.models.jepa but dropped this import;
+# every run died with NameError at the phase-1 encoder build.
+from lewam.models.jepa import build_frozen_lewm
 
 
 # phase 1: precompute frozen latents (cached)
