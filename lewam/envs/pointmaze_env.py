@@ -144,16 +144,6 @@ class PointMazeEnv(gym.Env):
         g = np.asarray(goal_state, np.float64).ravel()
         self._goal_state = g
         self._goal_xy = g[:2]
-        # Visualization-only: sync OGBench target marker (the pink sphere) to the conditioned
-        # goal. GATED OFF by default on purpose -- training frames carry the collector-time marker
-        # (uncorrelated with hindsight goals), so a marker sitting ON the goal at eval would be an
-        # observation feature the model never trained with (shortcut + distribution shift). Scored
-        # evals keep the env untouched; video capture exports POINTMAZE_SYNC_GOAL_MARKER=1.
-        if os.environ.get("POINTMAZE_SYNC_GOAL_MARKER") == "1":
-            try:
-                self.u.set_goal(goal_xy=np.asarray(self._goal_xy, np.float64))
-            except Exception:
-                pass
 
     def _set_goal_proprio(self, goal_proprio):
         """No-op: proprio and state are the same 4 numbers here, and the goal is already set from the
@@ -168,6 +158,16 @@ class PointMazeEnv(gym.Env):
     # -- gym contract -----------------------------------------------------------
     def reset(self, seed=None, options=None):
         self.env.reset(seed=seed)
+        # Park OGBench's target marker (the pink sphere) back at the model-default cell, xy (0,0).
+        # The dataset renderer restores states without ever calling reset, so every training frame
+        # carries the marker at that uninitialized default; OGBench's reset would instead move it to
+        # the sampled task goal, which the training pixels never show. Pinning it keeps eval
+        # observations identical to training ones -- the marker is a constant background feature on
+        # both sides, and the conditioned goal is carried by the goal image alone.
+        try:
+            self.u.set_goal(goal_xy=np.zeros(2))
+        except Exception:
+            pass
         # Clear the previous episode's goal too, so a reused env cannot terminate against it.
         self._goal_state = None
         self._goal_xy = None
