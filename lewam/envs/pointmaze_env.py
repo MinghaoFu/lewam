@@ -144,6 +144,14 @@ class PointMazeEnv(gym.Env):
         g = np.asarray(goal_state, np.float64).ravel()
         self._goal_state = g
         self._goal_xy = g[:2]
+        # Sync OGBench own target marker (the pink sphere it renders) to the conditioned goal.
+        # Without this the marker stays wherever reset() randomly put it -- the predicate is
+        # unaffected (it reads _goal_xy), but every rendered frame shows a goal that is not the
+        # goal, which is exactly how it confused a human reading the rollout videos.
+        try:
+            self.u.set_goal(goal_xy=np.asarray(self._goal_xy, np.float64))
+        except Exception:
+            pass
 
     def _set_goal_proprio(self, goal_proprio):
         """No-op: proprio and state are the same 4 numbers here, and the goal is already set from the
