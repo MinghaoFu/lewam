@@ -29,6 +29,24 @@ import stable_worldmodel as swm
 
 import lewam.models.gip as gip
 
+# WF8 env modules register their gym ids on import (side effect), and nothing on this eval path
+# imports them -- lewam/envs/__init__.py is deliberately empty. Resolve the module from the gym id
+# so existing configs pay nothing and a new cell needs only its configs/eval yaml.
+_ENV_MODULES = {
+    "swm/RoboMimicGC-v0": "lewam.envs.robomimic_gc_env",
+    "swm/DexMimicGen-v0": "lewam.envs.dexmimicgen_env",
+    "swm/PointMaze-v0": "lewam.envs.pointmaze_env",
+    "swm/RoboMimic-v0": "lewam.envs.robomimic_env",
+}
+
+
+def _register_env(env_name):
+    mod = _ENV_MODULES.get(str(env_name))
+    if mod:
+        import importlib
+
+        importlib.import_module(mod)
+
 
 @hydra.main(version_base=None, config_path="../configs/eval", config_name="pusht")
 def run(cfg: DictConfig):
@@ -39,6 +57,7 @@ def run(cfg: DictConfig):
     ), "horizon*action_block must be <= eval_budget"
 
     # -- env + data context (shared helpers)
+    _register_env(cfg.world.env_name)
     cfg.world.max_episode_steps = 2 * cfg.eval.eval_budget
     world = swm.World(**cfg.world, image_shape=(224, 224))
     transform = {"pixels": gip.img_transform(cfg), "goal": gip.img_transform(cfg)}
