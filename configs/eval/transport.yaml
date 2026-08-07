@@ -1,0 +1,48 @@
+defaults:
+  - launcher: local
+  - solver: cem
+  - _self_
+world:
+  env_name: swm/DexMimicGen-v0
+  task: TwoArmTransport
+  num_envs: ${eval.num_eval}
+  max_episode_steps: ???
+  # NATIVE 224 as of 2026-08-07: transport_im224.h5 is the official-pipeline re-render
+  # (robomimic dataset_states_to_obs, robosuite 1.5.1, agentview 224) from recorded states --
+  # all 1029 official demos. Faithfulness: downsampled back to 84 it matches the official obs
+  # at MAE 2.2/255, the known GL-stack delta. (History: an earlier file named
+  # dexmimicgen_eval224.h5 claimed 224 but was a bicubic upsample, MAE 0.00 vs upscaled-84;
+  # it is retired. The 84-native dexmimicgen_eval pair remains the fallback -- move
+  # resolution and dataset_name together if you revert.)
+  resolution: 224
+dataset:
+  stats: ${eval.dataset_name}
+  keys_to_cache:
+    - action
+    - proprio
+    - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 10
+  receding_horizon: 10
+  action_block: 5
+eval:
+  num_eval: 50
+  goal_offset_steps: 50
+  eval_budget: 100
+  img_size: 224
+  dataset_name: transport
+  callables:
+    - method: set_state
+      args:
+        state: {value: state}
+        ep_idx: {value: ep_idx}
+    - method: _set_goal_state
+      args:
+        goal_state: {value: goal_state}
+    - method: _set_goal_proprio
+      args:
+        goal_proprio: {value: goal_proprio}
+output:
+  filename: transport_results.txt

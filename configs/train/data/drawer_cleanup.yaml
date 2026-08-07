@@ -1,0 +1,9 @@
+dataset:
+  num_steps: ${eval:'${num_preds} + ${history_size}'}
+  frameskip: 5
+  name: drawer_cleanup_fixed.h5
+  keys_to_load:
+  - pixels
+  - action
+  keys_to_cache:
+  - action
