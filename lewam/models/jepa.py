@@ -518,6 +518,11 @@ def build_frozen_lewm(weights_path, embed_dim=192, history_size=3, img_size=224,
     sd = torch.load(weights_path, map_location="cpu", weights_only=False)
     if isinstance(sd, dict) and "state_dict" in sd:
         sd = sd["state_dict"]
+    # GC-IDM consumes the ENCODER only. projector/pred_proj are SIGReg training-time machinery,
+    # and their MLP layout changed on this branch (norm-first), so checkpoints from the current
+    # train.py no longer shape-match the layout built here -- loading them would raise a size
+    # mismatch for modules phase-1 never touches. Drop them instead.
+    sd = {k: v for k, v in sd.items() if not k.startswith(("projector.", "pred_proj."))}
     res = model.load_state_dict(sd, strict=False)
     print(f"[gcidm-train] frozen LeWM <- {Path(weights_path).name}: "
           f"missing={len(res.missing_keys)} unexpected={len(res.unexpected_keys)}")
