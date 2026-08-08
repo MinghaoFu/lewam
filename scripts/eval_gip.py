@@ -59,8 +59,7 @@ def run(cfg: DictConfig):
     dataset = gip.get_dataset(cfg, cfg.eval.dataset_name)
     episodes, starts, goal_offsets = gip.sample_eval_episodes(cfg, dataset)
     if goal_offsets is not None:
-        # full-traj protocol: start=frame 0, goal=last frame, per-episode offsets;
-        # budget = 2x the longest offset (the pm_packed long-horizon convention).
+        # full-traj protocol: budget = 2x the longest per-episode offset
         cfg.eval.eval_budget = 2 * int(max(goal_offsets))
         print(f"[full-traj] {len(goal_offsets)} episodes, offsets "
               f"{min(goal_offsets)}..{max(goal_offsets)}, eval_budget={cfg.eval.eval_budget}")

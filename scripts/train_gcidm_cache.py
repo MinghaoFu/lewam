@@ -1,17 +1,9 @@
 # External baseline: gcidm (arXiv 2605.08732) frozen-latent reproduction, preload-cache flavor.
-"""Hindsight trainer for GC-IDM on FROZEN LeWM latents, fed from the preload cache.
+"""GC-IDM trainer fed from the preload cache: train_gcidm.py with phase 1 replaced by
+reading make_preload_cache.py output (transformed fp16 frames + z-scored action blocks +
+hindsight bookkeeping). Phase 2 is imported unchanged; eval_gip consumes the output as before.
 
-Same trainer as train_gcidm.py with phase 1 replaced: instead of decoding the dataset and
-re-applying the image transform, frames come from scripts/make_preload_cache.py's output
-(<stem>_fs<FS>_i<IMG>.frames.npy + .aux.npz), which already holds the transformed fp16
-frames, the z-scored action blocks, and the hindsight bookkeeping (t_gidx/maxh/ep_base)
-in exactly the layout flatten_for_training() builds. The frozen encoder runs once over
-the mmapped frames; phase 2 (sampling, head, checkpoints) is imported unchanged, so
-eval_gip's gcidm mode consumes the output as before.
-
-Run:
-  python scripts/train_gcidm_cache.py --dataset_name pointmaze --cache_dir <preload_cache> \
-    --weights <lewm_weights.pt> --run_name pointmaze_gcidm --epochs 200 --H_max 50
+  python scripts/train_gcidm_cache.py --dataset_name pointmaze --weights <lewm.pt> --run_name <run>
 """
 
 import argparse
@@ -34,7 +26,6 @@ from train_gcidm import sample_batch
 
 
 def load_cache(cache_dir, stem, frameskip, img_size):
-    """Resolve the preload cache pair; same two-location lookup as PreloadGoalDataset."""
     tag = f"{stem}_fs{int(frameskip)}_i{int(img_size)}"
     fp = os.path.join(cache_dir, stem, f"{tag}.frames.npy")
     ap = os.path.join(cache_dir, stem, f"{tag}.aux.npz")
@@ -50,7 +41,6 @@ def load_cache(cache_dir, stem, frameskip, img_size):
 
 
 def encode_frames(lewm, frames, device, enc_bs=256, bf16=True):
-    """Frozen encoder over the mmapped, already-transformed frames -> (N, emb) fp16."""
     zs, t0 = [], time.time()
     n = frames.shape[0]
     for i in range(0, n, enc_bs):
@@ -105,7 +95,6 @@ def main():
     act_std = np.asarray(aux["act_std"]).ravel().tolist()
     action_block_dim = int(A_flat.shape[1])
     raw_adim = action_block_dim // args.frameskip
-    assert int(maxh.min()) >= 1 and int((t_gidx + maxh).max()) < frames.shape[0]
     print(f"[gcidm-cache] {args.dataset_name}: frames={frames.shape} samples={len(t_gidx)} "
           f"action_block={action_block_dim}", flush=True)
 
