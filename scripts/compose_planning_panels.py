@@ -39,7 +39,7 @@ cfg = OmegaConf.create({
     "gip_eval": {},
 })
 dataset = gip.get_dataset(cfg, a.dataset_name)
-episodes, starts = gip.sample_eval_episodes(cfg, dataset)
+episodes, starts, _ = gip.sample_eval_episodes(cfg, dataset)
 print(f"[compose] {a.cell}: envs -> (episode,start) = {list(zip(episodes, starts))}", flush=True)
 
 f = h5py.File(a.h5, "r")

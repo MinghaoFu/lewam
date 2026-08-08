@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import hydra
+import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
@@ -52,18 +53,24 @@ def _register_env(env_name):
 def run(cfg: DictConfig):
     mode = cfg.get("gip_eval", {}).get("mode", "bc")
     assert cfg.policy != "random", "set policy=<gip_run_name>"
-    assert (
-        cfg.plan_config.horizon * cfg.plan_config.action_block <= cfg.eval.eval_budget
-    ), "horizon*action_block must be <= eval_budget"
 
     # -- env + data context (shared helpers)
     _register_env(cfg.world.env_name)
+    dataset = gip.get_dataset(cfg, cfg.eval.dataset_name)
+    episodes, starts, goal_offsets = gip.sample_eval_episodes(cfg, dataset)
+    if goal_offsets is not None:
+        # full-traj protocol: start=frame 0, goal=last frame, per-episode offsets;
+        # budget = 2x the longest offset (the pm_packed long-horizon convention).
+        cfg.eval.eval_budget = 2 * int(max(goal_offsets))
+        print(f"[full-traj] {len(goal_offsets)} episodes, offsets "
+              f"{min(goal_offsets)}..{max(goal_offsets)}, eval_budget={cfg.eval.eval_budget}")
+    assert (
+        cfg.plan_config.horizon * cfg.plan_config.action_block <= cfg.eval.eval_budget
+    ), "horizon*action_block must be <= eval_budget"
     cfg.world.max_episode_steps = 2 * cfg.eval.eval_budget
     world = swm.World(**cfg.world, image_shape=(224, 224))
     transform = {"pixels": gip.img_transform(cfg), "goal": gip.img_transform(cfg)}
-    dataset = gip.get_dataset(cfg, cfg.eval.dataset_name)
     process = gip.build_process(cfg, dataset)
-    episodes, starts = gip.sample_eval_episodes(cfg, dataset)
 
     # -- optional random goals (reachable by construction): from each real init state, roll the sim
     # forward goal_rollout_steps env-steps of random actions and take the resulting state as the goal.
@@ -133,7 +140,7 @@ def run(cfg: DictConfig):
     # -- model + policy (mode is the single switch)
     # mode=gcidm loads its own frozen-LeWM + GCIDMHead, not the JEPA-checkpoint loader
     if mode == "gcidm":
-        policy = gip.build_policy(cfg, None, None, process, transform)
+        policy = gip.build_policy(cfg, None, None, process, transform, goal_offsets=goal_offsets)
     elif mode == "split_policy":
         # LeWAM-Split: its own loader + config; adim = the model's z-scored action block dim.
         model, split_cfg = gip.load_lewam_split_model(cfg.policy, which=cfg.get("seq_which", "best"))
@@ -141,7 +148,7 @@ def run(cfg: DictConfig):
         model.requires_grad_(False)
         model._split_cfg = split_cfg
         adim = int(split_cfg["action_dim"])
-        policy = gip.build_policy(cfg, model, adim, process, transform)
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
     elif mode in ("unified_policy", "unified_cem"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
@@ -150,7 +157,7 @@ def run(cfg: DictConfig):
         model.requires_grad_(False)
         model._unified_cfg = uni_cfg
         adim = int(uni_cfg["action_dim"])
-        policy = gip.build_policy(cfg, model, adim, process, transform)
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
     else:
         model, adim = gip.load_gip_model(cfg.policy, epoch=cfg.get("ckpt_epoch", None))
         model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
@@ -167,7 +174,7 @@ def run(cfg: DictConfig):
             adim = f * d_raw
             print(f"[GIP] multi-task: eval_task={model.eval_task} of {model.mt_task_names}  "
                   f"action pad {d_raw}x{f} -> trained block")
-        policy = gip.build_policy(cfg, model, adim, process, transform)
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
     print(f"[GIP] eval mode={mode} policy={type(policy).__name__}")
 
     # random-goal eval: a goal-conditioned policy fed an off-distribution goal can extrapolate to
@@ -190,7 +197,8 @@ def run(cfg: DictConfig):
     metrics = world.evaluate(
         dataset=dataset,
         start_steps=starts,
-        goal_offset=cfg.eval.goal_offset_steps,
+        goal_offset=(np.asarray(goal_offsets) if goal_offsets is not None
+                     else cfg.eval.goal_offset_steps),
         eval_budget=cfg.eval.eval_budget,
         episodes_idx=episodes,
         callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
