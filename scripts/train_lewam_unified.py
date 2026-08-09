@@ -320,6 +320,10 @@ def main():
     # train config
     ap.add_argument("--seed", type=int, default=3072)
     ap.add_argument("--run_name", type=str, default="reacher_lewam_unified")
+    ap.add_argument("--exp_tag", type=str, default="",
+                    help="short experiment slug (e.g. 'noh', 'aggcat'). Appended to the checkpoint "
+                         "directory AND to --ckpt_sync_dir, so two experiments that differ only by "
+                         "a flag cannot silently overwrite each other's run. Recorded in the config.")
     ap.add_argument("--train_split", type=float, default=0.9)
     ap.add_argument("--max_eps", type=int, default=0)
     ap.add_argument("--dataset_name", type=str, default="reacher.h5")
@@ -355,6 +359,13 @@ def main():
                          "each goal is at horizon h~U[1,H_max], episode-clamped. "
                          "Decoupled from the window length (see --context_len); does not affect "
                          "memory (goals are looked up per position, not loaded as a tail)")
+    ap.add_argument("--ablate_horizon", action="store_true",
+                    help="drop the horizon conditioning: h_norm is fed as 0 everywhere. "
+                         "Hindsight h is the TRUE remaining distance to the relabelled "
+                         "goal, so conditioning on it hands the policy privileged "
+                         "information no deployment has (and under full-traj it saturates "
+                         "to a constant anyway). Recorded in the run config so eval picks "
+                         "it up automatically.")
     ap.add_argument("--context_len", type=int, default=5,
                     help="decision points per context window = the aggregator's max sequence length "
                          "at train (eval defaults its ctx_cap to this). Frames per item = "
@@ -520,10 +531,22 @@ def main():
     act_std = _zn.std.squeeze(0).cpu().numpy().tolist()
     img_t = get_img_preprocessor(source="pixels", target="pixels", img_size=args.img_size)
 
+    # --exp_tag differentiates otherwise-identical runs. There is no resume path here and
+    # run_dir.mkdir(exist_ok=True) writes straight into whatever is there, so a repeated run_name
+    # silently overwrites the earlier experiment's weights and config.
+    _tag = args.exp_tag.strip().strip("_")
+    _run_name = f"{args.run_name}_{_tag}" if _tag else args.run_name
     if args.run_dir:
         run_dir = Path(args.run_dir)
     else:
-        run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), args.run_name)
+        run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), _run_name)
+    if _tag and args.ckpt_sync_dir:
+        # keep the remote layout in step with the local one
+        args.ckpt_sync_dir = str(Path(args.ckpt_sync_dir) / _tag)
+    if (run_dir / "lewam_unified_best.pt").exists():
+        raise SystemExit(f"[lewam-uni] {run_dir} already holds a finished run "
+                         f"(lewam_unified_best.pt). Pass a different --exp_tag / --run_name rather "
+                         f"than overwriting it.")
     run_dir.mkdir(parents=True, exist_ok=True)
     if os.path.realpath(run_dir).startswith(os.path.realpath(os.path.expanduser("~"))):
         print(f"[lewam-uni] WARN run_dir under $HOME ({run_dir}); checkpoints in home can fill the "
@@ -698,6 +721,7 @@ def main():
         dyn_policy_detach=args.dyn_policy_detach,
         encoder_lr=args.encoder_lr, head_lr=args.head_lr,
         dynamics_lr=args.dynamics_lr, agg_lr=args.agg_lr,
+        ablate_horizon=args.ablate_horizon, exp_tag=_tag, run_name=_run_name,
     )
     (run_dir / "lewam_unified_config.json").write_text(json.dumps(cfg_out, indent=2))
     durable_sync([run_dir / "lewam_unified_config.json"], args.ckpt_sync_dir)
@@ -756,6 +780,8 @@ def main():
         # SHARED-mode horizons can exceed H_max (early positions are farther from the window's
         # goal); clamp exactly like the eval countdown's min(steps, H_max)/H_max.
         h_norm = horizon.clamp(max=args.H_max).float() / Hmax
+        if args.ablate_horizon:
+            h_norm = torch.zeros_like(h_norm)
 
         a_prev = a_prev_mask = None
         if model.agg_action_cond:

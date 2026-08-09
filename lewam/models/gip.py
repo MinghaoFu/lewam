@@ -1153,6 +1153,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 for _h in range(plan_horizon):
                     horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
                                                 device=device, dtype=torch.float32)
+                    if self.ablate_horizon:
+                        horizon_norm = torch.zeros_like(horizon_norm)
                     context = self._context_at_head(window, win_len)    # (n_replan*n_samples, latent_dim)
                     action_blk = self.model.gc_head.sample(
                         self.model.gc_head(context, z_goal_rep, horizon_norm), 1, 
@@ -1173,6 +1175,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                     for _h in range(plan_horizon):
                         horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
                                                     device=device, dtype=torch.float32)
+                        if self.ablate_horizon:
+                            horizon_norm = torch.zeros_like(horizon_norm)
                         context = self._context_at_head(window, win_len)    # (n_replan, latent_dim) trained context
                         action_blk = self.model.gc_head.point(self.model.gc_head(context, z_goal, horizon_norm))
                         warm_blocks.append(action_blk)

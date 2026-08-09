@@ -123,9 +123,18 @@ class GoalCondDynamics(nn.Module):
     forward() keeps the 3-arg signature either way (z_goal unused when goal_cond=False) so callers
     don't change."""
 
-    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512, goal_cond=True, action_embed_dim=0):
+    def __init__(self, z_dim=192, action_dim=25, hidden_dim=512, goal_cond=True, action_embed_dim=0,
+                 out_dim=0):
         super().__init__()
         self.goal_cond = bool(goal_cond)
+        # Prediction width. The trunk emits out_dim (default z_dim = the latent it predicts); when
+        # out_dim != z_dim a bias-free readout maps it back so the loss stays MSE against z_{t+1}
+        # and every caller keeps its (N, z_dim) contract. forward_wide() exposes the wide vector for
+        # consumers that want it (e.g. planning scored in the wider space). out_dim == z_dim makes
+        # the readout an Identity, so the module is structurally identical to the pre-flexible
+        # version and old checkpoints load strict.
+        self.z_dim = int(z_dim)
+        self.out_dim = int(out_dim) if out_dim else int(z_dim)
         # action pathway: the raw z-scored action (action_dim) is tiny next to the z_dim latents and gets
         # drowned in the concat. action_embed_dim>0 projects+normalizes it (Linear -> LayerNorm -> GELU)
         # to a comparable width before concat, giving the MLP a real action pathway. 0 = raw-concat
@@ -143,6 +152,7 @@ class GoalCondDynamics(nn.Module):
             self.a_proj = None
             a_in = action_dim
         in_dim = (2 * z_dim + a_in) if self.goal_cond else (z_dim + a_in)
+        self.in_dim = in_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -150,13 +160,23 @@ class GoalCondDynamics(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, z_dim),
+            nn.Linear(hidden_dim, self.out_dim),
         )
+        self.readout = (nn.Identity() if self.out_dim == self.z_dim
+                        else nn.Linear(self.out_dim, self.z_dim, bias=False))
 
-    def forward(self, z_t, a_t, z_goal):
+    def _trunk(self, z_t, a_t, z_goal):
         a = self.a_proj(a_t) if self.a_proj is not None else a_t
         x = torch.cat([z_t, a, z_goal], dim=-1) if self.goal_cond else torch.cat([z_t, a], dim=-1)
         return self.net(x)
+
+    def forward_wide(self, z_t, a_t, z_goal):
+        """(N, out_dim) prediction in the trunk's own width, before the z-space readout."""
+        return self._trunk(z_t, a_t, z_goal)
+
+    def forward(self, z_t, a_t, z_goal):
+        """(N, z_dim) predicted next latent -- the contract every caller relies on."""
+        return self.readout(self._trunk(z_t, a_t, z_goal))
 
 
 class LeWAMSplit(nn.Module):
