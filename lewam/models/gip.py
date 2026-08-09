@@ -91,8 +91,12 @@ def sample_eval_episodes(cfg, dataset):
     last frame and only one start per episode qualifies. Episodes too short to reach
     the goal are excluded. Sampling is deterministic given cfg.seed.
 
+    With cfg.gip_eval.full_traj, each pick starts at the episode's FIRST frame and the goal
+    is its LAST frame, so the goal offset varies per episode and is returned as a third list
+    (None in the default mode).
+
     Returns:
-        (episode_ids, start_step): tuple of lists of size cfg.eval.num_eval
+        (episode_ids, start_step, goal_offsets): lists of size cfg.eval.num_eval
     """
     col = episode_col(dataset)
     ep_indices, _ = np.unique(dataset.get_col_data(col), return_index=True)
@@ -103,6 +107,16 @@ def sample_eval_episodes(cfg, dataset):
     for ep_id in ep_indices:
         lengths.append(np.max(step_idx[ep_idx == ep_id]) + 1)
     lengths = np.array(lengths)
+
+    full_traj = bool(cfg.get("gip_eval", {}).get("full_traj", False))
+    if full_traj:
+        valid = np.nonzero(step_idx == 0)[0]
+        g = np.random.default_rng(cfg.seed)
+        picks = np.sort(valid[g.choice(len(valid), size=cfg.eval.num_eval, replace=False)])
+        episodes = dataset.get_row_data(picks)[col]
+        len_by_ep = {e: int(lengths[i]) for i, e in enumerate(ep_indices)}
+        offsets = [len_by_ep[e] - 1 for e in episodes]
+        return episodes.tolist(), [0] * len(episodes), offsets
 
     max_start = lengths - cfg.eval.goal_offset_steps - 1
     max_start_by_ep = {e: max_start[i] for i, e in enumerate(ep_indices)}
@@ -119,7 +133,7 @@ def sample_eval_episodes(cfg, dataset):
     starts = dataset.get_row_data(picks)["step_idx"]
     if len(episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
-    return episodes.tolist(), starts.tolist()
+    return episodes.tolist(), starts.tolist(), None
 
 ###################
 #  Model Loading  #
@@ -359,12 +373,27 @@ def attach_intention_actor(model, history_size=3, goal_conditioned=False):
 #  Policy Classes  #
 ####################
 
+def _as_h0(h0):
+    """Normalize horizon0: None stays None, scalars become float, per-env sequences arrays."""
+    if h0 is None:
+        return None
+    a = np.asarray(h0, dtype=np.float64)
+    return a if a.ndim else float(a)
+
+
+def _h0_at(h0, i):
+    return float(h0[i]) if isinstance(h0, np.ndarray) else float(h0)
+
+
 # Policy factory
-def build_policy(cfg, model, adim, process, transform):
-    """Configure policy from cfg"""
+def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
+    """Configure policy from cfg. goal_offsets: per-env raw-frame goal offsets (full-traj
+    eval); when given, horizon0 becomes a per-env array offsets/action_block."""
     mode = cfg.get("gip_eval", {}).get("mode", "bc")
     goal_conditioned = bool(cfg.get("gip_eval", {}).get("goal_conditioned", False))
     action_block = int(cfg.plan_config.action_block)
+    h0_full = (np.asarray(goal_offsets, np.float64) / float(action_block)
+               if goal_offsets is not None else None)
 
     # mode=split_policy: LeWAM-Split adapter. `model` is a loaded LeWAMSplit with its config
     # attached as model._split_cfg (done in eval_gip.py)
@@ -373,10 +402,11 @@ def build_policy(cfg, model, adim, process, transform):
         split_cfg = getattr(model, "_split_cfg")
         horizon0 = ge.get("horizon0", None)
         if horizon0 is None:
-            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+            horizon0 = h0_full if h0_full is not None else \
+                float(cfg.eval.goal_offset_steps) / float(action_block)
         return LeWAMSplitPolicy(
             model=model, cfg=split_cfg, action_block=action_block,
-            action_dim=adim // action_block, horizon0=float(horizon0),
+            action_dim=adim // action_block, horizon0=_as_h0(horizon0),
             H_max=int(ge.get("horizon_H_max", split_cfg.get("H_max", 50))),
             process=process, transform=transform,
             ablate_horizon=bool(ge.get("ablate_horizon", split_cfg.get("ablate_horizon", False))),
@@ -389,9 +419,10 @@ def build_policy(cfg, model, adim, process, transform):
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
         if horizon0 is None:
-            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+            horizon0 = h0_full if h0_full is not None else \
+                float(cfg.eval.goal_offset_steps) / float(action_block)
         common = dict(model=model, cfg=uni_cfg, action_block=action_block,
-                      action_dim=adim // action_block, horizon0=float(horizon0),
+                      action_dim=adim // action_block, horizon0=_as_h0(horizon0),
                       H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
                       process=process, transform=transform,
                       ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))))
@@ -423,11 +454,12 @@ def build_policy(cfg, model, adim, process, transform):
         # horizon0 = goal_offset(raw frames)/frameskip(=action_block) = obs-steps to the goal frame. Override via gip_eval.gcidm_horizon.
         horizon0 = gc.get("gcidm_horizon", None)
         if horizon0 is None:
-            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+            horizon0 = h0_full if h0_full is not None else \
+                float(cfg.eval.goal_offset_steps) / float(action_block)
         return GCIDMPolicy(
             lewm=lewm, head=head, action_block=action_block,
             action_dim=int(gcfg["action_dim"]) // action_block,
-            H_max=int(gcfg["H_max"]), horizon0=float(horizon0),
+            H_max=int(gcfg["H_max"]), horizon0=_as_h0(horizon0),
             process=process, transform=transform,
             ablate_horizon=bool(gc.get("ablate_horizon", gcfg.get("ablate_horizon", False))),
         )
@@ -440,7 +472,8 @@ def build_policy(cfg, model, adim, process, transform):
         # H_max MUST match training H_max (action_pred.horizon_H_max, default 50).
         horizon0 = ge.get("horizon0", None)
         if horizon0 is None:
-            horizon0 = float(cfg.eval.goal_offset_steps) / float(action_block)
+            horizon0 = h0_full if h0_full is not None else \
+                float(cfg.eval.goal_offset_steps) / float(action_block)
         return BCPolicy(
             model=model,
             action_block=action_block,
@@ -449,7 +482,7 @@ def build_policy(cfg, model, adim, process, transform):
             transform=transform,
             goal_conditioned=(mode == "policy" and goal_conditioned),
             H_max=int(ge.get("horizon_H_max", 50)),
-            horizon0=float(horizon0),
+            horizon0=_as_h0(horizon0),
             history_size=int(cfg.get("history_size", 3)),
         )
 
@@ -500,7 +533,7 @@ class BCPolicy(BasePolicy):
         # norm min(h,H_max)/H_max, fed to intention_rollout. Active only if horizon_modulator present.
         self.use_horizon = getattr(self.model, "horizon_modulator", None) is not None
         self.H_max = int(H_max)
-        self.horizon0 = float(horizon0) if horizon0 is not None else None
+        self.horizon0 = _as_h0(horizon0)
         self._steps_left = None  # per-env remaining obs-steps
         # buffer last HS observed frames + last HS-1 emitted action blocks per env so the eval
         # context (z_{t-HS+1..t} + a_{<t}) matches training. Active only for the history-conditioned GC head.
@@ -533,7 +566,7 @@ class BCPolicy(BasePolicy):
                 if flush[i]:
                     self._action_buffer[i].clear()
                     if self._steps_left is not None:
-                        self._steps_left[i] = self.horizon0  # reset countdown for the new episode
+                        self._steps_left[i] = _h0_at(self.horizon0, i)  # reset countdown for the new episode
                     if self._frame_buf is not None:
                         self._frame_buf[i].clear(); self._past_act_buf[i].clear()  # reset history
 
@@ -636,7 +669,7 @@ class GCIDMPolicy(BasePolicy):
         self.action_block = int(action_block)
         self.action_dim = int(action_dim)
         self.H_max = int(H_max)
-        self.horizon0 = float(horizon0)
+        self.horizon0 = _as_h0(horizon0)
         self.ablate_horizon = bool(ablate_horizon)
         self._action_buffer = None
         self._steps_left = None  # per-env remaining obs-steps
@@ -664,7 +697,7 @@ class GCIDMPolicy(BasePolicy):
             for i in range(num_envs):
                 if flush[i]:
                     self._action_buffer[i].clear()
-                    self._steps_left[i] = self.horizon0  # reset countdown for the new episode
+                    self._steps_left[i] = _h0_at(self.horizon0, i)  # reset countdown for the new episode
 
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
@@ -729,7 +762,7 @@ class LeWAMSplitPolicy(BasePolicy):
         self.action_block = int(action_block)
         self.action_dim = int(action_dim)                 # per-step raw dim = raw_adim
         self.H_max = int(cfg.get("H_max", H_max))
-        self.horizon0 = float(horizon0) if horizon0 is not None else float(self.H_max)
+        self.horizon0 = _as_h0(horizon0) if horizon0 is not None else float(self.H_max)
         self.ablate_horizon = bool(ablate_horizon)
         self.transform = transform or {}
         self.process = {}                                 # action un-norm handled internally
@@ -763,7 +796,7 @@ class LeWAMSplitPolicy(BasePolicy):
             for i in range(num_envs):
                 if flush[i]:
                     self._action_buffer[i].clear()
-                    self._steps_left[i] = self.horizon0
+                    self._steps_left[i] = _h0_at(self.horizon0, i)
 
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
@@ -878,7 +911,7 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
                     self._lat_buf[i].clear()
                     self._pblk_buf[i].clear()
                     self._last_blk[i] = None
-                    self._steps_left[i] = self.horizon0
+                    self._steps_left[i] = _h0_at(self.horizon0, i)
 
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
@@ -1074,7 +1107,7 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 if flush[env_i]:
                     self._action_buffer[env_i].clear()
                     self._lat_buf[env_i].clear()
-                    self._steps_left[env_i] = self.horizon0
+                    self._steps_left[env_i] = _h0_at(self.horizon0, env_i)
 
         term = info_dict.get("terminated")
         is_dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n_envs, dtype=bool)

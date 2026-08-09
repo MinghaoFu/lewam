@@ -1,5 +1,7 @@
 # LeWAM — a Simple, Fast, Scalable World-Action Model
 
+> **Four new WF8 cells** (tool_hang / drawer_cleanup / transport / pointmaze): datasets, caches, train+eval commands in [docs/WF8_CELLS.md](docs/WF8_CELLS.md).
+
 > **New here? Start with [ONBOARDING.md](ONBOARDING.md)** — zero → running training/eval in ~20 min (+ the data pull). It covers context, env, data, the smoke test, and every config-driven setting.
 
 **LeWAM** is a latent JEPA World-Action Model built on **LeWM** (LeWorldModel, arXiv 2603.19312). On top of LeWM's plannable latent it adds a planning-free, history/goal/horizon-conditioned action head, so **one trained model** serves behavior cloning, goal-conditioned policy, and CEM planning. The core contribution is `lewam/models/jepa.py` (model) + `scripts/train.py` (loss) + `configs/train/lewm.yaml` (every setting via `action_pred.*`). Every training setting (BC / goal-conditioned / horizon / inverse-dynamics / cycle) and its loss equation is documented in [`docs/SETTINGS.md`](docs/SETTINGS.md). Deeper context in [`docs/`](docs/) — project rules ([`docs/CLAUDE.md`](docs/CLAUDE.md)), experiment log ([`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md)), equations ([`docs/results/lewam_equations.html`](docs/results/lewam_equations.html)), asset transfer ([`docs/MACHINE_TRANSFER.md`](docs/MACHINE_TRANSFER.md)).

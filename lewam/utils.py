@@ -31,6 +31,18 @@ def get_column_normalizer(dataset, source: str, target: str):
     data = data[~torch.isnan(data).any(dim=1)]
     mean = data.mean(0, keepdim=True).clone()
     std = data.std(0, keepdim=True).clone()
+    # A dimension that is constant across the dataset has std exactly 0, and the z-score below
+    # becomes 0/0: every value in the column turns NaN and the run finishes with exit code 0 and
+    # NaN losses (drawer_cleanup lost a full training round this way -- its dex hand pins action
+    # dims 11/23 at float32(pi/2) over all 298,235 steps). Setting std to 1 for those dims makes
+    # the constant normalize to exactly 0 and the inverse transform return exactly the constant.
+    # This is the single chokepoint every trainer path shares (train.py, train_lewam_unified,
+    # train_gcidm, make_preload_cache), so the guard lives here and nowhere else.
+    zero = std == 0
+    if bool(zero.any()):
+        print(f"[normalizer] {source}: {int(zero.sum())} constant dim(s) "
+              f"{zero.squeeze(0).nonzero(as_tuple=True)[0].tolist()} -> std forced to 1", flush=True)
+        std[zero] = 1.0
     return dt.transforms.WrapTorchTransform(ZScoreNormalizer(mean, std), source=source, target=target)
 
 class SaveCkptCallback(Callback):

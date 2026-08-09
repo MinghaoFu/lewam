@@ -299,7 +299,7 @@ def run(cfg: DictConfig):
     transform = {"pixels": gip.img_transform(cfg), "goal": gip.img_transform(cfg)}
     dataset = gip.get_dataset(cfg, cfg.eval.dataset_name)
     process = gip.build_process(cfg, dataset)
-    episodes, starts = gip.sample_eval_episodes(cfg, dataset)
+    episodes, starts, _ = gip.sample_eval_episodes(cfg, dataset)
 
     mode = str(cfg.get("gip_eval", {}).get("mode", "policy"))
     action_block = int(cfg.plan_config.action_block)
