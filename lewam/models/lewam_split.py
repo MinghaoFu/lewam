@@ -33,7 +33,8 @@ class GCHead(nn.Module):
 
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
                  n_freqs=64, cond_dim=128, dropout=0.1, state_dim=None,
-                 head_type="mse", n_mix=5):
+                 head_type="mse", n_mix=5,
+                 latent_h="", h_codes=16, h_code_dim=64, h_commit=0.25, h_pred_w=1.0):
         super().__init__()
         self.n_freqs = n_freqs
         self.action_dim = int(action_dim)
@@ -44,15 +45,88 @@ class GCHead(nn.Module):
         sin_dim = 2 * n_freqs
         self.horizon_mlp = nn.Sequential(
             nn.Linear(sin_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+        # latent horizon: the conditioning is derived from (state, z_goal) instead of the dataset's
+        # h. The true h is used only as a regression target in h_aux_loss, never as an input, so
+        # nothing about the eval path needs to know the remaining time.
+        self.latent_h = str(latent_h or "")
+        assert self.latent_h in ("", "vq", "scalar"), f"latent_h={self.latent_h!r}"
+        self.h_codes, self.h_commit, self.h_pred_w = int(h_codes), float(h_commit), float(h_pred_w)
+        if self.latent_h:
+            u_dim = h_code_dim if self.latent_h == "vq" else 1
+            self.h_enc = nn.Sequential(
+                nn.Linear(in_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, u_dim))
+        if self.latent_h == "vq":
+            self.h_codebook = nn.Embedding(self.h_codes, h_code_dim)
+            self.h_codebook.weight.data.normal_(0.0, h_code_dim ** -0.5)
+            self.h_readout = nn.Linear(h_code_dim, 1)
+            self.code_mlp = nn.Sequential(
+                nn.Linear(h_code_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+            # usage histogram -> code_stats(); a collapsed codebook makes this arm a no-h arm with
+            # extra parameters, which has to be visible in the log rather than inferred from SR.
+            self.register_buffer("h_code_count", torch.zeros(self.h_codes))
         self.block1 = AdaLNBlock(in_dim, hidden_dim, cond_dim, dropout)
         self.block2 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
         self.block3 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
         out_dim = self.n_mix * (1 + 2 * self.action_dim) if self.head_type == "gmm" else self.action_dim
         self.out = nn.Linear(hidden_dim, out_dim)
 
+    def _quantize(self, u):
+        """Nearest codebook entry. Returns (straight-through e, e, index)."""
+        w = self.h_codebook.weight
+        d = u.pow(2).sum(-1, keepdim=True) - 2.0 * u @ w.t() + w.pow(2).sum(-1)[None, :]
+        idx = d.argmin(-1)
+        e = self.h_codebook(idx)
+        return u + (e - u).detach(), e, idx
+
+    def h_aux_loss(self, z_t, z_goal, h_target):
+        """VQ + horizon-readout loss; 0 when latent_h is off.
+
+        Recomputes u rather than caching it from forward on purpose: there are two training entry
+        points (forward_seq, forward_seq_prefix) and the head's output is also consumed by point()
+        and sample(), so a cached tensor is easy to read at the wrong time. The cost is one small
+        MLP pass."""
+        if not self.latent_h:
+            return z_t.new_zeros(())
+        u = self.h_enc(torch.cat([z_t, z_goal], dim=-1))
+        h_t = h_target.float().reshape(-1)
+        if self.latent_h == "scalar":
+            return self.h_pred_w * F.mse_loss(torch.sigmoid(u).squeeze(-1), h_t)
+        e_st, e, _ = self._quantize(u)
+        vq = F.mse_loss(e, u.detach()) + self.h_commit * F.mse_loss(u, e.detach())
+        return vq + self.h_pred_w * F.mse_loss(self.h_readout(e_st).squeeze(-1), h_t)
+
+    def code_stats(self, reset=True):
+        """Codebook usage since the last call: perplexity (effective number of codes in use) and
+        the count of codes that fired at all."""
+        if self.latent_h != "vq":
+            return {}
+        c = self.h_code_count
+        tot = float(c.sum().item())
+        if tot <= 0:
+            return {"h_ppl": 0.0, "h_live": 0, "h_n": 0.0}
+        p = c / c.sum()
+        out = {"h_ppl": float(torch.exp(-(p * (p + 1e-10).log()).sum()).item()),
+               "h_live": int((c > 0).sum().item()), "h_n": tot}
+        if reset:
+            self.h_code_count.zero_()
+        return out
+
     def forward(self, z_t, z_goal, h_norm):
         x = torch.cat([z_t, z_goal], dim=-1)
-        cond = self.horizon_mlp(sinusoidal_embedding(h_norm, self.n_freqs))
+        if self.latent_h == "vq":
+            # h_norm is ignored: the conditioning is a code read off (state, z_goal).
+            e_st, _, idx = self._quantize(self.h_enc(x))
+            if self.training:
+                with torch.no_grad():
+                    self.h_code_count.index_add_(
+                        0, idx, torch.ones_like(idx, dtype=self.h_code_count.dtype))
+            cond = self.code_mlp(e_st)
+        elif self.latent_h == "scalar":
+            # same sinusoidal path as the horizon arm, fed a predicted h instead of the true one
+            cond = self.horizon_mlp(sinusoidal_embedding(
+                torch.sigmoid(self.h_enc(x)).squeeze(-1), self.n_freqs))
+        else:
+            cond = self.horizon_mlp(sinusoidal_embedding(h_norm, self.n_freqs))
         x = self.block1(x, cond)
         x = self.block2(x, cond)
         x = self.block3(x, cond)

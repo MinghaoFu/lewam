@@ -465,6 +465,17 @@ def main():
     ap.add_argument("--prefix_heads", type=int, default=4,
                     help="attention heads of the action-prefix encoder")
     # loss
+    ap.add_argument("--latent_h", type=str, default="", choices=["", "vq", "scalar"],
+                    help="condition the GC head on a horizon inferred from (c_t, z_goal) instead of "
+                         "the dataset's h. 'vq' quantizes it to --h_codes entries; 'scalar' predicts "
+                         "h and reuses the sinusoidal path (the control that separates the "
+                         "quantization from the h-supervision). The true h becomes a regression "
+                         "target only, so eval never needs it.")
+    ap.add_argument("--h_codes", type=int, default=16, help="codebook size for --latent_h vq")
+    ap.add_argument("--h_code_dim", type=int, default=64, help="code width for --latent_h vq")
+    ap.add_argument("--h_commit", type=float, default=0.25, help="VQ commitment weight")
+    ap.add_argument("--h_pred_w", type=float, default=1.0,
+                    help="weight on the h regression that grounds the code in real distance")
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
     ap.add_argument("--w_idm", type=float, default=0.0,
@@ -502,6 +513,8 @@ def main():
                         help="disable dynamics loss (w_dyn=0), train only a policy. "
                              "Behavior is idential to w_dyn=0")
     args = ap.parse_args()
+    if args.latent_h and args.ablate_horizon:
+        raise SystemExit("--latent_h and --ablate_horizon are different arms; pick one")
 
     if args.ablate_dynamics:
         args.w_dyn = 0.0
@@ -569,7 +582,10 @@ def main():
                          encoder_ckpt=(args.encoder_ckpt or None),
                          use_idm=(args.w_idm > 0),
                          use_prefix=args.dyn_prefix, prefix_H=args.prefix_H,
-                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads).to(device)
+                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads,
+                         latent_h=args.latent_h, h_codes=args.h_codes,
+                         h_code_dim=args.h_code_dim, h_commit=args.h_commit,
+                         h_pred_w=args.h_pred_w).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -706,6 +722,8 @@ def main():
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
+        latent_h=args.latent_h, h_codes=args.h_codes, h_code_dim=args.h_code_dim,
+        h_commit=args.h_commit, h_pred_w=args.h_pred_w,
         w_act=args.w_act, w_dyn=args.w_dyn, w_idm=args.w_idm, w_reg=args.w_reg, w_cyc=args.w_cyc,
         w_acons=args.w_acons,
         rollout_k=args.rollout_k, w_rollout=args.w_rollout,
@@ -790,7 +808,7 @@ def main():
             a_prev_mask = valid & (pos >= 1)
 
         # model forward
-        a_out, z_pred, a_idm = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
+        a_out, z_pred, a_idm, loss_h = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
                                                  dyn_action_mix=(dyn_mix if train else 0.0),
                                                  dyn_action_detach=args.dyn_policy_detach)
         
@@ -895,7 +913,7 @@ def main():
             loss_straight = ((1.0 - csim) * vmask.float()).sum() / vmask.sum().clamp(min=1)
         
         return (loss_act, loss_dyn, loss_reg, loss_cyc, loss_straight, loss_idm, loss_rollout,
-                loss_acons, int(n_valid.item()))
+                loss_acons, loss_h, int(n_valid.item()))
 
     def run_batch_prefix(window, goals, action_prefix, horizon, prefix_valid, n_anchor, train):
         """One Fast-LeWM prefix step. Encodes the window (anchor states + WM targets) + policy goals in
@@ -925,8 +943,8 @@ def main():
             anchor_action = action_prefix[:, :, 0]                         # a_t at each anchor
             a_prev = torch.zeros_like(anchor_action); a_prev[:, 1:] = anchor_action[:, :-1]
             a_prev_mask = anchor_valid & (pos >= 1)
-        action_out, pred_seq = model.forward_seq_prefix(state_seq, z_goal, horizon_norm,
-                                                        action_prefix, a_prev, a_prev_mask)
+        action_out, pred_seq, loss_h = model.forward_seq_prefix(state_seq, z_goal, horizon_norm,
+                                                                action_prefix, a_prev, a_prev_mask)
         # policy BC loss on the anchor action (prefix block 0), masked to valid anchors
         anchor_action = action_prefix[:, :, 0]                            # (B, anchor_max, adim)
         aloss = model.gc_head.action_loss(action_out.reshape(B * anchor_max, -1).float(),
@@ -942,7 +960,8 @@ def main():
         loss_dyn = ((pred_seq - target_seq) ** 2 * prefix_mask).sum() / (n_prefix * D)
         loss_reg = sigreg(state_seq[anchor_valid].unsqueeze(0)) if train else torch.zeros((), device=device)
         zero = torch.zeros((), device=device)
-        return loss_act, loss_dyn, loss_reg, zero, zero, zero, zero, zero, int(n_valid_anchor.item())
+        return (loss_act, loss_dyn, loss_reg, zero, zero, zero, zero, zero, loss_h,
+                int(n_valid_anchor.item()))
 
     # ---- training loop ----
     best_val = float("inf")
@@ -953,27 +972,29 @@ def main():
 
         # ---- train ----
         model.train()
+        tr_hsum = 0.0
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_str, tr_idm, tr_roll, tr_acons, tr_count = (
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
         for batch in train_loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if args.dyn_prefix:
-                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, nval = \
+                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = \
                         run_batch_prefix(*batch, train=True)
                 else:
-                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, nval = run_batch(
+                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = run_batch(
                         *batch, train=True, dyn_mix=alpha)
                 # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout): the rollout rides the same dyn weight
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_dyn * args.w_rollout * loss_roll
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc
                         + args.w_straight * loss_str + args.w_idm * loss_idm
-                        + args.w_acons * loss_acons)
+                        + args.w_acons * loss_acons + loss_h)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tr_act += loss_act.item() * nval
+            tr_hsum += float(loss_h) * nval
             tr_dyn += loss_dyn.item() * nval
             tr_reg += loss_reg.item() * nval
             tr_cyc += loss_cyc.item() * nval
@@ -986,14 +1007,15 @@ def main():
 
         # ---- val ----
         model.eval()
+        tr_h = tr_hsum / max(tr_count, 1)
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
             for batch in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     if args.dyn_prefix:
-                        loss_act, loss_dyn, _, _, _, _, _, _, nval = run_batch_prefix(*batch, train=False)
+                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch_prefix(*batch, train=False)
                     else:
-                        loss_act, loss_dyn, _, _, _, _, _, _, nval = run_batch(*batch, train=False)
+                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch(*batch, train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
                 va_count += nval
@@ -1013,8 +1035,11 @@ def main():
         idm_str = f"  idm={tr_i:.5f}" if args.w_idm > 0 else ""
         roll_str = f"  roll{args.rollout_k}={tr_ro:.5f}" if args.rollout_k > 1 else ""
         acons_str = f"  acons={tr_ac:.5f}" if args.w_acons > 0 else ""
+        cs = model.gc_head.code_stats() if hasattr(model.gc_head, "code_stats") else {}
+        h_str = (f"  h={tr_h:.5f}" if args.latent_h else "") + (
+            f" ppl={cs['h_ppl']:.1f}/{args.h_codes} live={cs['h_live']}" if cs else "")
         print(f"[lewam-uni] ep {ep+1}/{args.epochs}  "
-              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}  "
+              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}{h_str}  "
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----

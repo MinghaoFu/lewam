@@ -282,6 +282,12 @@ def load_lewam_unified_model(run_name, which="best"):
         prefix_H=int(cfg.get("prefix_H", 5)),
         prefix_depth=int(cfg.get("prefix_depth", 2)),
         prefix_heads=int(cfg.get("prefix_heads", 4)),
+        # the head has to be rebuilt with the flags it was trained under -- the load below is
+        # strict, so a latent-h run whose flags are dropped here fails on missing keys rather than
+        # quietly falling back to horizon conditioning
+        latent_h=str(cfg.get("latent_h", "") or ""),
+        h_codes=int(cfg.get("h_codes", 16)),
+        h_code_dim=int(cfg.get("h_code_dim", 64)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
