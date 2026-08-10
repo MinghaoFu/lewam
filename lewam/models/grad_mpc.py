@@ -34,6 +34,18 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
         self.grad_warm = bool(kwargs.pop("grad_warm", True))
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "lewam_unified_grad" + ("" if self.grad_warm else "_cold")
+        # diagnostics: per-replan planning records + promise-vs-delivery across replans
+        self._diag = []
+        self._diag_prev = {}  # env -> (call, promised terminal cost of the executed plan)
+
+    def dump_diag(self, path):
+        import numpy as np
+        rows = [r for r in self._diag if r[0] == "plan"]
+        real = [r for r in self._diag if r[0] == "realized"]
+        np.savez(path,
+                 plan=np.array([r[1:] for r in rows], dtype=np.float64),      # call, env, h_left, c0, cb, best_iter, dU
+                 realized=np.array([r[1:] for r in real], dtype=np.float64))  # call, env, promised, realized
+        print(f"[graddiag] {len(rows)} plan rows, {len(real)} realized rows -> {path}")
 
     def _terminal_cost(self, window0, win_len0, anchor, U, z_goal):
         """Differentiable terminal cost (R,). window0/win_len0/anchor/z_goal are constants
@@ -71,6 +83,7 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                     self._action_buffer[env_i].clear()
                     self._lat_buf[env_i].clear()
                     self._steps_left[env_i] = _h0_at(self.horizon0, env_i)
+                    self._diag_prev.pop(env_i, None)
 
         term = info_dict.get("terminated")
         is_dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n_envs, dtype=bool)
@@ -86,6 +99,10 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                 z_goal = self.model.encode(goal_px.to(device).float())
                 for row, env_i in enumerate(replan_envs):
                     self._lat_buf[env_i].append(z_cur[row])
+                    prev = self._diag_prev.pop(env_i, None)
+                    if prev is not None:  # promise vs delivery for the plan just executed
+                        realized = float(((z_cur[row] - z_goal[row]) ** 2).mean())
+                        self._diag.append(("realized", prev[0], env_i, prev[1], realized))
                 if self.log_latents:
                     for row, env_i in enumerate(replan_envs):
                         self._lat_log.append((self._call, int(env_i),
@@ -124,21 +141,25 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                 U = U0.detach().clone().requires_grad_(True)
                 opt = torch.optim.Adam([U], lr=self.grad_lr)
                 best_U, best_cost = U0.detach().clone(), None
+                c0 = None
+                best_iter = torch.zeros(n_replan, dtype=torch.long)
 
-                def _track_best(cost):
-                    nonlocal best_U, best_cost
+                def _track_best(cost, k):
+                    nonlocal best_U, best_cost, c0
                     c = cost.detach()
                     if best_cost is None:
                         best_cost = c.clone()
                         best_U = U.detach().clone()
+                        c0 = c.clone()
                     else:
                         m = c < best_cost
                         best_U[m] = U.detach()[m]
                         best_cost = torch.where(m, c, best_cost)
+                        best_iter[m.cpu()] = k
 
-                for _ in range(self.grad_steps):
+                for _k in range(self.grad_steps):
                     cost = self._terminal_cost(window0, win_len0, anchor, U, z_goal)
-                    _track_best(cost)
+                    _track_best(cost, _k)
                     opt.zero_grad(set_to_none=True)
                     U.grad = torch.autograd.grad(cost.mean(), U)[0]
                     torch.nn.utils.clip_grad_norm_([U], self.grad_clip)
@@ -147,8 +168,15 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                         with torch.no_grad():
                             U.clamp_(-self.grad_action_clip, self.grad_action_clip)
                 with torch.no_grad():
-                    _track_best(self._terminal_cost(window0, win_len0, anchor, U, z_goal))
+                    _track_best(self._terminal_cost(window0, win_len0, anchor, U, z_goal), self.grad_steps)
                 plan = best_U                                        # (R, H, block_dim)
+                with torch.no_grad():
+                    dU = (plan - U0).flatten(1).norm(dim=1)
+                    for row, env_i in enumerate(replan_envs):
+                        self._diag.append(("plan", self._call, env_i, float(self._steps_left[env_i]),
+                                           float(c0[row]), float(best_cost[row]),
+                                           int(best_iter[row]), float(dU[row])))
+                        self._diag_prev[env_i] = (self._call, float(best_cost[row]))
 
             with torch.no_grad():
                 n_exec = self.grad_H if self.grad_exec_full else 1

@@ -432,6 +432,9 @@ def run(cfg: DictConfig):
     if _dump and getattr(policy, "log_latents", False):
         policy.dump_latents(_dump)
         print(f"[divprobe] dumped executed latents -> {_dump}")
+    _gd = cfg.get("gip_eval", {}).get("grad_diag", "")
+    if _gd and hasattr(policy, "dump_diag"):
+        policy.dump_diag(_gd)
 
     with (results_path / f"{mode}_{cfg.policy}_results.txt").open("a") as f:
         f.write("\n==== CONFIG ====\n")
