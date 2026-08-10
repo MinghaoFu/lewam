@@ -130,14 +130,22 @@ def preload_flat(base, img_t, act_mean, act_std, frameskip, max_eps=None):
 # Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior
 # history), like an eval episode / the eval adapter's sliding window.
 # --------------------------------------------------------------------------- #
-def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
+def sample_goal_offsets(n_pos, frames_to_terminal, h_max, p_terminal_goal, p_shared,
+                        close_bias=0.0):
     """Sample each position's goal offset (obs-frames from the window start) + horizon.
 
-    RANDOM mode (prob 1-p_shared): per position p, draw h~U[1,h_max]; goal offset = p+h clamped
-    to the episode's last frame -- the split FramePairDataset's sample-then-clamp, per position.
-    SHARED mode (prob p_shared): draw ONE h~U[1,h_max] for the LAST position; every position
-    points at that same frame, horizons counting down toward it (>= 1 by construction since the
-    goal sits at or beyond the window end even after the episode clamp).
+    Three window modes, nested independent draws:
+    TERMINAL mode (prob p_terminal_goal): every position's goal is the episode's TERMINAL frame,
+    horizons counting down toward it -- task-completion supervision on real frames at real offsets.
+    SHARED mode (prob p_shared among the rest): draw ONE h~U[1,h_max] for the LAST position; every
+    position points at that same frame, horizons counting down toward it (>= 1 by construction
+    since the goal sits at or beyond the window end even after the clamp).
+    RANDOM mode (otherwise): per position p, draw h~U[1,h_max]; goal offset = p+h clamped to the
+    terminal frame -- the split FramePairDataset's sample-then-clamp, per position.
+
+    The ceiling everywhere is frames_to_terminal, so no goal lands past task completion. For
+    caches built without a terminal index (and all goal-reach datasets) the terminal frame IS the
+    episode's last frame, recovering the old episode-end clamp exactly.
 
     close_bias>0 skews the horizon draw toward SMALL h (more close-to-goal supervision, where the
     precision-limited tasks plateau): h = 1 + floor((h_max-1) * u^(1+close_bias)), u~U[0,1];
@@ -145,16 +153,19 @@ def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
 
     Args:
         n_pos (int): number of decision positions in this window.
-        frames_left (int): obs-frames remaining to the episode's last frame from the window start
-            (the clamp ceiling for goal_offsets).
+        frames_to_terminal (int): obs-frames from the window start to the episode's terminal
+            frame (the clamp ceiling for goal_offsets); >= n_pos by the anchor filter.
         h_max (int): max horizon (obs-steps) to draw h from.
-        p_shared (float): probability of SHARED mode vs. RANDOM mode (see above).
+        p_terminal_goal (float): probability of TERMINAL mode (see above).
+        p_shared (float): probability of SHARED mode among non-TERMINAL windows.
         close_bias (float): >0 skews h toward small values (see above); 0 = uniform U[1,h_max].
 
     Returns:
-        tuple: (goal_offsets (n_pos,) long, horizon (n_pos,) long). horizon can exceed h_max in
-        SHARED mode (earlier positions are farther); the trainer clamps h_norm at 1.0 exactly like
-        the eval countdown's min(steps, H_max)/H_max.
+        tuple: (goal_offsets (n_pos,) long, horizon (n_pos,) long, goal_at_terminal (n_pos,)
+        bool). horizon is the TRUE unclamped distance -- it can exceed h_max in TERMINAL/SHARED
+        mode; the trainer clamps h_norm at 1.0 exactly like the eval countdown's
+        min(steps, H_max)/H_max. goal_at_terminal marks positions whose goal IS the terminal
+        frame (also fires when a RANDOM/SHARED clamp lands there).
     """
     def _draw(shape):
         if close_bias > 0:
@@ -162,27 +173,33 @@ def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
             return 1 + (u.pow(1.0 + close_bias) * (h_max - 1)).long()
         return torch.randint(1, h_max + 1, shape)
     positions = torch.arange(n_pos)
-    if float(torch.rand(())) < p_shared:
+    if p_terminal_goal > 0 and float(torch.rand(())) < p_terminal_goal:
+        goal_offsets = torch.full((n_pos,), frames_to_terminal)
+    elif float(torch.rand(())) < p_shared:
         h_last = int(_draw(()))
-        goal_offsets = torch.full((n_pos,), min(n_pos - 1 + h_last, frames_left))
+        goal_offsets = torch.full((n_pos,), min(n_pos - 1 + h_last, frames_to_terminal))
     else:
         h_draw = _draw((n_pos,))
         goal_offsets = torch.minimum(positions + h_draw,
-                                     torch.tensor(frames_left, dtype=torch.long))
+                                     torch.tensor(frames_to_terminal, dtype=torch.long))
     horizon = (goal_offsets - positions).clamp(min=1)
-    return goal_offsets, horizon
+    goal_at_terminal = goal_offsets.eq(frames_to_terminal)
+    return goal_offsets, horizon, goal_at_terminal
 
 
 class SeqTrajDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, p_shared,
-                 close_bias=0.0):
+    def __init__(self, frames, a_frame, t_gidx, frames_to_terminal, indices, h_max, ctx_len,
+                 p_terminal_goal, p_shared, close_bias=0.0):
         self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only; N = all obs-frames
         self.a_frame = a_frame        # [N,adim] fp16, CPU; a_frame[t] = z-scored block taken AT t
         self.t_gidx = t_gidx          # [M] long; episode-global obs-frame index of each valid start
-        self.maxh = maxh              # [M] long; frames from that start to the episode's last frame
+        self.frames_to_terminal = frames_to_terminal  # [M] long; frames from that start to the
+                                      # episode's TERMINAL frame (== last frame unless the cache
+                                      # was built with --terminal_state success)
         self.indices = indices        # [K] long; train or val subset of the M starts
         self.h_max = int(h_max)       # max goal distance (obs-steps)
         self.ctx_len = int(ctx_len)   # decision points per window
+        self.p_terminal_goal = float(p_terminal_goal)
         self.p_shared = float(p_shared)
         self.close_bias = float(close_bias)  # >0 -> over-sample close goals (near-goal precision)
 
@@ -192,16 +209,17 @@ class SeqTrajDataset(Dataset):
     def __getitem__(self, i):
         idx = int(self.indices[i])
         start = int(self.t_gidx[idx])
-        frames_left = int(self.maxh[idx])                        # >= 1 for every valid start
-        n_pos = min(self.ctx_len, frames_left)                   # frame start+n_pos exists (the
-                                                                 # last position's target), since
-                                                                 # n_pos <= frames_left
-        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared,
-                                                    self.close_bias)
+        to_terminal = int(self.frames_to_terminal[idx])          # >= 1 by the anchor filter
+        n_pos = min(self.ctx_len, to_terminal)                   # frame start+n_pos exists (the
+                                                                 # last position's target), and no
+                                                                 # decision position sits past the
+                                                                 # terminal frame
+        goal_offsets, horizon, goal_at_terminal = sample_goal_offsets(
+            n_pos, to_terminal, self.h_max, self.p_terminal_goal, self.p_shared, self.close_bias)
         window = self.frames[start:start + n_pos + 1]            # (n_pos+1, 3, H, W)
         goals = self.frames[start + goal_offsets]                # (n_pos, 3, H, W)
         actions = self.a_frame[start:start + n_pos]              # (n_pos, adim)
-        return window, goals, actions, horizon, n_pos
+        return window, goals, actions, horizon, n_pos, goal_at_terminal
 
 
 def collate_pad(batch):
@@ -213,6 +231,7 @@ def collate_pad(batch):
       actions  (B, max_pos, adim)       zero-padded past each item's n_pos
       horizon  (B, max_pos) long        pad value 1 (masked from the loss anyway)
       n_pos    (B,) long                valid decision points per item (the loss mask)
+      goal_at_terminal (B, max_pos) bool  positions whose goal is the terminal frame (pad False)
 
     Frame padding repeats each item's LAST REAL frame instead of zeros: the ViT projector has a
     BatchNorm, and in train mode zero frames would corrupt the batch statistics for the real
@@ -226,15 +245,18 @@ def collate_pad(batch):
     goals = torch.zeros((B, max_pos, C, H, W), dtype=batch[0][1].dtype)
     actions = torch.zeros((B, max_pos, adim), dtype=batch[0][2].dtype)
     horizon = torch.ones((B, max_pos), dtype=torch.long)
-    for i, (item_window, item_goals, item_actions, item_horizon, item_n_pos) in enumerate(batch):
+    goal_at_terminal = torch.zeros((B, max_pos), dtype=torch.bool)
+    for i, (item_window, item_goals, item_actions, item_horizon, item_n_pos,
+            item_goal_at_term) in enumerate(batch):
         window[i, : item_n_pos + 1] = item_window
         goals[i, : item_n_pos] = item_goals
         actions[i, : item_n_pos] = item_actions
         horizon[i, : item_n_pos] = item_horizon
+        goal_at_terminal[i, : item_n_pos] = item_goal_at_term
         if item_n_pos < max_pos:
             window[i, item_n_pos + 1:] = item_window[-1]
             goals[i, item_n_pos:] = item_goals[-1]
-    return window, goals, actions, horizon, n_pos
+    return window, goals, actions, horizon, n_pos, goal_at_terminal
 
 
 # --------------------------------------------------------------------------- #
@@ -243,16 +265,22 @@ def collate_pad(batch):
 # plus a per-anchor H-action prefix. `prefix_valid[t,k]` marks anchor t's real horizons (episode end).#
 # --------------------------------------------------------------------------- #
 class PrefixSeqDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, prefix_H,
-                 p_shared, close_bias=0.0):
+    def __init__(self, frames, a_frame, t_gidx, maxh, frames_to_terminal, indices, h_max,
+                 ctx_len, prefix_H, p_terminal_goal, p_shared, close_bias=0.0):
         self.frames = frames          # [N,3,H,W] fp16 CPU; all obs-frames
         self.a_frame = a_frame        # [N,adim] fp16; a_frame[t] = block taken AT frame t (0 at ep-last)
         self.t_gidx = t_gidx          # [M] episode-global frame index of each valid start
-        self.maxh = maxh              # [M] frames from that start to the episode's last frame
+        self.maxh = maxh              # [M] frames from that start to the episode's LAST frame --
+                                      # still the WM-prefix ceiling: post-completion frames are
+                                      # real (s,a,s') transitions, so dynamics may learn them
+        self.frames_to_terminal = frames_to_terminal  # [M] frames to the TERMINAL frame -- the
+                                      # anchor/goal ceiling (== maxh unless the cache carries a
+                                      # success-based terminal index)
         self.indices = indices        # [K] train/val subset of the M starts
         self.h_max = int(h_max)
         self.ctx_len = int(ctx_len)   # decision points (anchors) per window
         self.prefix_H = int(prefix_H) # world-model prefix horizon
+        self.p_terminal_goal = float(p_terminal_goal)
         self.p_shared = float(p_shared)
         self.close_bias = float(close_bias)
 
@@ -263,12 +291,14 @@ class PrefixSeqDataset(Dataset):
         idx = int(self.indices[i])
         start = int(self.t_gidx[idx])
         frames_left = int(self.maxh[idx])                        # frames start..start+frames_left exist
-        n_anchor = min(self.ctx_len, frames_left)                # anchors 0..n_anchor-1 (each >=1 future frame)
+        to_terminal = int(self.frames_to_terminal[idx])          # >= 1 by the anchor filter
+        n_anchor = min(self.ctx_len, to_terminal)                # anchors 0..n_anchor-1, none past
+                                                                 # the terminal frame
         prefix_H = self.prefix_H
         win_len = min(n_anchor + prefix_H, frames_left + 1)      # window frames: states + WM targets
         window = self.frames[start:start + win_len]              # (win_len, 3, H, W)
-        goal_offsets, horizon = sample_goal_offsets(n_anchor, frames_left, self.h_max,
-                                                    self.p_shared, self.close_bias)
+        goal_offsets, horizon, goal_at_terminal = sample_goal_offsets(
+            n_anchor, to_terminal, self.h_max, self.p_terminal_goal, self.p_shared, self.close_bias)
         goals = self.frames[start + goal_offsets]                # (n_anchor, 3, H, W) per-position policy goal
         action_dim = self.a_frame.shape[1]
         action_prefix = torch.zeros(n_anchor, prefix_H, action_dim, dtype=self.a_frame.dtype)
@@ -279,14 +309,14 @@ class PrefixSeqDataset(Dataset):
             if k_valid > 0:
                 action_prefix[t, :k_valid] = self.a_frame[start + t:start + t + k_valid]
                 prefix_valid[t, :k_valid] = True
-        return window, goals, action_prefix, horizon, prefix_valid, n_anchor
+        return window, goals, action_prefix, horizon, prefix_valid, n_anchor, goal_at_terminal
 
 
 def collate_prefix(batch):
     """Pad a batch of prefix windows. window -> (B, win_max, C, H, W) tail-padded with each item's LAST
     REAL frame (BatchNorm safety); goals -> (B, anchor_max, C, H, W); action_prefix -> (B, anchor_max,
     prefix_H, adim) zero-pad; horizon -> (B, anchor_max) pad 1; prefix_valid -> (B, anchor_max, prefix_H)
-    pad False; n_anchor -> (B,)."""
+    pad False; n_anchor -> (B,); goal_at_terminal -> (B, anchor_max) pad False."""
     n_anchor = torch.tensor([item[5] for item in batch], dtype=torch.long)
     anchor_max = int(n_anchor.max())
     win_max = max(item[0].shape[0] for item in batch)
@@ -298,7 +328,8 @@ def collate_prefix(batch):
     action_prefix = torch.zeros((B, anchor_max, prefix_H, action_dim), dtype=batch[0][2].dtype)
     horizon = torch.ones((B, anchor_max), dtype=torch.long)
     prefix_valid = torch.zeros((B, anchor_max, prefix_H), dtype=torch.bool)
-    for i, (win, goal, act_pref, hz, pv, na) in enumerate(batch):
+    goal_at_terminal = torch.zeros((B, anchor_max), dtype=torch.bool)
+    for i, (win, goal, act_pref, hz, pv, na, gat) in enumerate(batch):
         win_len = win.shape[0]
         window[i, :win_len] = win
         if win_len < win_max:
@@ -309,7 +340,8 @@ def collate_prefix(batch):
         action_prefix[i, :na] = act_pref
         horizon[i, :na] = hz
         prefix_valid[i, :na] = pv
-    return window, goals, action_prefix, horizon, prefix_valid, n_anchor
+        goal_at_terminal[i, :na] = gat
+    return window, goals, action_prefix, horizon, prefix_valid, n_anchor, goal_at_terminal
 
 
 # --------------------------------------------------------------------------- #
@@ -356,7 +388,8 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--H_max", type=int, default=50,
                     help="max goal distance (horizon) in obs-steps (no frameskip); "
-                         "each goal is at horizon h~U[1,H_max], episode-clamped. "
+                         "each goal is at horizon h~U[1,H_max], clamped to the episode's "
+                         "terminal frame. "
                          "Decoupled from the window length (see --context_len); does not affect "
                          "memory (goals are looked up per position, not loaded as a tail)")
     ap.add_argument("--ablate_horizon", action="store_true",
@@ -370,10 +403,17 @@ def main():
                     help="decision points per context window = the aggregator's max sequence length "
                          "at train (eval defaults its ctx_cap to this). Frames per item = "
                          "2*context_len+1, so batch * context_len determines GPU memory")
+    ap.add_argument("--p_terminal_goal", type=float, default=0.0,
+                    help="fraction of windows whose goal is the episode's TERMINAL frame (task-"
+                         "completion supervision): every position aims at it, horizon = true "
+                         "remaining distance. The terminal frame comes from the cache's "
+                         "frames_to_terminal (make_preload_cache --terminal_state); caches "
+                         "without it fall back to the episode's last frame. 0 = off (old recipe).")
     ap.add_argument("--p_shared", type=float, default=0.0,
-                    help="fraction of windows trained in SHARED-goal mode (one goal ahead of the "
-                         "window, horizons counting down -- the structure eval runs); the rest use "
-                         "per-position independent goals (the split's sampling). 0 = all random")
+                    help="fraction of non-terminal windows trained in SHARED-goal mode (one goal "
+                         "ahead of the window, horizons counting down -- the structure eval runs); "
+                         "the rest use per-position independent goals (the split's sampling). "
+                         "0 = all random")
     ap.add_argument("--goal_close_bias", type=float, default=0.0,
                     help="skew the training goal-distance draw toward SMALL h (more close-to-goal "
                          "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
@@ -622,6 +662,8 @@ def main():
             A_flat = torch.from_numpy(_aux["A_flat"])
             t_gidx = torch.from_numpy(_aux["t_gidx"])
             maxh = torch.from_numpy(_aux["maxh"])
+            frames_to_terminal = (torch.from_numpy(_aux["frames_to_terminal"])
+                                  if "frames_to_terminal" in _aux.files else None)
             A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
             A_frame[t_gidx] = A_flat
             print(f"[lewam-uni] cache loaded in {time.time()-_t0:.0f}s "
@@ -631,29 +673,53 @@ def main():
     if Frames is None:
         Frames, A_frame, t_gidx, maxh = preload_flat(base, img_t, act_mean, act_std,
                                                      frameskip, max_eps=max_eps)
+        frames_to_terminal = None
+    terminal_source = "cache"
+    if frames_to_terminal is None:
+        # no terminal index -> terminal = the episode's last frame, exactly the old ceiling.
+        # Task-completion datasets whose demos run past success (cube) need a cache patched
+        # with make_preload_cache --patch_terminal --terminal_state success.
+        frames_to_terminal = maxh.clone()
+        terminal_source = "episode_last"
+    if args.p_terminal_goal > 0 and terminal_source == "episode_last":
+        print("[lewam-uni] WARN --p_terminal_goal set but no frames_to_terminal in the cache: "
+              "terminal goals fall back to the episode's LAST frame", flush=True)
     n_starts = t_gidx.shape[0]
-    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
+    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts} "
+          f"terminal_source={terminal_source}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=g)
-    n_val = int(round((1 - args.train_split) * n_starts))
+    # anchor filter: t ~ U[0, terminal] -- drop starts at/after the terminal frame (post-
+    # completion anchors; only present when the cache carries a success-based terminal index).
+    # Filtering the permutation keeps the split identical to old runs when nothing is dropped.
+    perm = perm[frames_to_terminal[perm] >= 1]
+    n_dropped = n_starts - perm.numel()
+    if n_dropped:
+        print(f"[lewam-uni] anchor filter: dropped {n_dropped}/{n_starts} post-terminal starts",
+              flush=True)
+    n_val = int(round((1 - args.train_split) * perm.numel()))
     val_idx = perm[:n_val]
     train_idx = perm[n_val:]
     print(f"[lewam-uni] train={train_idx.numel()} val={val_idx.numel()} "
           f"H_max={args.H_max} context_len={args.context_len} p_shared={args.p_shared} "
-          f"action_block={action_block_dim}", flush=True)
+          f"p_terminal_goal={args.p_terminal_goal} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
     if args.dyn_prefix:
-        train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max,
-                                    args.context_len, args.prefix_H, args.p_shared, args.goal_close_bias)
-        val_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max,
-                                  args.context_len, args.prefix_H, args.p_shared, 0.0)
+        train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, frames_to_terminal, train_idx,
+                                    args.H_max, args.context_len, args.prefix_H,
+                                    args.p_terminal_goal, args.p_shared, args.goal_close_bias)
+        val_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, frames_to_terminal, val_idx,
+                                  args.H_max, args.context_len, args.prefix_H,
+                                  args.p_terminal_goal, args.p_shared, 0.0)
     else:
-        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
-                                  args.H_max, args.context_len, args.p_shared, args.goal_close_bias)
-        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
-                                args.H_max, args.context_len, args.p_shared, 0.0)
+        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, frames_to_terminal, train_idx,
+                                  args.H_max, args.context_len, args.p_terminal_goal,
+                                  args.p_shared, args.goal_close_bias)
+        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, frames_to_terminal, val_idx,
+                                args.H_max, args.context_len, args.p_terminal_goal,
+                                args.p_shared, 0.0)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
@@ -720,6 +786,7 @@ def main():
         agg_action_cond=args.agg_action_cond, dyn_goal_cond=args.dyn_goal_cond,
         dyn_action_embed_dim=args.dyn_action_embed_dim,
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
+        p_terminal_goal=args.p_terminal_goal, terminal_source=terminal_source,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         latent_h=args.latent_h, h_codes=args.h_codes, h_code_dim=args.h_code_dim,
@@ -975,14 +1042,20 @@ def main():
         tr_hsum = 0.0
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_str, tr_idm, tr_roll, tr_acons, tr_count = (
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        tr_term = 0
         for batch in train_loader:
+            # goal_at_terminal (last collate element) is loop-level info, not a run_batch input:
+            # count terminal-goal positions among the valid ones for the epoch log
+            _gat, _nv = batch[-1], (batch[5] if args.dyn_prefix else batch[4])
+            _vmask = torch.arange(_gat.shape[1]).unsqueeze(0) < _nv.unsqueeze(1)
+            tr_term += int((_gat & _vmask).sum())
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if args.dyn_prefix:
                     loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = \
-                        run_batch_prefix(*batch, train=True)
+                        run_batch_prefix(*batch[:-1], train=True)
                 else:
                     loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = run_batch(
-                        *batch, train=True, dyn_mix=alpha)
+                        *batch[:-1], train=True, dyn_mix=alpha)
                 # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout): the rollout rides the same dyn weight
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_dyn * args.w_rollout * loss_roll
@@ -1013,9 +1086,9 @@ def main():
             for batch in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     if args.dyn_prefix:
-                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch_prefix(*batch, train=False)
+                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch_prefix(*batch[:-1], train=False)
                     else:
-                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch(*batch, train=False)
+                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch(*batch[:-1], train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
                 va_count += nval
@@ -1038,8 +1111,9 @@ def main():
         cs = model.gc_head.code_stats() if hasattr(model.gc_head, "code_stats") else {}
         h_str = (f"  h={tr_h:.5f}" if args.latent_h else "") + (
             f" ppl={cs['h_ppl']:.1f}/{args.h_codes} live={cs['h_live']}" if cs else "")
+        term_str = f"  term={tr_term/max(tr_count,1):.2f}" if args.p_terminal_goal > 0 else ""
         print(f"[lewam-uni] ep {ep+1}/{args.epochs}  "
-              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}{h_str}  "
+              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}{h_str}{term_str}  "
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----

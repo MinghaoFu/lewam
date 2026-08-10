@@ -7,9 +7,14 @@ byte-for-byte against the reference per-episode transform.
 
 Outputs under --out (default $A2F/preload_cache):
   <stem>_fs<FS>_i<IMG>.frames.npy   [N,3,IMG,IMG] float16 (np format, mmap-able)
-  <stem>_fs<FS>_i<IMG>.aux.npz      A_flat/t_gidx/maxh/ep_base + act_mean/act_std
-  <stem>_fs<FS>_i<IMG>.meta.json    provenance + counts
+  <stem>_fs<FS>_i<IMG>.aux.npz      A_flat/t_gidx/maxh/ep_base/frames_to_terminal
+                                    + act_mean/act_std
+  <stem>_fs<FS>_i<IMG>.meta.json    provenance + counts + terminal_state rule
 Write to local /tmp first, then cp to --out (never in-place writes on fuse).
+
+frames_to_terminal[row] = obs-steps from that anchor to the episode's TERMINAL frame
+(--terminal_state: 'last' = final frame, == maxh; 'success' = first firing of --success_key).
+--patch_terminal appends it to an existing cache's aux.npz without touching frames.npy.
 """
 import os, sys, json, time, argparse, shutil
 import numpy as np
@@ -27,6 +32,19 @@ p.add_argument("--out", required=True)
 p.add_argument("--img_size", type=int, default=224)
 p.add_argument("--frameskip", type=int, default=5)
 p.add_argument("--verify_eps", type=int, default=3)
+p.add_argument("--terminal_state", choices=["last", "success"], default="last",
+               help="what the episode's terminal state is: 'last' = its final frame (success-only "
+                    "demos trimmed at completion, and all goal-reach datasets); 'success' = the "
+                    "first frame where --success_key fires (demos that run past completion, e.g. "
+                    "cube). Stored per anchor as aux frames_to_terminal = terminal - t; the "
+                    "trainer's goal sampler clamps to it.")
+p.add_argument("--success_key", default="success",
+               help="per-row bool column read for --terminal_state success")
+p.add_argument("--patch_terminal", action="store_true",
+               help="don't rebuild: read an EXISTING cache's aux.npz under --out (flat or per-stem "
+                    "layout), append frames_to_terminal per --terminal_state, and rewrite aux.npz "
+                    "+ meta.json in place (write local, then atomic replace). frames.npy is never "
+                    "touched. 'success' reads only the success column of --h5.")
 args = p.parse_args()
 
 stem = os.path.basename(args.h5).replace(".h5", "")
@@ -34,6 +52,123 @@ tag = f"{stem}_fs{args.frameskip}_i{args.img_size}"
 tmp = f"/tmp/preload_cache/{tag}"
 os.makedirs(tmp, exist_ok=True)
 os.makedirs(args.out, exist_ok=True)
+
+
+def terminal_obs_per_episode(n_eps, keeps_per_ep):
+    """Per-episode terminal frame at obs granularity, per --terminal_state.
+
+    'last' -> keeps-1 for every episode. 'success' -> the first KEPT frame where the success
+    column fires, i.e. first obs-rate index i with success[offset + FS*i] true -- cache frame i
+    IS raw frame FS*i, so the stored goal frame really shows a completed state (a flag firing
+    between kept frames does not count; success can flicker around the first contact). Episodes
+    that never fire at a kept frame fall back to their last frame (counted + reported). Reads
+    the h5 columns directly (ep_offset/ep_len are per-episode or per-row; both parse); episode
+    order is cross-checked against the swm segmentation by the caller.
+    """
+    if args.terminal_state == "last":
+        return np.asarray([k - 1 for k in keeps_per_ep], np.int64), 0
+    import h5py
+    with h5py.File(args.h5, "r") as f:
+        success = np.asarray(f[args.success_key][:]).reshape(-1).astype(bool)
+        ep_offset = np.asarray(f["ep_offset"][:]).reshape(-1)
+        ep_len = np.asarray(f["ep_len"][:]).reshape(-1)
+    starts = np.unique(ep_offset)
+    assert starts.size == n_eps, f"h5 has {starts.size} episodes, cache/loader has {n_eps}"
+    lens = np.asarray([int(ep_len[np.searchsorted(ep_offset, s)]) for s in starts], np.int64)
+    term_obs = np.empty(n_eps, np.int64)
+    n_no_success = 0
+    for i, (s, L) in enumerate(zip(starts, lens)):
+        k = int(keeps_per_ep[i])
+        n_obs = L // args.frameskip
+        # the build keeps min(pixel-frames, n_obs+1) frames; anything outside [n_obs, n_obs+1]
+        # means the h5's episode layout doesn't match the cache's
+        assert n_obs <= k <= n_obs + 1, \
+            f"ep{i}: cache keeps {k} frames but h5 ep_len {L} implies {n_obs}..{n_obs + 1}"
+        hits = np.flatnonzero(success[s:s + L:args.frameskip][:k])
+        if hits.size == 0:
+            n_no_success += 1
+            term_obs[i] = k - 1
+        else:
+            term_obs[i] = int(hits[0])
+    return term_obs, n_no_success
+
+
+def verify_success_order(n_verify=5):
+    """Episode-order guard for --terminal_state success: the raw h5 rows [ep_offset, +ep_len) and
+    swm's episode segmentation must agree per episode, or every terminal lands in the wrong
+    episode (undetectable by the length check when episodes share a length). Compares the success
+    column episode-by-episode through BOTH readers for n_verify random episodes."""
+    sw = swm.data.load_dataset(args.h5, transform=None, cache_dir=None, num_steps=4,
+                               frameskip=args.frameskip, keys_to_load=[args.success_key],
+                               keys_to_cache=[args.success_key], format="hdf5")
+    import h5py
+    with h5py.File(args.h5, "r") as f:
+        success = np.asarray(f[args.success_key][:]).reshape(-1).astype(bool)
+        ep_offset = np.asarray(f["ep_offset"][:]).reshape(-1)
+    starts = np.unique(ep_offset)
+    rng = np.random.default_rng(0)
+    for ep in rng.choice(len(sw.lengths), size=min(n_verify, len(sw.lengths)), replace=False):
+        L = int(sw.lengths[ep])
+        via_swm = np.asarray(sw._load_slice(int(ep), 0, L)[args.success_key]).reshape(-1).astype(bool)
+        # swm hands non-pixel keys back at OBS RATE here (verified on cube: slice == raw[::FS]);
+        # subsample the raw segment the same way before comparing
+        via_h5 = success[starts[ep]:starts[ep] + L:args.frameskip]
+        assert np.array_equal(via_swm, via_h5[:via_swm.size]), \
+            f"ep{ep}: success column differs between swm and raw-h5 episode order"
+    print(f"[cache] success-order VERIFY_OK ({n_verify} episodes)", flush=True)
+
+
+if args.patch_terminal:
+    aux_path = f"{args.out}/{stem}/{tag}.aux.npz"
+    if not os.path.isfile(aux_path):
+        aux_path = f"{args.out}/{tag}.aux.npz"
+    assert os.path.isfile(aux_path), f"no aux.npz for {tag} under {args.out}"
+    aux = dict(np.load(aux_path))
+    t_gidx, maxh, ep_base = aux["t_gidx"], aux["maxh"], aux["ep_base"]
+    # recover the per-episode layout from the aux rows: consecutive rows share ep_base;
+    # keeps (frames kept per episode) = first row's t offset... derived instead from maxh:
+    # row t of an episode has maxh = (keeps-1) - t, so the episode's first row gives keeps-1.
+    bases, first_row = np.unique(ep_base, return_index=True)
+    order = np.argsort(first_row)
+    bases, first_row = bases[order], first_row[order]
+    assert (np.diff(bases) > 0).all(), "aux ep_base not in ascending stream order"
+    # any row t of an episode has maxh = (keeps-1) - t and t = t_gidx - ep_base, so keeps falls out
+    keeps_per_ep = maxh[first_row] + (t_gidx[first_row] - ep_base[first_row]) + 1
+    n_eps = bases.size
+    if args.terminal_state == "success":
+        try:
+            verify_success_order()
+        except AssertionError:
+            raise
+        except Exception as e:                     # loader can't do a success-only load
+            print(f"[cache] WARN success-order verification skipped ({e!r}); relying on the "
+                  f"per-episode length check only", flush=True)
+    term_obs, n_no_success = terminal_obs_per_episode(n_eps, keeps_per_ep)
+    frames_to_terminal = term_obs[np.searchsorted(bases, ep_base)] - (t_gidx - ep_base)
+    assert frames_to_terminal.shape == maxh.shape
+    assert (frames_to_terminal <= maxh).all(), "terminal past the episode's last frame"
+    if args.terminal_state == "last":
+        assert (frames_to_terminal == maxh).all(), "'last' must reproduce maxh exactly"
+    aux["frames_to_terminal"] = frames_to_terminal.astype(np.int64)
+    np.savez(f"{tmp}/{tag}.aux.npz", **aux)
+    meta_path = aux_path.replace(".aux.npz", ".meta.json")
+    meta = json.load(open(meta_path)) if os.path.isfile(meta_path) else {}
+    meta.update(terminal_state=args.terminal_state,
+                success_key=(args.success_key if args.terminal_state == "success" else None),
+                n_eps_no_success=n_no_success,
+                terminal_patched=time.strftime("%F %T"))
+    json.dump(meta, open(f"{tmp}/{tag}.meta.json", "w"), indent=1)
+    n_term_anchor = int((frames_to_terminal >= 1).sum())
+    print(f"[cache] patch {tag}: eps={n_eps} no_success={n_no_success} "
+          f"anchors {n_term_anchor}/{len(t_gidx)} pre-terminal "
+          f"median frames_to_terminal={int(np.median(frames_to_terminal))}", flush=True)
+    for src, dst in ((f"{tmp}/{tag}.aux.npz", aux_path), (f"{tmp}/{tag}.meta.json", meta_path)):
+        shutil.copy2(src, dst + ".new")
+        os.replace(dst + ".new", dst)   # readers see old-or-new aux, never a half-written one
+        print(f"[cache] patched {dst}", flush=True)
+    shutil.rmtree(tmp)
+    print("[cache] PATCH DONE", flush=True)
+    sys.exit(0)
 
 # EXACT same construction as train_lewam_gc main()
 _ktl = ["pixels", "action"]
@@ -76,6 +211,7 @@ IMG = args.img_size
 row_bytes = 3 * IMG * IMG * 2
 bin_path = f"{tmp}/{tag}.frames.bin"
 keeps = []
+n_valids = []
 A_l, tg_l, mh_l, eb_l = [], [], [], []
 off = 0
 with open(bin_path, "wb") as fb:
@@ -85,6 +221,7 @@ with open(bin_path, "wb") as fb:
         keeps.append(k)
         fb.write(pp.numpy().tobytes())
         n_valid = min(a.shape[0], k - 1)
+        n_valids.append(n_valid)
         last = k - 1
         for t in range(n_valid):
             tg_l.append(off + t); mh_l.append(last - t); eb_l.append(off)
@@ -107,12 +244,26 @@ fr.flush(); del fr; del raw
 os.remove(bin_path)
 print(f"[cache] finalized npy in {time.time()-t1:.0f}s", flush=True)
 A_flat = torch.stack(A_l).numpy() if A_l else np.zeros((0, 1), np.float16)
+if args.terminal_state == "success":
+    verify_success_order()
+term_obs, n_no_success = terminal_obs_per_episode(n_eps, keeps)
+frames_to_terminal = np.concatenate(
+    [term_obs[ep] - np.arange(nv, dtype=np.int64) for ep, nv in enumerate(n_valids)]
+) if tg_l else np.zeros((0,), np.int64)
+mh_arr = np.asarray(mh_l, np.int64)
+assert (frames_to_terminal <= mh_arr).all(), "terminal past the episode's last frame"
+if args.terminal_state == "last":
+    assert (frames_to_terminal == mh_arr).all(), "'last' must reproduce maxh exactly"
 np.savez(f"{tmp}/{tag}.aux.npz",
          A_flat=A_flat, t_gidx=np.asarray(tg_l, np.int64),
          maxh=np.asarray(mh_l, np.int64), ep_base=np.asarray(eb_l, np.int64),
+         frames_to_terminal=frames_to_terminal,
          act_mean=np.asarray(act_mean), act_std=np.asarray(act_std))
 json.dump({"source_h5": args.h5, "img_size": IMG, "frameskip": FS,
            "n_frames": int(N), "n_samples": len(tg_l), "n_episodes": n_eps,
+           "terminal_state": args.terminal_state,
+           "success_key": (args.success_key if args.terminal_state == "success" else None),
+           "n_eps_no_success": n_no_success,
            "built": time.strftime("%F %T")},
           open(f"{tmp}/{tag}.meta.json", "w"), indent=1)
 print(f"[cache] built: N={N} samples={len(tg_l)}", flush=True)
