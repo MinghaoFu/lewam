@@ -282,6 +282,12 @@ def load_lewam_unified_model(run_name, which="best"):
         prefix_H=int(cfg.get("prefix_H", 5)),
         prefix_depth=int(cfg.get("prefix_depth", 2)),
         prefix_heads=int(cfg.get("prefix_heads", 4)),
+        # the head has to be rebuilt with the flags it was trained under -- the load below is
+        # strict, so a latent-h run whose flags are dropped here fails on missing keys rather than
+        # quietly falling back to horizon conditioning
+        latent_h=str(cfg.get("latent_h", "") or ""),
+        h_codes=int(cfg.get("h_codes", 16)),
+        h_code_dim=int(cfg.get("h_code_dim", 64)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
@@ -1153,6 +1159,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 for _h in range(plan_horizon):
                     horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
                                                 device=device, dtype=torch.float32)
+                    if self.ablate_horizon:
+                        horizon_norm = torch.zeros_like(horizon_norm)
                     context = self._context_at_head(window, win_len)    # (n_replan*n_samples, latent_dim)
                     action_blk = self.model.gc_head.sample(
                         self.model.gc_head(context, z_goal_rep, horizon_norm), 1, 
@@ -1173,6 +1181,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                     for _h in range(plan_horizon):
                         horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
                                                     device=device, dtype=torch.float32)
+                        if self.ablate_horizon:
+                            horizon_norm = torch.zeros_like(horizon_norm)
                         context = self._context_at_head(window, win_len)    # (n_replan, latent_dim) trained context
                         action_blk = self.model.gc_head.point(self.model.gc_head(context, z_goal, horizon_norm))
                         warm_blocks.append(action_blk)

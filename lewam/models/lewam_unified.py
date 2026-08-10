@@ -162,7 +162,8 @@ class LeWAMUnified(nn.Module):
                  dyn_goal_cond=False, head_type="mse", n_mix=5, flow_H=1,
                  agg_dim_head=None, agg_mlp_dim=None, dyn_action_embed_dim=0,
                  encoder_backbone="scratch", encoder_ckpt=None, use_idm=False,
-                 use_prefix=False, prefix_H=5, prefix_depth=2, prefix_heads=4):
+                 use_prefix=False, prefix_H=5, prefix_depth=2, prefix_heads=4,
+                 latent_h="", h_codes=16, h_code_dim=64, h_commit=0.25, h_pred_w=1.0):
         """
         Args:
             img_size (int): input image side length.
@@ -228,7 +229,9 @@ class LeWAMUnified(nn.Module):
         else:
             self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
                                   hidden_dim=hidden_dim, dropout=dropout,
-                                  head_type=head_type, n_mix=n_mix)
+                                  head_type=head_type, n_mix=n_mix,
+                                  latent_h=latent_h, h_codes=h_codes, h_code_dim=h_code_dim,
+                                  h_commit=h_commit, h_pred_w=h_pred_w)
         # dynamics head
         self.use_prefix = bool(use_prefix)
         self.prefix_H = int(prefix_H)
@@ -317,7 +320,8 @@ class LeWAMUnified(nn.Module):
         if self.idm_head is not None:                                    # inverse dynamics: (z_t, z_pred)->a_t
             a_idm = self.idm_head(torch.cat([seq.reshape(B * L, D), z_pred.reshape(B * L, D)], dim=-1)
                                   ).reshape(B, L, -1)
-        return a_out, z_pred, a_idm                                      # a_out: consume via gc_head.action_loss
+        h_aux = self.gc_head.h_aux_loss(cf, gf, hf)                      # 0 unless latent_h is on
+        return a_out, z_pred, a_idm, h_aux                               # a_out: consume via gc_head.action_loss
 
     def forward_seq_prefix(self, state_seq, goal_seq, horizon_norm, action_prefix_seq,
                            a_prev=None, a_prev_mask=None):
@@ -350,7 +354,9 @@ class LeWAMUnified(nn.Module):
         goal_flat = goal_seq.reshape(B * L, D) if self.dynamics.goal_cond else None
         pred_seq = self.dynamics(ctx_flat, action_prefix_seq.reshape(B * L, H, action_dim),
                                  goal_flat).reshape(B, L, H, D)
-        return action_out, pred_seq
+        h_aux = self.gc_head.h_aux_loss(ctx_flat, goal_seq.reshape(B * L, D),
+                                        horizon_norm.reshape(B * L))
+        return action_out, pred_seq, h_aux
 
     def rollout_dyn(self, states, z_pred, next_tgt, z_goal, actions, n_pos, K,
                     a_prev=None, a_prev_mask=None):
