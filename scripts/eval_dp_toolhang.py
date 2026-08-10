@@ -2,7 +2,7 @@
 
 Runs DP inference natively (n_obs_steps consecutive RAW frames, n_action_steps-chunk
 receding horizon, EMA weights, stock 100-step DDPM) inside our robosuite-1.5.1 env
-(RobomimicGCEnv, no goal set -> terminated == robomimic is_success, latched). Episodes
+(RoboMimicGCEnv, no goal set -> terminated == robomimic is_success, latched). Episodes
 start from the demo initial states of the flat h5, budget = budget_mult * (ep_len-1) raw
 steps -- the same start/budget semantics as the unified full_traj protocol.
 
@@ -52,8 +52,8 @@ ep_len = np.asarray(src["ep_len"][:]).reshape(-1)
 rng = np.random.default_rng(args.seed)
 picks = np.sort(rng.choice(len(ep_len), size=min(args.episodes, len(ep_len)), replace=False))
 
-from lewam.envs.robomimic_gc_env import RobomimicGCEnv
-env = RobomimicGCEnv(task="ToolHang", resolution=224)
+from lewam.envs.robomimic_gc_env import RoboMimicGCEnv
+env = RoboMimicGCEnv(task="ToolHang", resolution=224)
 
 def policy_obs(hist):
     frames = np.stack([f for f, _ in hist]).astype(np.float32) / 255.0     # [To,H,W,3]
