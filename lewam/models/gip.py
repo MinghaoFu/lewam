@@ -276,7 +276,7 @@ def load_lewam_unified_model(run_name, which="best"):
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
         dyn_goal_cond=bool(cfg.get("dyn_goal_cond", True)),
         head_type=str(cfg.get("head_type", "mse")), n_mix=int(cfg.get("n_mix", 5)),
-        flow_H=int(cfg.get("flow_H", 1)),
+        flow_H=int(cfg.get("flow_H", 1)), num_chunks=int(cfg.get("num_chunks", 1)),
         dyn_action_embed_dim=int(cfg.get("dyn_action_embed_dim", 0) or 0),
         use_idm=bool(float(cfg.get("w_idm", 0) or 0) > 0),
         use_prefix=bool(cfg.get("use_prefix", False)),

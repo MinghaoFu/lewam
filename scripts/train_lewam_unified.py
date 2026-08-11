@@ -417,11 +417,23 @@ def main():
                          "at train (eval defaults its ctx_cap to this). Frames per item = "
                          "2*context_len+1, so batch * context_len determines GPU memory")
     ap.add_argument("--anchor_rate", type=str, default="obs", choices=["obs", "raw"],
-                    help="obs (default): anchors on the frameskip grid (today's cache). raw: "
-                         "anchors at EVERY raw frame with frameskip-strided windows -- needs a "
-                         "cache built with make_preload_cache --anchor_rate raw (uint8 frames, "
-                         "per-step actions, _raw tag). ~5x the anchor positions per epoch and "
-                         "all action-block phasings.")
+                    help="an ANCHOR is the frame index where a training window starts (its first "
+                         "decision point). obs (default): anchors only on the frameskip grid, as "
+                         "stored by today's cache. raw: anchors at EVERY raw frame -- windows, "
+                         "goals and dynamics targets still stride by frameskip, but from any "
+                         "phase, so every transition trains under all block alignments (~5x the "
+                         "positions). Needs a cache built with make_preload_cache "
+                         "--anchor_rate raw (uint8 frames, per-step actions, _raw tag).")
+    ap.add_argument("--num_chunks", type=int, default=1,
+                    help="consecutive frameskip-blocks the policy predicts per position (DP-style "
+                         "chunking). Block 1 feeds dynamics and is what eval executes; later "
+                         "blocks are extra BC supervision, masked past the window/terminal. "
+                         "mse head only -- the flow head chunks via --flow_H instead.")
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from run_dir/lewam_unified_full.pt (model+optimizer+scheduler+"
+                         "epoch+RNG, saved every epoch): a killed pod loses at most one epoch. "
+                         "Skips the finished-run refusal. Resumed runs are statistically "
+                         "equivalent, not bitwise (DataLoader worker RNG is not restored).")
     ap.add_argument("--p_terminal_goal", type=float, default=0.0,
                     help="fraction of windows whose goal is the episode's TERMINAL frame (task-"
                          "completion supervision): every position aims at it, horizon = true "
@@ -575,6 +587,8 @@ def main():
     args = ap.parse_args()
     if args.latent_h and args.ablate_horizon:
         raise SystemExit("--latent_h and --ablate_horizon are different arms; pick one")
+    if args.num_chunks > 1 and args.head_type != "mse":
+        raise SystemExit("--num_chunks > 1 is mse-only; flow chunks via --flow_H, gmm is joint")
 
     if args.ablate_dynamics:
         args.w_dyn = 0.0
@@ -616,7 +630,7 @@ def main():
     if _tag and args.ckpt_sync_dir:
         # keep the remote layout in step with the local one
         args.ckpt_sync_dir = str(Path(args.ckpt_sync_dir) / _tag)
-    if (run_dir / "lewam_unified_best.pt").exists():
+    if (run_dir / "lewam_unified_best.pt").exists() and not args.resume:
         raise SystemExit(f"[lewam-uni] {run_dir} already holds a finished run "
                          f"(lewam_unified_best.pt). Pass a different --exp_tag / --run_name rather "
                          f"than overwriting it.")
@@ -638,6 +652,7 @@ def main():
                          dyn_goal_cond=args.dyn_goal_cond,
                          dyn_action_embed_dim=args.dyn_action_embed_dim,
                          head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
+                         num_chunks=args.num_chunks,
                          encoder_backbone=args.encoder_backbone,
                          encoder_ckpt=(args.encoder_ckpt or None),
                          use_idm=(args.w_idm > 0),
@@ -831,6 +846,7 @@ def main():
         prefix_heads=args.prefix_heads,
         w_straight=args.w_straight, straight_target=args.straight_target,
         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
+        num_chunks=args.num_chunks,
         ablate_dynamics=args.ablate_dynamics,
         dyn_action_from_policy=args.dyn_action_from_policy,
         dyn_policy_schedule=args.dyn_policy_schedule,
@@ -931,6 +947,17 @@ def main():
             aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
                                               chunk.reshape(B * max_pos, fh, adim).float(),
                                               mask=cmask.reshape(B * max_pos, fh).float())
+        elif args.num_chunks > 1:
+            # mse chunk target, same unfold as the flow branch: at position t the next num_chunks
+            # blocks a_frame[t:t+nc], per-chunk masked past the window end / terminal
+            nc, adim = args.num_chunks, actions.shape[-1]
+            a_pad = torch.cat([actions, actions.new_zeros(B, nc - 1, adim)], dim=1)
+            chunk = a_pad.unfold(1, nc, 1).permute(0, 1, 3, 2)                 # (B, max_pos, nc, adim)
+            v_pad = torch.cat([valid, valid.new_zeros(B, nc - 1)], dim=1)
+            cmask = v_pad.unfold(1, nc, 1).float()                             # (B, max_pos, nc)
+            per_chunk = ((a_out.reshape(B, max_pos, nc, adim).float() - chunk.float()) ** 2).mean(-1)
+            aloss = ((per_chunk * cmask).sum(-1)
+                     / cmask.sum(-1).clamp(min=1)).reshape(B * max_pos)        # per-sample (N,)
         else:
             aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
                                               actions.reshape(B * max_pos, actions.shape[-1]).float())
@@ -1070,8 +1097,21 @@ def main():
 
     # ---- training loop ----
     best_val = float("inf")
+    start_epoch = 0
+    _full_ckpt = run_dir / "lewam_unified_full.pt"
+    if args.resume and _full_ckpt.exists():
+        _st = torch.load(_full_ckpt, map_location=device)
+        model.load_state_dict(_st["model"])
+        opt.load_state_dict(_st["optimizer"])
+        sched.load_state_dict(_st["scheduler"])
+        best_val = float(_st["best_val"])
+        start_epoch = int(_st["epoch"]) + 1
+        torch.set_rng_state(_st["cpu_rng"].cpu())
+        if torch.cuda.is_available() and _st.get("cuda_rng"):
+            torch.cuda.set_rng_state_all([r.cpu() for r in _st["cuda_rng"]])
+        print(f"[lewam-uni] RESUMED at epoch {start_epoch} (best_val={best_val:.5f})", flush=True)
 
-    for ep in range(args.epochs):
+    for ep in range(start_epoch, args.epochs):
         t0 = time.time()
         alpha = dyn_alpha(ep)
 
@@ -1157,8 +1197,13 @@ def main():
         # ---- save checkpoints ----
         full_sd = model.state_dict()
         torch.save(full_sd, run_dir / "lewam_unified_latest.pt")
+        torch.save(dict(model=full_sd, optimizer=opt.state_dict(), scheduler=sched.state_dict(),
+                        epoch=ep, best_val=best_val, cpu_rng=torch.get_rng_state(),
+                        cuda_rng=(torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])),
+                   run_dir / "lewam_unified_full.pt")
         durable_sync([run_dir / "lewam_unified_config.json",
-                      run_dir / "lewam_unified_latest.pt"], args.ckpt_sync_dir)
+                      run_dir / "lewam_unified_latest.pt",
+                      run_dir / "lewam_unified_full.pt"], args.ckpt_sync_dir)
 
         combined_val = va_a + va_d
         if combined_val < best_val:

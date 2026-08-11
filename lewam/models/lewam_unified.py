@@ -159,7 +159,7 @@ class LeWAMUnified(nn.Module):
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None, agg_depth=4,
                  agg_heads=4, agg_residual=False, agg_gate=False, agg_action_cond=False,
-                 dyn_goal_cond=False, head_type="mse", n_mix=5, flow_H=1,
+                 dyn_goal_cond=False, head_type="mse", n_mix=5, flow_H=1, num_chunks=1,
                  agg_dim_head=None, agg_mlp_dim=None, dyn_action_embed_dim=0,
                  encoder_backbone="scratch", encoder_ckpt=None, use_idm=False,
                  use_prefix=False, prefix_H=5, prefix_depth=2, prefix_heads=4,
@@ -229,7 +229,7 @@ class LeWAMUnified(nn.Module):
         else:
             self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,
                                   hidden_dim=hidden_dim, dropout=dropout,
-                                  head_type=head_type, n_mix=n_mix,
+                                  head_type=head_type, n_mix=n_mix, num_chunks=num_chunks,
                                   latent_h=latent_h, h_codes=h_codes, h_code_dim=h_code_dim,
                                   h_commit=h_commit, h_pred_w=h_pred_w)
         # dynamics head

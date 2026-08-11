@@ -33,13 +33,19 @@ class GCHead(nn.Module):
 
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
                  n_freqs=64, cond_dim=128, dropout=0.1, state_dim=None,
-                 head_type="mse", n_mix=5,
+                 head_type="mse", n_mix=5, num_chunks=1,
                  latent_h="", h_codes=16, h_code_dim=64, h_commit=0.25, h_pred_w=1.0):
         super().__init__()
         self.n_freqs = n_freqs
         self.action_dim = int(action_dim)
         self.head_type = str(head_type)
         self.n_mix = int(n_mix)
+        # num_chunks > 1: the head predicts that many consecutive action blocks; block 1 is what
+        # point()/sample() return (the executed action), the rest are extra supervision. The
+        # chunked loss lives in the trainer; action_loss here assumes width-matched targets.
+        self.num_chunks = int(num_chunks)
+        assert not (self.head_type == "gmm" and self.num_chunks > 1), \
+            "gmm models a joint block distribution; chunked masking is not decomposable"
         state_dim = z_dim if state_dim is None else state_dim
         in_dim = state_dim + z_dim
         sin_dim = 2 * n_freqs
@@ -67,7 +73,8 @@ class GCHead(nn.Module):
         self.block1 = AdaLNBlock(in_dim, hidden_dim, cond_dim, dropout)
         self.block2 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
         self.block3 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
-        out_dim = self.n_mix * (1 + 2 * self.action_dim) if self.head_type == "gmm" else self.action_dim
+        out_dim = (self.n_mix * (1 + 2 * self.action_dim) if self.head_type == "gmm"
+                   else self.action_dim * self.num_chunks)
         self.out = nn.Linear(hidden_dim, out_dim)
 
     def _quantize(self, u):
@@ -155,7 +162,7 @@ class GCHead(nn.Module):
         mu_{argmax pi} (a valid mode), not the mixture mean sum_k pi_k mu_k, which for multimodal data
         lands in the low-density valley between modes."""
         if self.head_type != "gmm":
-            return out
+            return out[..., :self.action_dim] if self.num_chunks > 1 else out
         logits, mu, _ = self._gmm_params(out)
         k = logits.argmax(dim=-1)                                              # (N,) most-likely component
         return mu.gather(1, k[:, None, None].expand(-1, 1, self.action_dim)).squeeze(1)
@@ -164,7 +171,7 @@ class GCHead(nn.Module):
         """One reparameterized sample (N,d): identity for mse; component ~ Cat(pi) (hard, detached)
         then reparam within it (grad flows to that component's mu/sigma) for gmm."""
         if self.head_type != "gmm":
-            return out
+            return out[..., :self.action_dim] if self.num_chunks > 1 else out
         logits, mu, logsig = self._gmm_params(out)
         comp = torch.multinomial(F.softmax(logits, dim=-1), 1)                  # (N,1)
         idx = comp.unsqueeze(-1).expand(-1, 1, self.action_dim)                 # (N,1,d)
@@ -179,7 +186,8 @@ class GCHead(nn.Module):
         each candidate is a clean on-manifold mode, not corrupted by the (often inflated) sigma. Measured:
         sigma~0.33 blows sample error 0.25->0.44, so clean modes plan better under WM verification."""
         if self.head_type != "gmm":
-            return out.unsqueeze(1).expand(-1, n, -1)
+            exec_out = out[..., :self.action_dim] if self.num_chunks > 1 else out
+            return exec_out.unsqueeze(1).expand(-1, n, -1)
         logits, mu, logsig = self._gmm_params(out)
         N, K, d = mu.shape
         comp = torch.multinomial(F.softmax(logits, dim=-1), n, replacement=True, generator=generator)  # (N,n)
