@@ -320,7 +320,8 @@ class LeWAMUnified(nn.Module):
         if self.idm_head is not None:                                    # inverse dynamics: (z_t, z_pred)->a_t
             a_idm = self.idm_head(torch.cat([seq.reshape(B * L, D), z_pred.reshape(B * L, D)], dim=-1)
                                   ).reshape(B, L, -1)
-        h_aux = self.gc_head.h_aux_loss(cf, gf, hf)                      # 0 unless latent_h is on
+        h_aux = (self.gc_head.h_aux_loss(cf, gf, hf)                     # 0 unless latent_h is on
+                 if hasattr(self.gc_head, "h_aux_loss") else cf.new_zeros(()))
         return a_out, z_pred, a_idm, h_aux                               # a_out: consume via gc_head.action_loss
 
     def forward_seq_prefix(self, state_seq, goal_seq, horizon_norm, action_prefix_seq,
