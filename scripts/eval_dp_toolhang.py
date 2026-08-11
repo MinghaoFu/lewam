@@ -55,15 +55,18 @@ picks = np.sort(rng.choice(len(ep_len), size=min(args.episodes, len(ep_len)), re
 from lewam.envs.robomimic_gc_env import RoboMimicGCEnv
 env = RoboMimicGCEnv(task="ToolHang", resolution=224)
 
+OBS_KEYS = set(cfg.task.shape_meta["obs"].keys())   # only what THIS checkpoint consumes
+
 def policy_obs(hist):
     frames = np.stack([f for f, _ in hist]).astype(np.float32) / 255.0     # [To,H,W,3]
     frames = np.moveaxis(frames, -1, 1)[None]                              # [1,To,3,H,W]
     props = np.stack([pr for _, pr in hist]).astype(np.float32)[None]      # [1,To,9]
     t = lambda x: torch.from_numpy(np.ascontiguousarray(x)).to(args.device)
-    return {"sideview_image": t(frames),
+    full = {"sideview_image": t(frames),
             "robot0_eef_pos": t(props[..., 0:3]),
             "robot0_eef_quat": t(props[..., 3:7]),
             "robot0_gripper_qpos": t(props[..., 7:9])}
+    return {k: v for k, v in full.items() if k in OBS_KEYS}
 
 results = []
 t_start = time.time()
