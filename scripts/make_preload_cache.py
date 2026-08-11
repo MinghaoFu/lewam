@@ -45,10 +45,17 @@ p.add_argument("--patch_terminal", action="store_true",
                     "layout), append frames_to_terminal per --terminal_state, and rewrite aux.npz "
                     "+ meta.json in place (write local, then atomic replace). frames.npy is never "
                     "touched. 'success' reads only the success column of --h5.")
+p.add_argument("--anchor_rate", choices=["obs", "raw"], default="obs",
+               help="obs (default): store every frameskip-th frame; anchors live on that grid and "
+                    "action blocks are grid-aligned (today's cache, unchanged). raw: store ALL "
+                    "frames as uint8 and per-step actions, so the trainer can anchor at any raw "
+                    "frame with frameskip-strided windows (5x the positions, all block phasings). "
+                    "raw aux arrays are in RAW-frame units; tag gains a _raw suffix.")
 args = p.parse_args()
+RAW = args.anchor_rate == "raw"
 
 stem = os.path.basename(args.h5).replace(".h5", "")
-tag = f"{stem}_fs{args.frameskip}_i{args.img_size}"
+tag = f"{stem}_fs{args.frameskip}_i{args.img_size}" + ("_raw" if RAW else "")
 tmp = f"/tmp/preload_cache/{tag}"
 os.makedirs(tmp, exist_ok=True)
 os.makedirs(args.out, exist_ok=True)
@@ -75,16 +82,17 @@ def terminal_obs_per_episode(n_eps, keeps_per_ep):
     starts = np.unique(ep_offset)
     assert starts.size == n_eps, f"h5 has {starts.size} episodes, cache/loader has {n_eps}"
     lens = np.asarray([int(ep_len[np.searchsorted(ep_offset, s)]) for s in starts], np.int64)
+    stride = 1 if RAW else args.frameskip
     term_obs = np.empty(n_eps, np.int64)
     n_no_success = 0
     for i, (s, L) in enumerate(zip(starts, lens)):
         k = int(keeps_per_ep[i])
-        n_obs = L // args.frameskip
-        # the build keeps min(pixel-frames, n_obs+1) frames; anything outside [n_obs, n_obs+1]
+        n_keep = L if RAW else L // args.frameskip
+        # the build keeps min(pixel-frames, n_keep+1) frames; anything outside [n_keep, n_keep+1]
         # means the h5's episode layout doesn't match the cache's
-        assert n_obs <= k <= n_obs + 1, \
-            f"ep{i}: cache keeps {k} frames but h5 ep_len {L} implies {n_obs}..{n_obs + 1}"
-        hits = np.flatnonzero(success[s:s + L:args.frameskip][:k])
+        assert n_keep <= k <= n_keep + 1, \
+            f"ep{i}: cache keeps {k} frames but h5 ep_len {L} implies {n_keep}..{n_keep + 1}"
+        hits = np.flatnonzero(success[s:s + L:stride][:k])
         if hits.size == 0:
             n_no_success += 1
             term_obs[i] = k - 1
@@ -170,13 +178,16 @@ if args.patch_terminal:
     print("[cache] PATCH DONE", flush=True)
     sys.exit(0)
 
-# EXACT same construction as train_lewam_gc main()
+# EXACT same construction as train_lewam_gc main(). raw mode loads at frameskip=1 so the
+# loader hands back EVERY pixel frame; args.frameskip stays the semantic stride for the tag
+# and the trainer.
 _ktl = ["pixels", "action"]
+_load_fs = 1 if RAW else args.frameskip
 base = swm.data.load_dataset(args.h5, transform=None, cache_dir=None, num_steps=4,
-                             frameskip=args.frameskip, keys_to_load=_ktl,
+                             frameskip=_load_fs, keys_to_load=_ktl,
                              keys_to_cache=[k for k in _ktl if k != "pixels"],
                              format="hdf5")
-assert int(base.frameskip) == args.frameskip
+assert int(base.frameskip) == _load_fs
 
 act_norm = get_column_normalizer(base, "action", "action")
 _zn = act_norm.lambd
@@ -190,13 +201,20 @@ n_eps = len(base.lengths)
 print(f"[cache] {stem}: {n_eps} episodes, act_dim={len(act_mean)}", flush=True)
 
 def episode_tensors(ep):
-    """EXACT mirror of preload_frames' per-episode body."""
+    """EXACT mirror of preload_frames' per-episode body (obs mode). raw mode keeps every
+    frame as uint8 CHW (the trainer normalizes at batch time) and every per-step action row."""
     L = int(base.lengths[ep])
     sl = base._load_slice(ep, 0, L)
     pix, raw_act = sl["pixels"], sl["action"]
     if not torch.is_tensor(pix):
         pix = torch.as_tensor(np.asarray(pix))
     raw_act = raw_act if torch.is_tensor(raw_act) else torch.as_tensor(np.asarray(raw_act))
+    if RAW:
+        assert pix.shape[-2] == args.img_size and pix.shape[-3] == args.img_size, \
+            f"raw mode stores unresized frames; source is {tuple(pix.shape)} not {args.img_size}"
+        pp = pix.permute(0, 3, 1, 2).contiguous()                # (L,3,H,W) uint8
+        a = ((raw_act.float() - am) / astd).half()               # (L, adim) per-step
+        return pp, a
     pp = img_t({"pixels": pix})["pixels"].float()
     n_obs = L // FS
     a = raw_act[:n_obs * FS].reshape(n_obs, FS, raw_act.shape[1])
@@ -220,24 +238,36 @@ with open(bin_path, "wb") as fb:
         k = pp.shape[0]
         keeps.append(k)
         fb.write(pp.numpy().tobytes())
-        n_valid = min(a.shape[0], k - 1)
-        n_valids.append(n_valid)
-        last = k - 1
-        for t in range(n_valid):
-            tg_l.append(off + t); mh_l.append(last - t); eb_l.append(off)
-            A_l.append(a[t])
+        if RAW:
+            # anchors need a full action block + next frame: t + FS <= k-1.
+            # A_l is FRAME-aligned (row i = per-step action at frame i), not anchor-aligned.
+            n_valid = max(0, k - FS)
+            n_valids.append(n_valid)
+            last = k - 1
+            for t in range(n_valid):
+                tg_l.append(off + t); mh_l.append(last - t); eb_l.append(off)
+            for t in range(k):
+                A_l.append(a[t] if t < a.shape[0] else torch.zeros_like(a[0]))
+        else:
+            n_valid = min(a.shape[0], k - 1)
+            n_valids.append(n_valid)
+            last = k - 1
+            for t in range(n_valid):
+                tg_l.append(off + t); mh_l.append(last - t); eb_l.append(off)
+                A_l.append(a[t])
         off += k
         if (ep + 1) % 500 == 0:
             print(f"[cache] {ep+1}/{n_eps} ({time.time()-t0:.0f}s)", flush=True)
 N = off
 print(f"[cache] streamed N={N} frames in {time.time()-t0:.0f}s", flush=True)
 
+FRAME_DTYPE = np.uint8 if RAW else np.float16
 frames_path = f"{tmp}/{tag}.frames.npy"
-fr = np.lib.format.open_memmap(frames_path, mode="w+", dtype=np.float16,
+fr = np.lib.format.open_memmap(frames_path, mode="w+", dtype=FRAME_DTYPE,
                                shape=(N, 3, IMG, IMG))
 t1 = time.time()
 CH = 4096
-raw = np.memmap(bin_path, dtype=np.float16, mode="r", shape=(N, 3, IMG, IMG))
+raw = np.memmap(bin_path, dtype=FRAME_DTYPE, mode="r", shape=(N, 3, IMG, IMG))
 for i in range(0, N, CH):
     fr[i:i + CH] = raw[i:i + CH]
 fr.flush(); del fr; del raw
@@ -260,6 +290,7 @@ np.savez(f"{tmp}/{tag}.aux.npz",
          frames_to_terminal=frames_to_terminal,
          act_mean=np.asarray(act_mean), act_std=np.asarray(act_std))
 json.dump({"source_h5": args.h5, "img_size": IMG, "frameskip": FS,
+           "anchor_rate": args.anchor_rate,
            "n_frames": int(N), "n_samples": len(tg_l), "n_episodes": n_eps,
            "terminal_state": args.terminal_state,
            "success_key": (args.success_key if args.terminal_state == "success" else None),

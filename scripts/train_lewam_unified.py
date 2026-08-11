@@ -130,6 +130,10 @@ def preload_flat(base, img_t, act_mean, act_std, frameskip, max_eps=None):
 # Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior
 # history), like an eval episode / the eval adapter's sliding window.
 # --------------------------------------------------------------------------- #
+_IMG_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_IMG_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
 def sample_goal_offsets(n_pos, frames_to_terminal, h_max, p_terminal_goal, p_shared,
                         close_bias=0.0):
     """Sample each position's goal offset (obs-frames from the window start) + horizon.
@@ -189,19 +193,21 @@ def sample_goal_offsets(n_pos, frames_to_terminal, h_max, p_terminal_goal, p_sha
 
 class SeqTrajDataset(Dataset):
     def __init__(self, frames, a_frame, t_gidx, frames_to_terminal, indices, h_max, ctx_len,
-                 p_terminal_goal, p_shared, close_bias=0.0):
-        self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only; N = all obs-frames
-        self.a_frame = a_frame        # [N,adim] fp16, CPU; a_frame[t] = z-scored block taken AT t
-        self.t_gidx = t_gidx          # [M] long; episode-global obs-frame index of each valid start
+                 p_terminal_goal, p_shared, close_bias=0.0, stride=1):
+        self.frames = frames          # [N,3,H,W] fp16 (obs cache) or uint8 (raw cache), CPU
+        self.a_frame = a_frame        # obs cache: [N, FS*adim] block taken AT t;
+                                      # raw cache: [N, adim] per-step action at raw frame t
+        self.t_gidx = t_gidx          # [M] long; episode-global frame index of each valid start
         self.frames_to_terminal = frames_to_terminal  # [M] long; frames from that start to the
-                                      # episode's TERMINAL frame (== last frame unless the cache
-                                      # was built with --terminal_state success)
+                                      # episode's TERMINAL frame, in the CACHE's frame units
+                                      # (obs-frames, or raw frames when stride > 1)
         self.indices = indices        # [K] long; train or val subset of the M starts
-        self.h_max = int(h_max)       # max goal distance (obs-steps)
+        self.h_max = int(h_max)       # max goal distance (prediction steps)
         self.ctx_len = int(ctx_len)   # decision points per window
         self.p_terminal_goal = float(p_terminal_goal)
         self.p_shared = float(p_shared)
         self.close_bias = float(close_bias)  # >0 -> over-sample close goals (near-goal precision)
+        self.stride = int(stride)     # raw frames per prediction step (1 = obs cache)
 
     def __len__(self):
         return self.indices.numel()
@@ -209,16 +215,23 @@ class SeqTrajDataset(Dataset):
     def __getitem__(self, i):
         idx = int(self.indices[i])
         start = int(self.t_gidx[idx])
-        to_terminal = int(self.frames_to_terminal[idx])          # >= 1 by the anchor filter
-        n_pos = min(self.ctx_len, to_terminal)                   # frame start+n_pos exists (the
-                                                                 # last position's target), and no
-                                                                 # decision position sits past the
-                                                                 # terminal frame
+        st = self.stride
+        to_terminal = int(self.frames_to_terminal[idx]) // st    # prediction steps to terminal;
+                                                                 # >= 1 by the anchor filter
+        n_pos = min(self.ctx_len, to_terminal)                   # last position's target frame
+                                                                 # exists, and no decision position
+                                                                 # sits past the terminal frame
         goal_offsets, horizon, goal_at_terminal = sample_goal_offsets(
             n_pos, to_terminal, self.h_max, self.p_terminal_goal, self.p_shared, self.close_bias)
-        window = self.frames[start:start + n_pos + 1]            # (n_pos+1, 3, H, W)
-        goals = self.frames[start + goal_offsets]                # (n_pos, 3, H, W)
-        actions = self.a_frame[start:start + n_pos]              # (n_pos, adim)
+        if st == 1:
+            window = self.frames[start:start + n_pos + 1]        # (n_pos+1, 3, H, W)
+            goals = self.frames[start + goal_offsets]            # (n_pos, 3, H, W)
+            actions = self.a_frame[start:start + n_pos]          # (n_pos, FS*adim)
+        else:
+            window = self.frames[start + st * torch.arange(n_pos + 1)]
+            goals = self.frames[start + st * goal_offsets]
+            blocks = self.a_frame[start:start + st * n_pos]      # (st*n_pos, adim)
+            actions = blocks.reshape(n_pos, -1)                  # (n_pos, st*adim)
         return window, goals, actions, horizon, n_pos, goal_at_terminal
 
 
@@ -403,6 +416,12 @@ def main():
                     help="decision points per context window = the aggregator's max sequence length "
                          "at train (eval defaults its ctx_cap to this). Frames per item = "
                          "2*context_len+1, so batch * context_len determines GPU memory")
+    ap.add_argument("--anchor_rate", type=str, default="obs", choices=["obs", "raw"],
+                    help="obs (default): anchors on the frameskip grid (today's cache). raw: "
+                         "anchors at EVERY raw frame with frameskip-strided windows -- needs a "
+                         "cache built with make_preload_cache --anchor_rate raw (uint8 frames, "
+                         "per-step actions, _raw tag). ~5x the anchor positions per epoch and "
+                         "all action-block phasings.")
     ap.add_argument("--p_terminal_goal", type=float, default=0.0,
                     help="fraction of windows whose goal is the episode's TERMINAL frame (task-"
                          "completion supervision): every position aims at it, horizon = true "
@@ -644,7 +663,7 @@ def main():
             "LEWAM_CACHE_DIR",
             "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
         _stem = os.path.basename(args.dataset_name).replace(".h5", "")
-        _tag = f"{_stem}_fs{frameskip}_i{args.img_size}"
+        _tag = f"{_stem}_fs{frameskip}_i{args.img_size}" + ("_raw" if args.anchor_rate == "raw" else "")
         _fp, _ap = f"{_cdir}/{_stem}/{_tag}.frames.npy", f"{_cdir}/{_stem}/{_tag}.aux.npz"
         if not (os.path.isfile(_fp) and os.path.isfile(_ap)):
             _fp, _ap = f"{_cdir}/{_tag}.frames.npy", f"{_cdir}/{_tag}.aux.npz"
@@ -665,13 +684,22 @@ def main():
             maxh = torch.from_numpy(_aux["maxh"])
             frames_to_terminal = (torch.from_numpy(_aux["frames_to_terminal"])
                                   if "frames_to_terminal" in _aux.files else None)
-            A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
-            A_frame[t_gidx] = A_flat
+            if args.anchor_rate == "raw":
+                # raw cache: A_flat is FRAME-aligned per-step actions; blocks are assembled
+                # per anchor in the dataset. Index arrays are in raw-frame units.
+                assert A_flat.shape[0] == Frames.shape[0], "raw cache A_flat must be frame-aligned"
+                A_frame = A_flat
+            else:
+                A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
+                A_frame[t_gidx] = A_flat
             print(f"[lewam-uni] cache loaded in {time.time()-_t0:.0f}s "
                   f"frames={tuple(Frames.shape)}", flush=True)
         else:
             print(f"[lewam-uni] frames-cache MISS ({_fp}) -> classic preload", flush=True)
     if Frames is None:
+        if args.anchor_rate == "raw":
+            raise SystemExit("[lewam-uni] --anchor_rate raw needs a _raw cache "
+                             "(make_preload_cache --anchor_rate raw); classic preload is obs-only")
         Frames, A_frame, t_gidx, maxh = preload_flat(base, img_t, act_mean, act_std,
                                                      frameskip, max_eps=max_eps)
         frames_to_terminal = None
@@ -694,7 +722,8 @@ def main():
     # anchor filter: t ~ U[0, terminal] -- drop starts at/after the terminal frame (post-
     # completion anchors; only present when the cache carries a success-based terminal index).
     # Filtering the permutation keeps the split identical to old runs when nothing is dropped.
-    perm = perm[frames_to_terminal[perm] >= 1]
+    _stride = frameskip if args.anchor_rate == "raw" else 1
+    perm = perm[frames_to_terminal[perm] >= _stride]
     n_dropped = n_starts - perm.numel()
     if n_dropped:
         print(f"[lewam-uni] anchor filter: dropped {n_dropped}/{n_starts} post-terminal starts",
@@ -708,6 +737,8 @@ def main():
 
     # ---- DataLoaders ----
     if args.dyn_prefix:
+        if args.anchor_rate == "raw":
+            raise SystemExit("[lewam-uni] --anchor_rate raw + --dyn_prefix not implemented")
         train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, frames_to_terminal, train_idx,
                                     args.H_max, args.context_len, args.prefix_H,
                                     args.p_terminal_goal, args.p_shared, args.goal_close_bias)
@@ -717,10 +748,10 @@ def main():
     else:
         train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, frames_to_terminal, train_idx,
                                   args.H_max, args.context_len, args.p_terminal_goal,
-                                  args.p_shared, args.goal_close_bias)
+                                  args.p_shared, args.goal_close_bias, stride=_stride)
         val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, frames_to_terminal, val_idx,
                                 args.H_max, args.context_len, args.p_terminal_goal,
-                                args.p_shared, 0.0)
+                                args.p_shared, 0.0, stride=_stride)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
@@ -788,6 +819,7 @@ def main():
         dyn_action_embed_dim=args.dyn_action_embed_dim,
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
         p_terminal_goal=args.p_terminal_goal, terminal_source=terminal_source,
+        anchor_rate=args.anchor_rate,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
         latent_h=args.latent_h, h_codes=args.h_codes, h_code_dim=args.h_code_dim,
@@ -853,8 +885,13 @@ def main():
         n_pos = n_pos.to(device, non_blocking=True)
 
         n_window_frames = B * (max_pos + 1)
+        was_uint8 = window.dtype == torch.uint8
         frames_all = torch.cat([window.reshape(n_window_frames, *window.shape[2:]),
                                 goals.reshape(B * max_pos, *goals.shape[2:])]).float()
+        if was_uint8:
+            # raw cache stores unnormalized uint8; apply the same ImageNet stats img_t uses
+            frames_all = (frames_all / 255.0 - _IMG_MEAN.to(frames_all.device)) \
+                         / _IMG_STD.to(frames_all.device)
         z_all = model.encode(frames_all)
         z_window = z_all[:n_window_frames].reshape(B, max_pos + 1, D)
         z_goal = z_all[n_window_frames:].reshape(B, max_pos, D).float()
