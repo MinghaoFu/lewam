@@ -430,10 +430,7 @@ class ViTEncoder(nn.Module):
             self.vit.eval()
             mlp_in = self.vit.num_features
         elif backbone == "resnet18sp":
-            # from-scratch ResNet18 conv trunk + SpatialSoftmax keypoints — the DP-parity
-            # encoder: [512,7,7] feature map -> 32 learned keypoint (x,y) coordinates -> 64-d
-            # into the shared projector. Spatial WHERE-features with a per-frame vector
-            # output, so nothing downstream (aggregator/heads) changes. Fully trainable.
+            # ResNet18 conv trunk + SpatialSoftmax: 32 keypoint (x,y) coordinates -> 64-d
             import torchvision
             r18 = torchvision.models.resnet18(weights=None)
             self.trunk = nn.Sequential(*list(r18.children())[:-2])   # (N,512,H/32,W/32)

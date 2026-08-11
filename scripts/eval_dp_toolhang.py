@@ -38,7 +38,7 @@ args = p.parse_args()
 payload = torch.load(open(args.ckpt, "rb"), pickle_module=dill, map_location="cpu")
 cfg = payload["cfg"]
 policy = hydra.utils.instantiate(cfg.policy)
-policy.load_state_dict(payload["state_dicts"]["ema_model"])   # eval the EMA weights, as DP does
+policy.load_state_dict(payload["state_dicts"]["ema_model"])   # EMA weights, not the raw model
 policy.to(args.device).eval()
 n_obs = int(cfg.n_obs_steps)
 n_act = int(cfg.n_action_steps)
