@@ -469,6 +469,9 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 grad_dyn_mode=str(ge.get("grad_dyn_mode", "auto")),
                 grad_exec_full=bool(ge.get("grad_exec_full", True)),
                 grad_warm=bool(ge.get("grad_warm", True)),
+                grad_noise=float(ge.get("grad_noise", 0.0)),
+                grad_select=str(ge.get("grad_select", "best")),
+                cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ctx_cap defaults to the TRAINED context window (context_len in the ckpt config)

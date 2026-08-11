@@ -32,6 +32,13 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                               if _dm == "auto" else _dm)
         self.grad_exec_full = bool(kwargs.pop("grad_exec_full", True))
         self.grad_warm = bool(kwargs.pop("grad_warm", True))
+        # Langevin-style exploration: per-step action noise turns the deterministic descent into
+        # a candidate sampler whose stationary distribution favors wide (honest) basins; thin fake
+        # minima are volume-starved and the noise kicks the iterate out of them.
+        self.grad_noise = float(kwargs.pop("grad_noise", 0.0))
+        # 'best' = min raw model cost over iterates; 'final' = last noisy iterate (SGLD-style:
+        # let the dynamics do the selecting -- min raw cost provably picks the most-deceived iterate)
+        self.grad_select = str(kwargs.pop("grad_select", "best"))
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "lewam_unified_grad" + ("" if self.grad_warm else "_cold")
         # diagnostics: per-replan planning records + promise-vs-delivery across replans
@@ -159,6 +166,9 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                         best_cost = torch.where(m, c, best_cost)
                         best_iter[m.cpu()] = k
 
+                if self.grad_noise > 0 and self._cem_gen is None:
+                    self._cem_gen = torch.Generator(device=device)
+                    self._cem_gen.manual_seed(self._cem_seed)
                 for _k in range(self.grad_steps):
                     cost = self._terminal_cost(window0, win_len0, anchor, U, z_goal)
                     _track_best(cost, _k)
@@ -166,12 +176,16 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                     U.grad = torch.autograd.grad(cost.mean(), U)[0]
                     torch.nn.utils.clip_grad_norm_([U], self.grad_clip)
                     opt.step()
+                    if self.grad_noise > 0:
+                        with torch.no_grad():
+                            U.add_(torch.randn(U.shape, device=device, generator=self._cem_gen)
+                                   * self.grad_noise)
                     if self.grad_action_clip is not None:
                         with torch.no_grad():
                             U.clamp_(-self.grad_action_clip, self.grad_action_clip)
                 with torch.no_grad():
                     _track_best(self._terminal_cost(window0, win_len0, anchor, U, z_goal), self.grad_steps)
-                plan = best_U                                        # (R, H, block_dim)
+                plan = U.detach().clone() if self.grad_select == "final" else best_U
                 with torch.no_grad():
                     dU = (plan - U0).flatten(1).norm(dim=1)
                     for row, env_i in enumerate(replan_envs):
