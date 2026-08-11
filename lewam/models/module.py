@@ -429,6 +429,16 @@ class ViTEncoder(nn.Module):
                 p.requires_grad_(False)
             self.vit.eval()
             mlp_in = self.vit.num_features
+        elif backbone == "resnet18sp":
+            # from-scratch ResNet18 conv trunk + SpatialSoftmax keypoints — the DP-parity
+            # encoder: [512,7,7] feature map -> 32 learned keypoint (x,y) coordinates -> 64-d
+            # into the shared projector. Spatial WHERE-features with a per-frame vector
+            # output, so nothing downstream (aggregator/heads) changes. Fully trainable.
+            import torchvision
+            r18 = torchvision.models.resnet18(weights=None)
+            self.trunk = nn.Sequential(*list(r18.children())[:-2])   # (N,512,H/32,W/32)
+            self.kp_conv = nn.Conv2d(512, 32, kernel_size=1)
+            mlp_in = 64
         else:
             raise ValueError(f"unknown encoder backbone {backbone!r}")
         # maps to representation space using a MLP with Batch Normalization.
@@ -442,12 +452,27 @@ class ViTEncoder(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        if self.backbone != "scratch":
+        if self.backbone == "dinov3":
             self.vit.eval()  # keep the frozen pretrained backbone in eval mode always
         return self
 
+    def _spatial_softmax(self, pixels):
+        """(N,3,H,W) -> (N,64): expected (x,y) image coordinate of each of 32 keypoint maps."""
+        fmap = self.kp_conv(self.trunk(pixels))                     # (N,32,h,w)
+        N, K, H, W = fmap.shape
+        attn = fmap.flatten(2).softmax(-1)                          # (N,32,h*w)
+        xs = torch.linspace(-1.0, 1.0, W, device=fmap.device)
+        ys = torch.linspace(-1.0, 1.0, H, device=fmap.device)
+        grid_x = xs.repeat(H)                                       # row-major flatten: col-fastest
+        grid_y = ys.repeat_interleave(W)
+        exp_x = (attn * grid_x).sum(-1)                             # (N,32)
+        exp_y = (attn * grid_y).sum(-1)
+        return torch.cat([exp_x, exp_y], dim=-1)                    # (N,64)
+
     def forward(self, pixels):
         """pixels: (N, 3, H, W)"""
+        if self.backbone == "resnet18sp":
+            return self.projector(self._spatial_softmax(pixels))
         if self.backbone == "scratch":
             out = self.vit(pixels, interpolate_pos_encoding=True)
             if self.output_type == "cls":

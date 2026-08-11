@@ -446,7 +446,8 @@ def main():
                     help="ViT backbone size: tiny | small | base | large")
     ap.add_argument("--encoder_backbone", type=str, default="scratch",
                     help="scratch = from-scratch ViT (SIGReg-trained); dinov3 = frozen pretrained "
-                         "DINOv3 ViT-{encoder_size}/16")
+                         "DINOv3 ViT-{encoder_size}/16; resnet18sp = from-scratch ResNet18 + "
+                         "SpatialSoftmax 32-keypoint coordinates (the DP-parity spatial encoder)")
     ap.add_argument("--encoder_ckpt", type=str, default="",
                     help="state_dict .pt for the pretrained backbone, loaded at train init only "
                          "(dinov3). At eval the frozen weights live in the full checkpoint.")
