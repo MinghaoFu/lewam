@@ -420,7 +420,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem", "unified_grad"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_candgrad"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -443,6 +443,20 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_propose=str(ge.get("cem_propose", "cem")),
                 cem_cost=str(ge.get("cem_cost", "final")),
                 cem_dyn_mode=str(ge.get("cem_dyn_mode", "auto")),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        if mode == "unified_candgrad":
+            from lewam.models.grad_mpc import LeWAMUnifiedCandGradPolicy
+            return LeWAMUnifiedCandGradPolicy(
+                cand_snapshots=str(ge.get("cand_snapshots", "5,15,50")),
+                cand_pol_K=int(ge.get("cand_pol_K", 3)),
+                judge_noise=float(ge.get("judge_noise", 0.3)),
+                judge_m=int(ge.get("judge_m", 6)),
+                grad_steps=int(ge.get("grad_steps", 50)), grad_lr=float(ge.get("grad_lr", 0.05)),
+                grad_H=int(ge.get("grad_H", 5)), grad_clip=float(ge.get("grad_clip", 10.0)),
+                grad_dyn_mode=str(ge.get("grad_dyn_mode", "auto")),
+                grad_exec_full=bool(ge.get("grad_exec_full", True)),
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)

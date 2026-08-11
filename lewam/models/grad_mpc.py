@@ -42,9 +42,11 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
         import numpy as np
         rows = [r for r in self._diag if r[0] == "plan"]
         real = [r for r in self._diag if r[0] == "realized"]
+        cand = [r for r in self._diag if r[0] == "cand"]
         np.savez(path,
                  plan=np.array([r[1:] for r in rows], dtype=np.float64),      # call, env, h_left, c0, cb, best_iter, dU
-                 realized=np.array([r[1:] for r in real], dtype=np.float64))  # call, env, promised, realized
+                 realized=np.array([r[1:] for r in real], dtype=np.float64),  # call, env, promised, realized
+                 cand=np.array([r[1:] for r in cand], dtype=np.float64))      # call, env, winner, raw_winner, sm_U0, sm_win, raw_win
         print(f"[graddiag] {len(rows)} plan rows, {len(real)} realized rows -> {path}")
 
     def _terminal_cost(self, window0, win_len0, anchor, U, z_goal):
@@ -189,6 +191,160 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
                 for env_i in replan_envs:
                     self._steps_left[env_i] = max(self._steps_left[env_i] - float(n_exec), 1.0)
 
+        action = torch.full((n_envs, self.action_dim), float("nan"))
+        for env_i in range(n_envs):
+            if not is_dead[env_i]:
+                action[env_i] = self._action_buffer[env_i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
+class LeWAMUnifiedCandGradPolicy(LeWAMUnifiedGradPolicy):
+    """Candidate planner (mode: unified_candgrad). Heterogeneous candidate pool per replan:
+    the warm start U0 itself, early-stopped GD iterates, and noisy gc_head samples. All
+    candidates are judged by a noise-SMOOTHED terminal cost (mean over m perturbed rollouts,
+    common random numbers): thin fake minima that raw cost falls for blow up under the noise,
+    wide honest basins survive. U0 sits in the pool, so the floor is 'do not optimize'."""
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        snaps = str(kwargs.pop("cand_snapshots", "5,15,50"))
+        self.cand_snapshots = sorted({int(x) for x in snaps.split(",") if x.strip()})
+        self.cand_pol_K = int(kwargs.pop("cand_pol_K", 3))
+        self.judge_noise = float(kwargs.pop("judge_noise", 0.3))
+        self.judge_m = int(kwargs.pop("judge_m", 6))
+        super().__init__(model, cfg, *args, **kwargs)
+        self.type = "lewam_unified_candgrad"
+
+    @staticmethod
+    def _rep(t, k):
+        return t.unsqueeze(1).expand(t.shape[0], k, *t.shape[1:]).reshape(t.shape[0] * k, *t.shape[1:])
+
+    def get_action(self, info_dict, **kwargs):
+        info_dict = self._prepare_info(info_dict)
+        n_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        self._call += 1
+        if self._cem_gen is None:
+            self._cem_gen = torch.Generator(device=device)
+            self._cem_gen.manual_seed(self._cem_seed)
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(n_envs)]
+            self._steps_left = np.full(n_envs, self.horizon0, dtype=np.float64)
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(n_envs)]
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for env_i in range(n_envs):
+                if flush[env_i]:
+                    self._action_buffer[env_i].clear()
+                    self._lat_buf[env_i].clear()
+                    self._steps_left[env_i] = _h0_at(self.horizon0, env_i)
+                    self._diag_prev.pop(env_i, None)
+        term = info_dict.get("terminated")
+        is_dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n_envs, dtype=bool)
+        replan_envs = [i for i in range(n_envs) if len(self._action_buffer[i]) == 0 and not is_dead[i]]
+        if replan_envs:
+            with torch.no_grad():
+                cur_px = info_dict["pixels"][replan_envs]
+                goal_px = info_dict["goal"][replan_envs]
+                goal_px = goal_px[:, -1] if goal_px.ndim == 5 else goal_px
+                cur_px = cur_px[:, -1] if cur_px.ndim == 5 else cur_px
+                z_cur = self.model.encode(cur_px.to(device).float())
+                z_goal = self.model.encode(goal_px.to(device).float())
+                for row, env_i in enumerate(replan_envs):
+                    self._lat_buf[env_i].append(z_cur[row])
+                    prev = self._diag_prev.pop(env_i, None)
+                    if prev is not None:
+                        realized = float(((z_cur[row] - z_goal[row]) ** 2).mean())
+                        self._diag.append(("realized", prev[0], env_i, prev[1], realized))
+                R, D = z_cur.shape
+                ctx_cap = int(self.ctx_cap)
+                window0 = torch.zeros(R, ctx_cap, D, device=device)
+                win_len0 = torch.empty(R, dtype=torch.long, device=device)
+                for row, env_i in enumerate(replan_envs):
+                    real = torch.stack(self._lat_buf[env_i][-ctx_cap:], dim=0)
+                    window0[row, : real.shape[0]] = real
+                    win_len0[row] = real.shape[0]
+                anchor = self._context_at_head(window0, win_len0) if self.grad_dyn_mode == "prefix" else None
+
+                def warm_rollout(k_samples, noise):
+                    # AR gc_head rollout; k_samples noisy copies per env when noise, else 1 clean
+                    b = R * k_samples
+                    win = self._rep(window0, k_samples).clone()
+                    wl = self._rep(win_len0, k_samples).clone()
+                    zg = self._rep(z_goal, k_samples)
+                    sl = np.repeat(np.maximum(self._steps_left[replan_envs], 1.0), k_samples)
+                    blocks = []
+                    for _h in range(self.grad_H):
+                        hn = torch.tensor(np.minimum(sl, self.H_max) / self.H_max,
+                                          device=device, dtype=torch.float32)
+                        if self.ablate_horizon:
+                            hn = torch.zeros_like(hn)
+                        cctx = self._context_at_head(win, wl)
+                        dist = self.model.gc_head(cctx, zg, hn)
+                        if noise:
+                            blk = self.model.gc_head.sample(dist, 1, noise=True,
+                                                            generator=self._cem_gen).squeeze(1)
+                        else:
+                            blk = self.model.gc_head.point(dist)
+                        blocks.append(blk)
+                        win, wl = self._append_latent(win, wl, self._dyn_step(cctx, blk, zg), ctx_cap)
+                        sl = np.maximum(sl - 1.0, 1.0)
+                    return torch.stack(blocks, dim=1).reshape(R, k_samples, self.grad_H, self.block_dim)
+
+                U0 = warm_rollout(1, noise=False)[:, 0]
+
+            cands = [U0.detach().clone()]
+            if self.grad_steps > 0:
+                with torch.enable_grad():
+                    U = U0.detach().clone().requires_grad_(True)
+                    opt = torch.optim.Adam([U], lr=self.grad_lr)
+                    for _k in range(self.grad_steps):
+                        cost = self._terminal_cost(window0, win_len0, anchor, U, z_goal)
+                        opt.zero_grad(set_to_none=True)
+                        U.grad = torch.autograd.grad(cost.mean(), U)[0]
+                        torch.nn.utils.clip_grad_norm_([U], self.grad_clip)
+                        opt.step()
+                        if (_k + 1) in self.cand_snapshots:
+                            cands.append(U.detach().clone())
+                if self.grad_steps not in self.cand_snapshots:
+                    cands.append(U.detach().clone())
+            with torch.no_grad():
+                if self.cand_pol_K > 0:
+                    pol = warm_rollout(self.cand_pol_K, noise=True)
+                    for k in range(self.cand_pol_K):
+                        cands.append(pol[:, k])
+                C = len(cands)
+                m = self.judge_m
+                eps = torch.randn(R, m, self.grad_H, self.block_dim, device=device,
+                                  generator=self._cem_gen) * self.judge_noise
+                win_m = self._rep(window0, m)
+                wl_m = self._rep(win_len0, m)
+                zg_m = self._rep(z_goal, m)
+                an_m = self._rep(anchor, m) if anchor is not None else None
+                sm = torch.zeros(R, C, device=device)
+                raw = torch.zeros(R, C, device=device)
+                for c, Uc in enumerate(cands):
+                    raw[:, c] = self._terminal_cost(window0, win_len0, anchor, Uc, z_goal)
+                    Un = (self._rep(Uc, m) + eps.reshape(R * m, self.grad_H, self.block_dim))
+                    sm[:, c] = self._terminal_cost(win_m, wl_m, an_m, Un, zg_m).reshape(R, m).mean(1)
+                winner = sm.argmin(dim=1)
+                raw_winner = raw.argmin(dim=1)
+                rows = torch.arange(R, device=device)
+                plan = torch.stack(cands, dim=1)[rows, winner]
+                for row, env_i in enumerate(replan_envs):
+                    w = int(winner[row])
+                    self._diag.append(("cand", self._call, env_i, w, int(raw_winner[row]),
+                                       float(sm[row, 0]), float(sm[row, w]), float(raw[row, w])))
+                    self._diag_prev[env_i] = (self._call, float(raw[row, w]))
+                n_exec = self.grad_H if self.grad_exec_full else 1
+                for h in range(n_exec):
+                    block = plan[:, h]
+                    raw_a = (block.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
+                    raw_a = raw_a.reshape(R, self.action_block, self.action_dim).cpu()
+                    for row, env_i in enumerate(replan_envs):
+                        self._action_buffer[env_i].extend(raw_a[row])
+                for env_i in replan_envs:
+                    self._steps_left[env_i] = max(self._steps_left[env_i] - float(n_exec), 1.0)
         action = torch.full((n_envs, self.action_dim), float("nan"))
         for env_i in range(n_envs):
             if not is_dead[env_i]:
