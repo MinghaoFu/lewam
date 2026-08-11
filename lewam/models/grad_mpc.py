@@ -496,3 +496,127 @@ class LeWAMUnifiedDGoalPolicy(LeWAMUnifiedGradPolicy):
             if not is_dead[env_i]:
                 action[env_i] = self._action_buffer[env_i].popleft()
         return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
+class LeWAMUnifiedCEMDiagPolicy(LeWAMUnifiedGradPolicy):
+    """Instrumented warm-CEM (mode: unified_cemdiag). Reproduces the CEM search verbatim
+    (warm AR start + Gaussian population + elite mean, rollout dynamics, cem-propose only)
+    WITHOUT touching the CEM class, and records per replan: warm cost c0, chosen-plan cost cb,
+    plan displacement ||dU|| from the warm start. Answers how deep CEM actually descends the
+    same cost GD saturates."""
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        super().__init__(model, cfg, *args, **kwargs)
+        self.type = "lewam_unified_cemdiag"
+        assert self.cem_propose == "cem" and self.grad_dyn_mode == "rollout"
+        self.grad_H = int(self.cem_H)   # _terminal_cost scores over the CEM horizon
+
+    def get_action(self, info_dict, **kwargs):
+        info_dict = self._prepare_info(info_dict)
+        n_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        if self._cem_gen is None:
+            self._cem_gen = torch.Generator(device=device)
+            self._cem_gen.manual_seed(self._cem_seed)
+        self._call += 1
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(n_envs)]
+            self._steps_left = np.full(n_envs, self.horizon0, dtype=np.float64)
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(n_envs)]
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for env_i in range(n_envs):
+                if flush[env_i]:
+                    self._action_buffer[env_i].clear()
+                    self._lat_buf[env_i].clear()
+                    self._steps_left[env_i] = _h0_at(self.horizon0, env_i)
+        term = info_dict.get("terminated")
+        is_dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n_envs, dtype=bool)
+        replan_envs = [i for i in range(n_envs) if len(self._action_buffer[i]) == 0 and not is_dead[i]]
+        if replan_envs:
+            with torch.no_grad():
+                cur_px = info_dict["pixels"][replan_envs]
+                goal_px = info_dict["goal"][replan_envs]
+                goal_px = goal_px[:, -1] if goal_px.ndim == 5 else goal_px
+                cur_px = cur_px[:, -1] if cur_px.ndim == 5 else cur_px
+                z_cur = self.model.encode(cur_px.to(device).float())
+                z_goal = self.model.encode(goal_px.to(device).float())
+                for row, env_i in enumerate(replan_envs):
+                    self._lat_buf[env_i].append(z_cur[row])
+                n_replan, latent_dim = z_cur.shape
+                ctx_cap = int(self.ctx_cap)
+                window0 = torch.zeros(n_replan, ctx_cap, latent_dim, device=device)
+                win_len0 = torch.empty(n_replan, dtype=torch.long, device=device)
+                for row, env_i in enumerate(replan_envs):
+                    real = torch.stack(self._lat_buf[env_i][-ctx_cap:], dim=0)
+                    window0[row, : real.shape[0]] = real
+                    win_len0[row] = real.shape[0]
+                n_samples, n_elites = self.cem_K, self.cem_M
+                plan_horizon, block_dim = self.cem_H, self.block_dim
+                z_goal_rep = z_goal.unsqueeze(1).expand(n_replan, n_samples, latent_dim) \
+                                   .reshape(n_replan * n_samples, latent_dim)
+                if self.cem_warm:
+                    steps_left = np.maximum(self._steps_left[replan_envs], 1.0).astype(np.float64)
+                    window, win_len, warm_blocks = window0.clone(), win_len0.clone(), []
+                    for _h in range(plan_horizon):
+                        horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
+                                                    device=device, dtype=torch.float32)
+                        if self.ablate_horizon:
+                            horizon_norm = torch.zeros_like(horizon_norm)
+                        context = self._context_at_head(window, win_len)
+                        action_blk = self.model.gc_head.point(self.model.gc_head(context, z_goal, horizon_norm))
+                        warm_blocks.append(action_blk)
+                        window, win_len = self._append_latent(window, win_len,
+                                                              self._dyn_step(context, action_blk, z_goal), ctx_cap)
+                        steps_left = np.maximum(steps_left - 1.0, 1.0)
+                    plan_mean = torch.stack(warm_blocks, dim=1)
+                else:
+                    plan_mean = torch.zeros(n_replan, plan_horizon, block_dim, device=device)
+                U0 = plan_mean.detach().clone()
+                plan_std = torch.full((n_replan, plan_horizon, block_dim), self.cem_std, device=device)
+                window0_rep = window0.unsqueeze(1).expand(n_replan, n_samples, ctx_cap, latent_dim) \
+                                     .reshape(n_replan * n_samples, ctx_cap, latent_dim)
+                win_len0_rep = win_len0.unsqueeze(1).expand(n_replan, n_samples).reshape(n_replan * n_samples)
+                flat_rows = torch.arange(n_replan * n_samples, device=device)
+                for _ in range(self.cem_iter):
+                    action_seqs = plan_mean.unsqueeze(1) + plan_std.unsqueeze(1) * torch.randn(
+                        n_replan, n_samples, plan_horizon, block_dim, device=device, generator=self._cem_gen)
+                    action_seqs_flat = action_seqs.reshape(n_replan * n_samples, plan_horizon, block_dim)
+                    window, win_len = window0_rep.clone(), win_len0_rep.clone()
+                    cost = torch.zeros(n_replan * n_samples, device=device)
+                    for h in range(plan_horizon):
+                        if self.cem_state == "z":
+                            context = window[flat_rows, (win_len - 1).clamp(min=0)]
+                        else:
+                            context = self._context_at_head(window, win_len)
+                        z_next = self._dyn_step(context, action_seqs_flat[:, h], z_goal_rep)
+                        step_cost = ((z_next - z_goal_rep) ** 2).sum(-1)
+                        cost = step_cost if self.cem_cost == "final" else cost + step_cost
+                        window, win_len = self._append_latent(window, win_len, z_next, ctx_cap)
+                    cost = cost.reshape(n_replan, n_samples)
+                    elite_idx = cost.argsort(dim=1)[:, :n_elites]
+                    elite_seqs = torch.gather(action_seqs, 1,
+                                              elite_idx[:, :, None, None].expand(n_replan, n_elites, plan_horizon, block_dim))
+                    plan_mean = elite_seqs.mean(1)
+                    plan_std = elite_seqs.std(1).clamp(min=1e-3)
+                c0 = self._terminal_cost(window0, win_len0, None, U0, z_goal)
+                cb = self._terminal_cost(window0, win_len0, None, plan_mean, z_goal)
+                dU = (plan_mean - U0).flatten(1).norm(dim=1)
+                for row, env_i in enumerate(replan_envs):
+                    self._diag.append(("plan", self._call, env_i, float(self._steps_left[env_i]),
+                                       float(c0[row]), float(cb[row]), -1, float(dU[row])))
+                n_exec = self.cem_H if self.cem_exec_full else 1
+                for h in range(n_exec):
+                    block = plan_mean[:, h]
+                    raw_a = (block.reshape(n_replan, self.frameskip, self.raw_adim) * self._astd + self._amean)
+                    raw_a = raw_a.reshape(n_replan, self.action_block, self.action_dim).cpu()
+                    for row, env_i in enumerate(replan_envs):
+                        self._action_buffer[env_i].extend(raw_a[row])
+                for env_i in replan_envs:
+                    self._steps_left[env_i] = max(self._steps_left[env_i] - float(n_exec), 1.0)
+        action = torch.full((n_envs, self.action_dim), float("nan"))
+        for env_i in range(n_envs):
+            if not is_dead[env_i]:
+                action[env_i] = self._action_buffer[env_i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()

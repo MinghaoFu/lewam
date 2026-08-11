@@ -420,7 +420,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_candgrad", "unified_dgoal"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_candgrad", "unified_dgoal", "unified_cemdiag"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -443,6 +443,19 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_propose=str(ge.get("cem_propose", "cem")),
                 cem_cost=str(ge.get("cem_cost", "final")),
                 cem_dyn_mode=str(ge.get("cem_dyn_mode", "auto")),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        if mode == "unified_cemdiag":
+            from lewam.models.grad_mpc import LeWAMUnifiedCEMDiagPolicy
+            return LeWAMUnifiedCEMDiagPolicy(
+                cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
+                cem_iter=int(ge.get("cem_iter", 4)), cem_H=int(ge.get("cem_H", 5)),
+                cem_std=float(ge.get("cem_std", 1.0)),
+                cem_warm=bool(ge.get("cem_warm", False)),
+                cem_state=str(ge.get("cem_state", "c")),
+                cem_exec_full=bool(ge.get("cem_exec_full", False)),
+                cem_cost=str(ge.get("cem_cost", "final")),
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
