@@ -264,6 +264,7 @@ def load_lewam_unified_model(run_name, which="best"):
     model = LeWAMUnified(
         encoder_size=str(cfg.get("encoder_size", "tiny")),
         encoder_backbone=str(cfg.get("encoder_backbone", "scratch")),
+        encoder_ckpt="random",   # weights come from the strict sd load below, never a download
         embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,

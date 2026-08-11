@@ -419,7 +419,10 @@ class ViTEncoder(nn.Module):
                 "base": "vit_base_patch16_dinov3",
                 "large": "vit_large_patch16_dinov3"
             }
-            if backbone_ckpt:
+            if backbone_ckpt == "random":
+                # architecture only; the caller restores weights from a full-model checkpoint
+                self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
+            elif backbone_ckpt:
                 self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
                 self.vit.load_state_dict(torch.load(backbone_ckpt, map_location="cpu"), strict=True)
             else:
