@@ -210,9 +210,17 @@ def episode_tensors(ep):
         pix = torch.as_tensor(np.asarray(pix))
     raw_act = raw_act if torch.is_tensor(raw_act) else torch.as_tensor(np.asarray(raw_act))
     if RAW:
-        assert pix.shape[-2] == args.img_size and pix.shape[-3] == args.img_size, \
-            f"raw mode stores unresized frames; source is {tuple(pix.shape)} not {args.img_size}"
-        pp = pix.permute(0, 3, 1, 2).contiguous()                # (L,3,H,W) uint8
+        if pix.ndim == 4 and pix.shape[1] == 3:                  # loader hands back CHW
+            pp = pix.contiguous()
+        elif pix.ndim == 4 and pix.shape[-1] == 3:               # HWC
+            pp = pix.permute(0, 3, 1, 2).contiguous()
+        else:
+            raise AssertionError(f"unrecognized pixel layout {tuple(pix.shape)}")
+        assert pp.shape[-1] == args.img_size and pp.shape[-2] == args.img_size, \
+            f"raw mode stores unresized frames; source is {tuple(pp.shape)} not {args.img_size}"
+        if pp.dtype != torch.uint8:
+            assert pp.max() > 1.5, "expected 0..255 pixel range"
+            pp = pp.to(torch.uint8)
         a = ((raw_act.float() - am) / astd).half()               # (L, adim) per-step
         return pp, a
     pp = img_t({"pixels": pix})["pixels"].float()
