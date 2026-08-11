@@ -364,3 +364,135 @@ class LeWAMUnifiedCandGradPolicy(LeWAMUnifiedGradPolicy):
             if not is_dead[env_i]:
                 action[env_i] = self._action_buffer[env_i].popleft()
         return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
+class LeWAMUnifiedDGoalPolicy(LeWAMUnifiedGradPolicy):
+    """Plan-through-the-policy (mode: unified_dgoal). The optimization variable is a small
+    offset delta on the goal embedding FED TO gc_head; every action of every iterate is the
+    frozen policy's own output, so the off-manifold exploitation channel does not exist as a
+    coordinate. Dynamics conditioning and the cost both use the TRUE goal; iterate 0
+    (delta=0) is the pure policy rollout, so the floor is 'do not optimize'."""
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        self.dg_steps = int(kwargs.pop("dg_steps", 20))
+        self.dg_lr = float(kwargs.pop("dg_lr", 0.02))
+        self.dg_clip = float(kwargs.pop("dg_clip", 5.0))
+        self.dg_rho = float(kwargs.pop("dg_rho", 0.3))   # max ||delta|| relative to ||z_goal||
+        super().__init__(model, cfg, *args, **kwargs)
+        self.type = "lewam_unified_dgoal"
+
+    def _policy_rollout(self, window0, win_len0, z_goal_tilt, z_goal_true, steps_left0):
+        """AR rollout with the graph OPEN through aggregate+gc_head+dynamics. Returns
+        (U (R,H,B), terminal cost against the TRUE goal)."""
+        win, wl = window0.clone(), win_len0.clone()
+        sl = steps_left0.copy()
+        device = window0.device
+        blocks, z_term = [], None
+        for _h in range(self.grad_H):
+            hn = torch.tensor(np.minimum(sl, self.H_max) / self.H_max,
+                              device=device, dtype=torch.float32)
+            if self.ablate_horizon:
+                hn = torch.zeros_like(hn)
+            cctx = self._context_at_head(win, wl)
+            blk = self.model.gc_head.point(self.model.gc_head(cctx, z_goal_tilt, hn))
+            blocks.append(blk)
+            z_term = self._dyn_step(cctx, blk, z_goal_true)
+            win, wl = self._append_latent(win, wl, z_term, int(self.ctx_cap))
+            sl = np.maximum(sl - 1.0, 1.0)
+        U = torch.stack(blocks, dim=1)
+        cost = ((z_term - z_goal_true) ** 2).mean(-1)
+        return U, cost
+
+    def get_action(self, info_dict, **kwargs):
+        info_dict = self._prepare_info(info_dict)
+        n_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        self._call += 1
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(n_envs)]
+            self._steps_left = np.full(n_envs, self.horizon0, dtype=np.float64)
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(n_envs)]
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for env_i in range(n_envs):
+                if flush[env_i]:
+                    self._action_buffer[env_i].clear()
+                    self._lat_buf[env_i].clear()
+                    self._steps_left[env_i] = _h0_at(self.horizon0, env_i)
+                    self._diag_prev.pop(env_i, None)
+        term = info_dict.get("terminated")
+        is_dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(n_envs, dtype=bool)
+        replan_envs = [i for i in range(n_envs) if len(self._action_buffer[i]) == 0 and not is_dead[i]]
+        if replan_envs:
+            with torch.no_grad():
+                cur_px = info_dict["pixels"][replan_envs]
+                goal_px = info_dict["goal"][replan_envs]
+                goal_px = goal_px[:, -1] if goal_px.ndim == 5 else goal_px
+                cur_px = cur_px[:, -1] if cur_px.ndim == 5 else cur_px
+                z_cur = self.model.encode(cur_px.to(device).float())
+                z_goal = self.model.encode(goal_px.to(device).float())
+                for row, env_i in enumerate(replan_envs):
+                    self._lat_buf[env_i].append(z_cur[row])
+                    prev = self._diag_prev.pop(env_i, None)
+                    if prev is not None:
+                        realized = float(((z_cur[row] - z_goal[row]) ** 2).mean())
+                        self._diag.append(("realized", prev[0], env_i, prev[1], realized))
+                R, D = z_cur.shape
+                ctx_cap = int(self.ctx_cap)
+                window0 = torch.zeros(R, ctx_cap, D, device=device)
+                win_len0 = torch.empty(R, dtype=torch.long, device=device)
+                for row, env_i in enumerate(replan_envs):
+                    real = torch.stack(self._lat_buf[env_i][-ctx_cap:], dim=0)
+                    window0[row, : real.shape[0]] = real
+                    win_len0[row] = real.shape[0]
+                sl0 = np.maximum(self._steps_left[replan_envs], 1.0).astype(np.float64)
+                gnorm = z_goal.norm(dim=-1, keepdim=True)
+
+            with torch.enable_grad():
+                delta = torch.zeros(R, D, device=device, requires_grad=True)
+                opt = torch.optim.Adam([delta], lr=self.dg_lr)
+                best_U = best_cost = None
+                best_iter = torch.zeros(R, dtype=torch.long)
+                for _k in range(self.dg_steps + 1):
+                    U, cost = self._policy_rollout(window0, win_len0, z_goal + delta, z_goal, sl0)
+                    c = cost.detach()
+                    if best_cost is None:
+                        best_cost, best_U = c.clone(), U.detach().clone()
+                    else:
+                        m = c < best_cost
+                        best_U[m] = U.detach()[m]
+                        best_cost = torch.where(m, c, best_cost)
+                        best_iter[m.cpu()] = _k
+                    if _k == self.dg_steps:
+                        break
+                    opt.zero_grad(set_to_none=True)
+                    delta.grad = torch.autograd.grad(cost.mean(), delta)[0]
+                    torch.nn.utils.clip_grad_norm_([delta], self.dg_clip)
+                    opt.step()
+                    with torch.no_grad():
+                        scale = (self.dg_rho * gnorm / delta.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp(max=1.0)
+                        delta.mul_(scale)
+                plan = best_U
+
+            with torch.no_grad():
+                dnorm = delta.detach().norm(dim=-1)
+                for row, env_i in enumerate(replan_envs):
+                    self._diag.append(("plan", self._call, env_i, float(self._steps_left[env_i]),
+                                       float(best_cost[row]), float(best_cost[row]),
+                                       int(best_iter[row]), float(dnorm[row])))
+                    self._diag_prev[env_i] = (self._call, float(best_cost[row]))
+                n_exec = self.grad_H if self.grad_exec_full else 1
+                for h in range(n_exec):
+                    block = plan[:, h]
+                    raw_a = (block.reshape(R, self.frameskip, self.raw_adim) * self._astd + self._amean)
+                    raw_a = raw_a.reshape(R, self.action_block, self.action_dim).cpu()
+                    for row, env_i in enumerate(replan_envs):
+                        self._action_buffer[env_i].extend(raw_a[row])
+                for env_i in replan_envs:
+                    self._steps_left[env_i] = max(self._steps_left[env_i] - float(n_exec), 1.0)
+        action = torch.full((n_envs, self.action_dim), float("nan"))
+        for env_i in range(n_envs):
+            if not is_dead[env_i]:
+                action[env_i] = self._action_buffer[env_i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()

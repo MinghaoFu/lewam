@@ -319,7 +319,7 @@ def run(cfg: DictConfig):
         model._split_cfg = split_cfg
         adim = int(split_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
-    elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_candgrad"):
+    elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_candgrad", "unified_dgoal"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
         model, uni_cfg = gip.load_lewam_unified_model(cfg.policy, which=cfg.get("seq_which", "best"))
