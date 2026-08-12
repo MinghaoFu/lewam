@@ -429,6 +429,17 @@ def main():
                          "chunking). Block 1 feeds dynamics and is what eval executes; later "
                          "blocks are extra BC supervision, masked past the window/terminal. "
                          "mse head only -- the flow head chunks via --flow_H instead.")
+    ap.add_argument("--drop_goal", action="store_true",
+                    help="unconditional-policy arm: the head ignores z_goal and conditions on a "
+                         "learned constant instead. Goal frames are still loaded/encoded (dead "
+                         "compute, kept for pipeline parity); recorded in the config so eval "
+                         "rebuilds the same head.")
+    ap.add_argument("--crop_aug", type=int, default=0,
+                    help="crop size for random-crop augmentation (0 = off; e.g. 202 from 224). "
+                         "One random offset per window item covers its context frames AND their "
+                         "next-frame dynamics targets (same-crop keeps the target latent "
+                         "predictable); the goal frame gets an independent offset. Val and eval "
+                         "use a deterministic center crop (encode() handles eval).")
     ap.add_argument("--resume", action="store_true",
                     help="resume from run_dir/lewam_unified_full.pt (model+optimizer+scheduler+"
                          "epoch+RNG, saved every epoch): a killed pod loses at most one epoch. "
@@ -653,6 +664,7 @@ def main():
                          dyn_action_embed_dim=args.dyn_action_embed_dim,
                          head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
                          num_chunks=args.num_chunks,
+                         drop_goal=args.drop_goal, crop_size=args.crop_aug,
                          encoder_backbone=args.encoder_backbone,
                          encoder_ckpt=(args.encoder_ckpt or None),
                          use_idm=(args.w_idm > 0),
@@ -847,6 +859,7 @@ def main():
         w_straight=args.w_straight, straight_target=args.straight_target,
         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
         num_chunks=args.num_chunks,
+        drop_goal=args.drop_goal, crop_size=args.crop_aug,
         ablate_dynamics=args.ablate_dynamics,
         dyn_action_from_policy=args.dyn_action_from_policy,
         dyn_policy_schedule=args.dyn_policy_schedule,
@@ -899,6 +912,21 @@ def main():
         actions = actions.to(device, non_blocking=True).float()
         horizon = horizon.to(device, non_blocking=True)
         n_pos = n_pos.to(device, non_blocking=True)
+
+        if args.crop_aug:
+            cs = args.crop_aug
+            mx = window.shape[-1] - cs
+            w_crop = window.new_empty(B, window.shape[1], 3, cs, cs)
+            g_crop = goals.new_empty(B, goals.shape[1], 3, cs, cs)
+            for i in range(B):
+                if train:
+                    dy, dx = torch.randint(0, mx + 1, (2,)).tolist()
+                    gy, gx = torch.randint(0, mx + 1, (2,)).tolist()
+                else:
+                    dy = dx = gy = gx = mx // 2
+                w_crop[i] = window[i, :, :, dy:dy + cs, dx:dx + cs]
+                g_crop[i] = goals[i, :, :, gy:gy + cs, gx:gx + cs]
+            window, goals = w_crop, g_crop
 
         n_window_frames = B * (max_pos + 1)
         was_uint8 = window.dtype == torch.uint8

@@ -33,10 +33,13 @@ class GCHead(nn.Module):
 
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=512,
                  n_freqs=64, cond_dim=128, dropout=0.1, state_dim=None,
-                 head_type="mse", n_mix=5, num_chunks=1,
+                 head_type="mse", n_mix=5, num_chunks=1, drop_goal=False,
                  latent_h="", h_codes=16, h_code_dim=64, h_commit=0.25, h_pred_w=1.0):
         super().__init__()
         self.n_freqs = n_freqs
+        self.drop_goal = bool(drop_goal)
+        if self.drop_goal:
+            self.null_goal = nn.Parameter(torch.zeros(z_dim))
         self.action_dim = int(action_dim)
         self.head_type = str(head_type)
         self.n_mix = int(n_mix)
@@ -119,6 +122,8 @@ class GCHead(nn.Module):
         return out
 
     def forward(self, z_t, z_goal, h_norm):
+        if self.drop_goal:
+            z_goal = self.null_goal.unsqueeze(0).expand(z_t.shape[0], -1)
         x = torch.cat([z_t, z_goal], dim=-1)
         if self.latent_h == "vq":
             # h_norm is ignored: the conditioning is a code read off (state, z_goal).
