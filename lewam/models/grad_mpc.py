@@ -143,7 +143,6 @@ class LeWAMUnifiedGradPolicy(LeWAMUnifiedCEMPolicy):
         if replan_envs:
             with torch.no_grad():
                 cur_px = info_dict["pixels"][replan_envs]
-                assert "goal" in info_dict, "unified_grad needs info_dict['goal']"
                 goal_px = info_dict["goal"][replan_envs]
                 goal_px = goal_px[:, -1] if goal_px.ndim == 5 else goal_px
                 cur_px = cur_px[:, -1] if cur_px.ndim == 5 else cur_px

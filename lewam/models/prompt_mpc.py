@@ -18,11 +18,10 @@ from collections import deque
 import numpy as np
 import torch
 
-from lewam.models.gip import _h0_at
-from lewam.models.grad_mpc import LeWAMUnifiedGradPolicy
+from lewam.models.gip import LeWAMUnifiedCEMPolicy, _h0_at
 
 
-class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedGradPolicy):
+class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
     """Plan-through-the-policy (mode: unified_prompt_mpc). The optimization variable is a small
     offset delta on the goal embedding FED TO gc_head; every action of every iterate is the
     frozen policy's own output, so the off-manifold exploitation channel does not exist as a
@@ -44,8 +43,47 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedGradPolicy):
         # success rule (a plan that passes through the goal early scores what it deserves).
         self.pm_cost = str(kwargs.pop("pm_cost", "terminal"))
         self.pm_r_rho = float(kwargs.pop("pm_r_rho", 0.1))
+        # plan length: fixed pm_H blocks, or per-episode data horizons (pm_H_auto); execute
+        # the whole plan (default), the first block only, or pm_exec_k blocks per replan.
+        self.pm_H = int(kwargs.pop("pm_H", 5))
+        self.pm_H_auto = bool(kwargs.pop("pm_H_auto", False))
+        self.pm_exec_k = int(kwargs.pop("pm_exec_k", 0))
+        self.pm_exec_full = bool(kwargs.pop("pm_exec_full", True))
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "lewam_unified_prompt_mpc"
+        self._diag = []
+        self._diag_prev = {}  # env -> (call, promised cost of the executed plan)
+
+    def _env_H(self, replan_envs):
+        """Per-env plan lengths (blocks) and their batch max."""
+        if self.pm_H_auto:
+            if self.pm_exec_k > 0:
+                # closed-loop: remaining horizon = h0 - executed, carried by steps_left
+                H_env = np.maximum(np.ceil(np.maximum(self._steps_left[replan_envs], 1.0)), 1).astype(int)
+            else:
+                # e2e: the episode's own horizon from the dataset
+                H_env = np.array([max(int(np.ceil(_h0_at(self.horizon0, i))), 1) for i in replan_envs])
+        else:
+            H_env = np.full(len(replan_envs), self.pm_H, dtype=int)
+        return H_env, int(H_env.max())
+
+    def dump_diag(self, path):
+        rows = [r for r in self._diag if r[0] == "plan"]
+        real = [r for r in self._diag if r[0] == "realized"]
+        np.savez(path,
+                 plan=np.array([r[1:] for r in rows], dtype=np.float64),      # call, env, h_left, c0, cb, best_iter, ||delta||
+                 realized=np.array([r[1:] for r in real], dtype=np.float64))  # call, env, promised, realized
+        if getattr(self, "_delta_store", None):
+            first = min(self._delta_store)
+            envs_d, dl = self._delta_store[first]
+            np.savez(path.replace(".npz", "_delta.npz"), envs=np.array(envs_d), delta=dl)
+        if getattr(self, "_plan_store", None):
+            first = min(self._plan_store)
+            envs, u0, ub = self._plan_store[first]
+            np.savez(path.replace(".npz", "_plans.npz"),
+                     envs=np.array(envs), U0=u0, Ubest=ub,
+                     astd=self._astd.cpu().numpy(), amean=self._amean.cpu().numpy())
+        print(f"[graddiag] {len(rows)} plan rows, {len(real)} realized rows -> {path}")
 
     def _policy_rollout(self, window0, win_len0, z_goal_tilt, z_goal_true, steps_left0,
                         H_env=None, H_max=None):
@@ -56,7 +94,7 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedGradPolicy):
         sl = steps_left0.copy()
         device = window0.device
         if H_max is None:
-            H_max = self.grad_H
+            H_max = self.pm_H
         z_steps = []
         blocks, z_term = [], None
         for _h in range(H_max):
@@ -210,8 +248,8 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedGradPolicy):
                             * self._astd + self._amean)
                 plan_raw = plan_raw.reshape(R, Hp * self.action_block, self.action_dim).cpu()
                 for row, env_i in enumerate(replan_envs):
-                    n_i = (min(self.grad_exec_k, int(H_env[row])) if self.grad_exec_k > 0
-                           else (int(H_env[row]) if self.grad_exec_full else 1))
+                    n_i = (min(self.pm_exec_k, int(H_env[row])) if self.pm_exec_k > 0
+                           else (int(H_env[row]) if self.pm_exec_full else 1))
                     for t in range(n_i * self.action_block):
                         self._action_buffer[env_i].append(plan_raw[row, t])
                     self._steps_left[env_i] = max(self._steps_left[env_i] - float(n_i), 1.0)
