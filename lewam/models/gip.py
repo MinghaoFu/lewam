@@ -420,7 +420,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_candgrad", "unified_dgoal", "unified_cemdiag"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -443,6 +443,68 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_propose=str(ge.get("cem_propose", "cem")),
                 cem_cost=str(ge.get("cem_cost", "final")),
                 cem_dyn_mode=str(ge.get("cem_dyn_mode", "auto")),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        if mode == "unified_cemdiag":
+            from lewam.models.grad_mpc import LeWAMUnifiedCEMDiagPolicy
+            return LeWAMUnifiedCEMDiagPolicy(
+                cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
+                cem_iter=int(ge.get("cem_iter", 4)), cem_H=int(ge.get("cem_H", 5)),
+                cem_std=float(ge.get("cem_std", 1.0)),
+                cem_warm=bool(ge.get("cem_warm", False)),
+                cem_state=str(ge.get("cem_state", "c")),
+                cem_exec_full=bool(ge.get("cem_exec_full", False)),
+                cem_cost=str(ge.get("cem_cost", "final")),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        if mode == "unified_dgoal":
+            from lewam.models.grad_mpc import LeWAMUnifiedDGoalPolicy
+            return LeWAMUnifiedDGoalPolicy(
+                dg_steps=int(ge.get("dg_steps", 20)), dg_lr=float(ge.get("dg_lr", 0.02)),
+                dg_clip=float(ge.get("dg_clip", 5.0)), dg_rho=float(ge.get("dg_rho", 0.3)),
+                dg_cost=str(ge.get("dg_cost", "terminal")),
+                dg_warm=bool(ge.get("dg_warm", False)), dg_pop=int(ge.get("dg_pop", 1)),
+                dg_random=bool(ge.get("dg_random", False)),
+                dg_seg=int(ge.get("dg_seg", 0)), dg_k1=int(ge.get("dg_k1", 0)),
+                dg_r_rho=float(ge.get("dg_r_rho", 0.1)),
+                grad_H_auto=bool(ge.get("grad_H_auto", False)),
+                grad_exec_k=int(ge.get("grad_exec_k", 0)),
+                grad_H=int(ge.get("grad_H", 5)),
+                grad_exec_full=bool(ge.get("grad_exec_full", True)),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        if mode == "unified_candgrad":
+            from lewam.models.grad_mpc import LeWAMUnifiedCandGradPolicy
+            return LeWAMUnifiedCandGradPolicy(
+                cand_snapshots=str(ge.get("cand_snapshots", "5,15,50")),
+                cand_pol_K=int(ge.get("cand_pol_K", 3)),
+                judge_noise=float(ge.get("judge_noise", 0.3)),
+                judge_m=int(ge.get("judge_m", 6)),
+                grad_steps=int(ge.get("grad_steps", 50)), grad_lr=float(ge.get("grad_lr", 0.05)),
+                grad_H=int(ge.get("grad_H", 5)), grad_clip=float(ge.get("grad_clip", 10.0)),
+                grad_dyn_mode=str(ge.get("grad_dyn_mode", "auto")),
+                grad_exec_full=bool(ge.get("grad_exec_full", True)),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        if mode == "unified_grad":
+            from lewam.models.grad_mpc import LeWAMUnifiedGradPolicy
+            return LeWAMUnifiedGradPolicy(
+                grad_steps=int(ge.get("grad_steps", 50)), grad_lr=float(ge.get("grad_lr", 0.05)),
+                grad_H=int(ge.get("grad_H", 5)), grad_clip=float(ge.get("grad_clip", 10.0)),
+                grad_action_clip=ge.get("grad_action_clip", None),
+                grad_dyn_mode=str(ge.get("grad_dyn_mode", "auto")),
+                grad_exec_full=bool(ge.get("grad_exec_full", True)),
+                grad_warm=bool(ge.get("grad_warm", True)),
+                grad_noise=float(ge.get("grad_noise", 0.0)),
+                grad_select=str(ge.get("grad_select", "best")),
+                grad_H_auto=bool(ge.get("grad_H_auto", False)),
+                grad_exec_k=int(ge.get("grad_exec_k", 0)),
+                grad_cycle=float(ge.get("grad_cycle", 0.0)), grad_dis=float(ge.get("grad_dis", 0.0)),
+                grad_tr=float(ge.get("grad_tr", 0.0)),
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
