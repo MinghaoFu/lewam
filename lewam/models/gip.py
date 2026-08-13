@@ -420,7 +420,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_dgoal"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc", "unified_dgoal"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -447,17 +447,20 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
         # ---- Prompt-MPC (OURS; paper name). Per-episode prompt delta on the goal latent
-        # through the frozen policy. dg_seg>0 = per-step prompts; dg_cost=anymin = the
+        # through the frozen policy. pm_seg>0 = per-step prompts; pm_cost=anymin = the
         # reach-anytime-aligned cost (task-completion default).
-        if mode == "unified_dgoal":
-            from lewam.models.grad_mpc import LeWAMUnifiedDGoalPolicy
-            return LeWAMUnifiedDGoalPolicy(
-                dg_steps=int(ge.get("dg_steps", 20)), dg_lr=float(ge.get("dg_lr", 0.02)),
-                dg_clip=float(ge.get("dg_clip", 5.0)), dg_rho=float(ge.get("dg_rho", 0.3)),
-                dg_cost=str(ge.get("dg_cost", "terminal")),
-                dg_random=bool(ge.get("dg_random", False)),
-                dg_seg=int(ge.get("dg_seg", 0)),
-                dg_r_rho=float(ge.get("dg_r_rho", 0.1)),
+        # "unified_dgoal" and dg_* keys are LEGACY ALIASES for in-flight sweeps -- drop after.
+        if mode in ("unified_prompt_mpc", "unified_dgoal"):
+            from lewam.models.prompt_mpc import LeWAMUnifiedPromptMPCPolicy
+            def _pm(new_key, old_key, default):
+                return ge.get(new_key, ge.get(old_key, default))
+            return LeWAMUnifiedPromptMPCPolicy(
+                pm_steps=int(_pm("pm_steps", "dg_steps", 20)), pm_lr=float(_pm("pm_lr", "dg_lr", 0.02)),
+                pm_clip=float(_pm("pm_clip", "dg_clip", 5.0)), pm_rho=float(_pm("pm_rho", "dg_rho", 0.3)),
+                pm_cost=str(_pm("pm_cost", "dg_cost", "terminal")),
+                pm_random=bool(_pm("pm_random", "dg_random", False)),
+                pm_seg=int(_pm("pm_seg", "dg_seg", 0)),
+                pm_r_rho=float(_pm("pm_r_rho", "dg_r_rho", 0.1)),
                 grad_H_auto=bool(ge.get("grad_H_auto", False)),
                 grad_exec_k=int(ge.get("grad_exec_k", 0)),
                 grad_H=int(ge.get("grad_H", 5)),
