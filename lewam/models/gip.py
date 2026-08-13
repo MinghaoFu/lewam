@@ -420,7 +420,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -443,6 +443,42 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_propose=str(ge.get("cem_propose", "cem")),
                 cem_cost=str(ge.get("cem_cost", "final")),
                 cem_dyn_mode=str(ge.get("cem_dyn_mode", "auto")),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- Prompt-MPC (OURS; paper name). Per-episode prompt delta on the goal latent
+        # through the frozen policy. pm_seg>0 = per-step prompts; pm_cost=anymin = the
+        # reach-anytime-aligned cost (task-completion default).
+        if mode == "unified_prompt_mpc":
+            from lewam.models.prompt_mpc import LeWAMUnifiedPromptMPCPolicy
+            return LeWAMUnifiedPromptMPCPolicy(
+                pm_steps=int(ge.get("pm_steps", 20)), pm_lr=float(ge.get("pm_lr", 0.02)),
+                pm_clip=float(ge.get("pm_clip", 5.0)), pm_rho=float(ge.get("pm_rho", 0.3)),
+                pm_cost=str(ge.get("pm_cost", "terminal")),
+                pm_random=bool(ge.get("pm_random", False)),
+                pm_seg=int(ge.get("pm_seg", 0)),
+                pm_r_rho=float(ge.get("pm_r_rho", 0.1)),
+                pm_H=int(ge.get("pm_H", 5)),
+                pm_H_auto=bool(ge.get("pm_H_auto", False)),
+                pm_exec_k=int(ge.get("pm_exec_k", 0)),
+                pm_exec_full=bool(ge.get("pm_exec_full", True)),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- Gradient MPC (Jyothir et al., arXiv:2312.17227 lineage): the action sequence
+        # is the parameter, warm-started from the policy.
+        if mode == "unified_grad":
+            from lewam.models.grad_mpc import LeWAMUnifiedGradPolicy
+            return LeWAMUnifiedGradPolicy(
+                grad_steps=int(ge.get("grad_steps", 50)), grad_lr=float(ge.get("grad_lr", 0.05)),
+                grad_H=int(ge.get("grad_H", 5)), grad_clip=float(ge.get("grad_clip", 10.0)),
+                grad_action_clip=ge.get("grad_action_clip", None),
+                grad_dyn_mode=str(ge.get("grad_dyn_mode", "auto")),
+                grad_exec_full=bool(ge.get("grad_exec_full", True)),
+                grad_warm=bool(ge.get("grad_warm", True)),
+                grad_H_auto=bool(ge.get("grad_H_auto", False)),
+                grad_exec_k=int(ge.get("grad_exec_k", 0)),
+                grad_tr=float(ge.get("grad_tr", 0.0)),
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)

@@ -5,6 +5,10 @@ Reuses eval.py's env/dataset machinery; the policy is chosen by gip_eval.mode:
   unified_policy        LeWAM-Unified reactive: the goal-conditioned action head run directly (the
                         representation channel; never touches the dynamics)
   unified_cem           LeWAM-Unified CEM: the dynamics head rolls candidate action blocks to the goal
+  unified_grad          Gradient MPC: gc_head warm-start refined by Adam on the frozen dynamics
+                        (terminal-latent cost); plan = best iterate by model cost
+  unified_prompt_mpc    Prompt-MPC (ours): a per-episode prompt delta on the goal latent, optimized
+                        through the frozen policy; pm_cost=anymin aligns the cost with reach-anytime
   split_policy          LeWAM-Split reactive action head
   gcidm                 frozen-LeWM + GCIDM head baseline
   bc (default)          a plain GIP action head run as a reactive policy
@@ -315,7 +319,7 @@ def run(cfg: DictConfig):
         model._split_cfg = split_cfg
         adim = int(split_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
-    elif mode in ("unified_policy", "unified_cem"):
+    elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
         model, uni_cfg = gip.load_lewam_unified_model(cfg.policy, which=cfg.get("seq_which", "best"))
@@ -430,6 +434,9 @@ def run(cfg: DictConfig):
     if _dump and getattr(policy, "log_latents", False):
         policy.dump_latents(_dump)
         print(f"[divprobe] dumped executed latents -> {_dump}")
+    _gd = cfg.get("gip_eval", {}).get("grad_diag", "")
+    if _gd and hasattr(policy, "dump_diag"):
+        policy.dump_diag(_gd)
 
     with (results_path / f"{mode}_{cfg.policy}_results.txt").open("a") as f:
         f.write("\n==== CONFIG ====\n")
