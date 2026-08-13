@@ -433,7 +433,11 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                       action_dim=adim // action_block, horizon0=_as_h0(horizon0),
                       H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
                       process=process, transform=transform,
-                      ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))))
+                      ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
+                      exec_blocks=int(ge.get("exec_blocks", 1)))
+        # flow head: eval-time ODE step-count override (train default 8)
+        if ge.get("flow_steps") and hasattr(model.gc_head, "n_steps"):
+            model.gc_head.n_steps = int(ge["flow_steps"])
         if mode == "unified_cem":
             return LeWAMUnifiedCEMPolicy(
                 cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
@@ -862,6 +866,9 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         # ctx_cap > 0 -> aggregate only the LAST ctx_cap cached latents (i.e. sliding window)
         # 0 = full causal history from episode start (default behaviour).
         self.ctx_cap = int(kwargs.pop("ctx_cap", 0))
+        # exec_blocks > 1 -> execute that many chunk blocks per replan (chunk-trained flow head
+        # only); 1 = replan every block, the default
+        self.exec_blocks = int(kwargs.pop("exec_blocks", 1))
         # log_latents -> record the executed per-obs-step current latent + goal latent for probes
         # (e.g., ompare ctx_cap=1 vs full rollouts).
         self.log_latents = bool(kwargs.pop("log_latents", False))
@@ -985,15 +992,24 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             if self.ablate_horizon:
                 h_norm = torch.zeros_like(h_norm)
 
-            z_blk = self.model.gc_head.point(self.model.gc_head(c_last, z_g, h_norm))   # (R, blk) z-scored (mixture mean for gmm)
+            head_out = self.model.gc_head(c_last, z_g, h_norm)
+            if self.exec_blocks > 1 and hasattr(self.model.gc_head, "_integrate"):
+                chunk = self.model.gc_head._integrate(head_out, K=1)[:, 0]   # (R, H, blk) one ODE draw
+                n_exec = min(self.exec_blocks, chunk.shape[1])
+                z_blocks = [chunk[:, b] for b in range(n_exec)]              # z-scored blocks, in order
+            else:
+                z_blocks = [self.model.gc_head.point(head_out)]              # (R, blk)
+                n_exec = 1
             for row, i in enumerate(replan):
-                self._last_blk[i] = z_blk[row].detach()            # z-scored, next frame's prev
-            raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
-                   * self._astd + self._amean)                     # un-z-score per raw dim
-            raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
+                self._last_blk[i] = z_blocks[-1][row].detach()     # last EXECUTED block, next frame's prev
+            for z_blk in z_blocks:
+                raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
+                       * self._astd + self._amean)                 # un-z-score per raw dim
+                raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
+                for row, i in enumerate(replan):
+                    self._action_buffer[i].extend(raw[row])
             for row, i in enumerate(replan):
-                self._action_buffer[i].extend(raw[row])
-                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)  # one obs-step consumed
+                self._steps_left[i] = max(self._steps_left[i] - float(n_exec), 1.0)  # obs-steps consumed
 
         action = torch.full((num_envs, self.action_dim), float("nan"))
         for i in range(num_envs):
