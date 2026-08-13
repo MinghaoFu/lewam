@@ -1,4 +1,4 @@
-"""Prompt-MPC (mode: unified_prompt_mpc; legacy alias unified_dgoal) -- ours.
+"""Prompt-MPC (mode: unified_prompt_mpc) -- ours.
 
 A per-episode prompt vector delta is added to the goal latent fed to the frozen
 goal-conditioned policy head, and optimized at test time against the frozen world model's

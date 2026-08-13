@@ -420,7 +420,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc", "unified_dgoal"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -449,22 +449,19 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
         # ---- Prompt-MPC (OURS; paper name). Per-episode prompt delta on the goal latent
         # through the frozen policy. pm_seg>0 = per-step prompts; pm_cost=anymin = the
         # reach-anytime-aligned cost (task-completion default).
-        # "unified_dgoal" and dg_* keys are LEGACY ALIASES for in-flight sweeps -- drop after.
-        if mode in ("unified_prompt_mpc", "unified_dgoal"):
+        if mode == "unified_prompt_mpc":
             from lewam.models.prompt_mpc import LeWAMUnifiedPromptMPCPolicy
-            def _pm(new_key, old_key, default):
-                return ge.get(new_key, ge.get(old_key, default))
             return LeWAMUnifiedPromptMPCPolicy(
-                pm_steps=int(_pm("pm_steps", "dg_steps", 20)), pm_lr=float(_pm("pm_lr", "dg_lr", 0.02)),
-                pm_clip=float(_pm("pm_clip", "dg_clip", 5.0)), pm_rho=float(_pm("pm_rho", "dg_rho", 0.3)),
-                pm_cost=str(_pm("pm_cost", "dg_cost", "terminal")),
-                pm_random=bool(_pm("pm_random", "dg_random", False)),
-                pm_seg=int(_pm("pm_seg", "dg_seg", 0)),
-                pm_r_rho=float(_pm("pm_r_rho", "dg_r_rho", 0.1)),
-                pm_H=int(_pm("pm_H", "grad_H", 5)),
-                pm_H_auto=bool(_pm("pm_H_auto", "grad_H_auto", False)),
-                pm_exec_k=int(_pm("pm_exec_k", "grad_exec_k", 0)),
-                pm_exec_full=bool(_pm("pm_exec_full", "grad_exec_full", True)),
+                pm_steps=int(ge.get("pm_steps", 20)), pm_lr=float(ge.get("pm_lr", 0.02)),
+                pm_clip=float(ge.get("pm_clip", 5.0)), pm_rho=float(ge.get("pm_rho", 0.3)),
+                pm_cost=str(ge.get("pm_cost", "terminal")),
+                pm_random=bool(ge.get("pm_random", False)),
+                pm_seg=int(ge.get("pm_seg", 0)),
+                pm_r_rho=float(ge.get("pm_r_rho", 0.1)),
+                pm_H=int(ge.get("pm_H", 5)),
+                pm_H_auto=bool(ge.get("pm_H_auto", False)),
+                pm_exec_k=int(ge.get("pm_exec_k", 0)),
+                pm_exec_full=bool(ge.get("pm_exec_full", True)),
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
