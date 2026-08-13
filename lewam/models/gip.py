@@ -446,6 +446,8 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- DIAGNOSTIC ONLY (not a method/baseline): instrumented warm-CEM replica;
+        # measures how deep CEM descends the shared cost. Paper: mechanism section only.
         if mode == "unified_cemdiag":
             from lewam.models.grad_mpc import LeWAMUnifiedCEMDiagPolicy
             return LeWAMUnifiedCEMDiagPolicy(
@@ -459,6 +461,9 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- Prompt-MPC (OURS; paper name). Per-episode prompt delta on the goal latent
+        # through the frozen policy. dg_seg>0 = per-step prompts; dg_cost=anymin = the
+        # reach-anytime-aligned cost (task-completion default).
         if mode == "unified_dgoal":
             from lewam.models.grad_mpc import LeWAMUnifiedDGoalPolicy
             return LeWAMUnifiedDGoalPolicy(
@@ -476,6 +481,8 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- DIAGNOSTIC ONLY (refuted defense, judge 0/50): candidate pool + noise-
+        # smoothed judge. Kept to reproduce the negative result; not a baseline.
         if mode == "unified_candgrad":
             from lewam.models.grad_mpc import LeWAMUnifiedCandGradPolicy
             return LeWAMUnifiedCandGradPolicy(
@@ -490,6 +497,9 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- Gradient MPC baseline (Jyothir et al., arXiv:2312.17227 lineage): the action
+        # sequence is the parameter, warm-started from the policy. grad_steps=0 degenerates
+        # to Joint Imagination (JI): one forward pass, no search.
         if mode == "unified_grad":
             from lewam.models.grad_mpc import LeWAMUnifiedGradPolicy
             return LeWAMUnifiedGradPolicy(
