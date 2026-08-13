@@ -100,6 +100,18 @@ def run(cfg: DictConfig):
         cfg.eval.eval_budget = 2 * int(max(goal_offsets))
         print(f"[full-traj] {len(goal_offsets)} episodes, offsets "
               f"{min(goal_offsets)}..{max(goal_offsets)}, eval_budget={cfg.eval.eval_budget}")
+
+    # Slice into shards only after eval_budget is set above, so every shard shares the full-set budget.
+    shard_count = int(cfg.get("gip_eval", {}).get("shard_count", 1))
+    shard_idx = int(cfg.get("gip_eval", {}).get("shard_idx", 0))
+    if shard_count > 1:
+        sl = slice(shard_idx, None, shard_count)
+        episodes, starts = episodes[sl], starts[sl]
+        if goal_offsets is not None:
+            goal_offsets = goal_offsets[sl]
+        cfg.world.num_envs = len(episodes)
+        print(f"[shard] {shard_idx}/{shard_count}: {len(episodes)} of the full pick-list", flush=True)
+
     assert (
         cfg.plan_config.horizon * cfg.plan_config.action_block <= cfg.eval.eval_budget
     ), "horizon*action_block must be <= eval_budget"
@@ -424,6 +436,17 @@ def run(cfg: DictConfig):
             print(f"[GIP] final-step decomposition unavailable: {_ex}")
     print(f"==== GIP {mode} RESULTS ====")
     print(metrics)
+
+    # Dump this shard's successes; a merge step pools them into the global SR.
+    if shard_count > 1:
+        import json as _json
+        succ = np.asarray(metrics.get("episode_successes", [])).astype(bool).tolist()
+        shard_file = results_path / f"{mode}_{cfg.policy}_shard{shard_idx}of{shard_count}.json"
+        with shard_file.open("w") as f:
+            _json.dump({"shard_idx": shard_idx, "shard_count": shard_count,
+                        "episode_successes": succ, "n": len(succ),
+                        "n_success": int(sum(succ))}, f)
+        print(f"[shard] wrote {shard_file} ({int(sum(succ))}/{len(succ)})", flush=True)
 
     # trajectory-divergence probe: dump the executed per-obs-step latent trajectory if requested
     _dump = cfg.get("gip_eval", {}).get("dump_latents", "")
