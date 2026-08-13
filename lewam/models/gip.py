@@ -434,7 +434,8 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                       H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
                       process=process, transform=transform,
                       ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
-                      exec_blocks=int(ge.get("exec_blocks", 1)))
+                      exec_blocks=int(ge.get("exec_blocks", 1)),
+                      exec_actions=int(ge.get("exec_actions", 0)))
         # flow head: eval-time ODE step-count override (train default 8)
         if ge.get("flow_steps") and hasattr(model.gc_head, "n_steps"):
             model.gc_head.n_steps = int(ge["flow_steps"])
@@ -869,6 +870,10 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         # exec_blocks > 1 -> execute that many chunk blocks per replan (chunk-trained flow head
         # only); 1 = replan every block, the default
         self.exec_blocks = int(kwargs.pop("exec_blocks", 1))
+        # exec_actions < action_block -> execute only the first N raw actions of the block, then
+        # replan (more frequent replanning). Context history then accumulates at N-raw spacing
+        # vs the frameskip spacing seen in training.
+        self.exec_actions = int(kwargs.pop("exec_actions", 0))
         # log_latents -> record the executed per-obs-step current latent + goal latent for probes
         # (e.g., ompare ctx_cap=1 vs full rollouts).
         self.log_latents = bool(kwargs.pop("log_latents", False))
@@ -1002,14 +1007,16 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
                 n_exec = 1
             for row, i in enumerate(replan):
                 self._last_blk[i] = z_blocks[-1][row].detach()     # last EXECUTED block, next frame's prev
+            take = self.exec_actions if 0 < self.exec_actions < self.action_block else self.action_block
             for z_blk in z_blocks:
                 raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
                        * self._astd + self._amean)                 # un-z-score per raw dim
                 raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
                 for row, i in enumerate(replan):
-                    self._action_buffer[i].extend(raw[row])
+                    self._action_buffer[i].extend(raw[row][:take])
             for row, i in enumerate(replan):
-                self._steps_left[i] = max(self._steps_left[i] - float(n_exec), 1.0)  # obs-steps consumed
+                consumed = float(n_exec) * take / self.action_block
+                self._steps_left[i] = max(self._steps_left[i] - consumed, 1.0)  # obs-steps consumed
 
         action = torch.full((num_envs, self.action_dim), float("nan"))
         for i in range(num_envs):
