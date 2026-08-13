@@ -5,9 +5,10 @@ Reuses eval.py's env/dataset machinery; the policy is chosen by gip_eval.mode:
   unified_policy        LeWAM-Unified reactive: the goal-conditioned action head run directly (the
                         representation channel; never touches the dynamics)
   unified_cem           LeWAM-Unified CEM: the dynamics head rolls candidate action blocks to the goal
-  unified_grad          LeWAM-Unified Gradient MPC: gc_head warm-start refined by Adam on the frozen
-                        dynamics (terminal-latent cost); plan = best iterate by model cost
-                        judged by a noise-smoothed terminal cost; floor = the unrefined warm start
+  unified_grad          Gradient MPC: gc_head warm-start refined by Adam on the frozen dynamics
+                        (terminal-latent cost); plan = best iterate by model cost
+  unified_prompt_mpc    Prompt-MPC (ours): a per-episode prompt delta on the goal latent, optimized
+                        through the frozen policy; pm_cost=anymin aligns the cost with reach-anytime
   split_policy          LeWAM-Split reactive action head
   gcidm                 frozen-LeWM + GCIDM head baseline
   bc (default)          a plain GIP action head run as a reactive policy
