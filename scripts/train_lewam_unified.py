@@ -556,6 +556,9 @@ def main():
     ap.add_argument("--ablate_dynamics", action="store_true",
                         help="disable dynamics loss (w_dyn=0), train only a policy. "
                              "Behavior is idential to w_dyn=0")
+    ap.add_argument("--detach_dyn_target", action="store_true",
+                        help="stop-grad the dynamics target so it shapes the encoder only through "
+                             "the input, not by making its own next latent easy to predict")
     args = ap.parse_args()
     if args.latent_h and args.ablate_horizon:
         raise SystemExit("--latent_h and --ablate_horizon are different arms; pick one")
@@ -936,8 +939,10 @@ def main():
                                               actions.reshape(B * max_pos, actions.shape[-1]).float())
         loss_act = (aloss * valid.reshape(-1).float()).sum() / n_valid
 
-        # dynamics loss
-        loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)
+        # dynamics loss. detach_dyn_target: encoder gets no gradient from being the target, so the
+        # dynamics learns the transition without reshaping the latents to make itself easy to predict.
+        dyn_tgt = next_tgt.detach() if args.detach_dyn_target else next_tgt
+        loss_dyn = ((z_pred - dyn_tgt) ** 2 * loss_mask).sum() / (n_valid * D)
 
         # DAgger for dynamics 
         if train and OP is not None:
