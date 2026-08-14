@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from lewam.models.module import AdaLNBlock, sinusoidal_embedding, ViTEncoder
+from lewam.models.module import AdaLNBlock, sinusoidal_embedding, VisionEncoder
 
 class GCHead(nn.Module):
     """cat[state, z_goal] -> 3 AdaLN blocks -> action head. state is one z_dim vector by default (the
@@ -43,9 +43,6 @@ class GCHead(nn.Module):
         self.action_dim = int(action_dim)
         self.head_type = str(head_type)
         self.n_mix = int(n_mix)
-        # num_chunks > 1: the head predicts that many consecutive action blocks; block 1 is what
-        # point()/sample() return (the executed action), the rest are extra supervision. The
-        # chunked loss lives in the trainer; action_loss here assumes width-matched targets.
         self.num_chunks = int(num_chunks)
         assert not (self.head_type == "gmm" and self.num_chunks > 1), \
             "gmm models a joint block distribution; chunked masking is not decomposable"
@@ -70,8 +67,6 @@ class GCHead(nn.Module):
             self.h_readout = nn.Linear(h_code_dim, 1)
             self.code_mlp = nn.Sequential(
                 nn.Linear(h_code_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-            # usage histogram -> code_stats(); a collapsed codebook makes this arm a no-h arm with
-            # extra parameters, which has to be visible in the log rather than inferred from SR.
             self.register_buffer("h_code_count", torch.zeros(self.h_codes))
         self.block1 = AdaLNBlock(in_dim, hidden_dim, cond_dim, dropout)
         self.block2 = AdaLNBlock(hidden_dim, hidden_dim, cond_dim, dropout)
@@ -273,7 +268,7 @@ class LeWAMSplit(nn.Module):
     def __init__(self, encoder_size="tiny", embed_dim=192, action_dim=25, hidden_dim=512,
                  img_size=224, dropout=0.1, proj_hidden=None):
         super().__init__()
-        self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
+        self.encoder = VisionEncoder(size=encoder_size, output_type="cls",
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden)
         self.gc_head = GCHead(z_dim=embed_dim, action_dim=action_dim,

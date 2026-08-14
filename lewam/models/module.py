@@ -396,8 +396,8 @@ class DiffusionHead(nn.Module):
         return x_t
 
 
-class ViTEncoder(nn.Module):
-    """ViT encoder + projector"""
+class VisionEncoder(nn.Module):
+    """Visual encoder"""
 
     def __init__(self, img_size=224, size="tiny", output_type="cls",
                 output_dim=192, proj_mlp_scale=4, proj_hidden=None,
@@ -411,7 +411,6 @@ class ViTEncoder(nn.Module):
                                   pretrained=False, use_mask_token=False)
             mlp_in = self.vit.config.hidden_size
         elif backbone == "dinov3":
-            # FROZEN pretrained DINOv3
             import timm
             size_to_model = {
                 "tiny": "vit_small_patch16_dinov3",  # a true "tiny" does not exist
@@ -419,8 +418,8 @@ class ViTEncoder(nn.Module):
                 "base": "vit_base_patch16_dinov3",
                 "large": "vit_large_patch16_dinov3"
             }
-            if backbone_ckpt == "random":
-                # architecture only; the caller restores weights from a full-model checkpoint
+            if backbone_ckpt == "defer":
+                # architecture only; caller restores weights from a full-model checkpoint
                 self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
             elif backbone_ckpt:
                 self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
@@ -444,8 +443,6 @@ class ViTEncoder(nn.Module):
         # maps to representation space using a MLP with Batch Normalization.
         # necessary because the final ViT layer applies Layer Normalization, which prevents
         # SIGReg being optimized effectively.
-        # proj_hidden overrides proj_mlp_scale*output_dim -- lets an eval loader rebuild an
-        # older checkpoint whose projector width differs from the current default.
         self.projector = MLP(input_dim=mlp_in, output_dim=output_dim,
                              hidden_dim=(proj_hidden if proj_hidden else proj_mlp_scale * output_dim),
                              norm_fn=nn.BatchNorm1d, norm_first=False)
@@ -453,7 +450,7 @@ class ViTEncoder(nn.Module):
     def train(self, mode=True):
         super().train(mode)
         if self.backbone == "dinov3":
-            self.vit.eval()  # keep the frozen pretrained backbone in eval mode always
+            self.vit.eval()
         return self
 
     def _spatial_softmax(self, pixels):
@@ -478,7 +475,7 @@ class ViTEncoder(nn.Module):
             if self.output_type == "cls":
                 return self.projector(out.last_hidden_state[:, 0])  # (N, D)
             return self.projector(out.last_hidden_state[:, 1:])  # (N, n_patch, D)
-        # frozen pretrained backbone (timm): pooled CLS features, no graph through the backbone
+        # frozen pretrained backbone
         with torch.no_grad():
             feat = self.vit(pixels)  # (N, num_features)
         return self.projector(feat)

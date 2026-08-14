@@ -17,7 +17,7 @@ import math
 import torch
 from torch import nn
 
-from lewam.models.module import MLP, Block, ConditionalBlock, ViTEncoder
+from lewam.models.module import MLP, Block, ConditionalBlock, VisionEncoder
 from lewam.models.lewam_split import GCHead, GoalCondDynamics
 
 
@@ -168,14 +168,14 @@ class LeWAMUnified(nn.Module):
         """
         Args:
             img_size (int): input image side length.
-            encoder_size (str): ViT backbone size passed to ViTEncoder ("tiny", "small", "base", or "large").
-            encoder_backbone (str): ViTEncoder backbone source.
+            encoder_size (str): ViT backbone size passed to VisionEncoder ("tiny", "small", "base", or "large").
+            encoder_backbone (str): VisionEncoder backbone source.
             encoder_ckpt (str, optional): backbone checkpoint path to pretrained weights
             embed_dim (int): shared latent width (encoder output = aggregator = gc_head/dynamics input).
             action_dim (int): raw action-block dim.
             hidden_dim (int): hidden width for gc_head/dynamics/idm_head MLPs.
             dropout (float): dropout used across encoder/aggregator/heads.
-            proj_hidden (int, optional): encoder projector hidden width; None -> ViTEncoder default.
+            proj_hidden (int, optional): encoder projector hidden width; None -> VisionEncoder default.
             agg_depth (int): number of StateAggregator transformer blocks.
             agg_heads (int): number of StateAggregator attention heads.
             agg_residual (bool): if True, c_t = z_t + Agg(z_t) (Agg is zero-init)
@@ -204,7 +204,7 @@ class LeWAMUnified(nn.Module):
         self.agg_residual = bool(agg_residual)
         self.agg_gate = bool(agg_gate) and self.agg_residual  # gate only modulates the residual
         self.agg_action_cond = bool(agg_action_cond)
-        self.encoder = ViTEncoder(size=encoder_size, output_type="cls",
+        self.encoder = VisionEncoder(size=encoder_size, output_type="cls",
                                   output_dim=embed_dim, img_size=img_size,
                                   proj_hidden=proj_hidden,
                                   backbone=encoder_backbone, backbone_ckpt=encoder_ckpt)
@@ -216,17 +216,13 @@ class LeWAMUnified(nn.Module):
             zero_init=self.agg_residual,
             action_cond=self.agg_action_cond, action_dim=action_dim)
         if self.agg_gate:
-            # input-dependent sigmoid gate on the correction; bias zero-init -> g == 0.5 at init.
+            # input-dependent sigmoid gate on the context
             self.gate_proj = nn.Linear(embed_dim, embed_dim)
             nn.init.zeros_(self.gate_proj.bias)
         # policy / action head
         self.flow_H = int(flow_H)
-        # crop_size > 0: trained on crop_size x crop_size crops; encode() center-crops any larger
-        # input (eval feeds full frames), the trainer random-crops before encode.
         self.crop_size = int(crop_size)
         if head_type == "flow":
-            # flow-matching action-chunk head (dynamics unchanged). H=1 fits the single-block data path;
-            # H>1 (chunking) needs the trainer to feed (N,H,d) targets + mask.
             from lewam.models.flow_policy_head import FlowPolicyHead
             self.gc_head = FlowPolicyHead(z_dim=embed_dim, action_dim=action_dim,
                                           hidden_dim=hidden_dim, dropout=dropout, H=self.flow_H,
@@ -261,7 +257,6 @@ class LeWAMUnified(nn.Module):
             Tensor: (N, embed_dim) latents.
         """
         if self.crop_size and pixels.shape[-1] > self.crop_size:
-            # crop-trained model fed full frames (eval): deterministic center crop
             m = (pixels.shape[-1] - self.crop_size) // 2
             pixels = pixels[..., m:m + self.crop_size, m:m + self.crop_size]
         return self.encoder(pixels)
@@ -412,8 +407,7 @@ class LeWAMUnified(nn.Module):
         tot_n = states.new_zeros(())
         for k in range(1, K):
             # per-anchor sequence copy: seq[:, t] starts as the real states, then positions t+1..t+k
-            # are overwritten with this anchor's own rollout predictions (causal read at t+k ignores
-            # the untouched positions > t+k, so the real states left there are inert).
+            # are overwritten with this anchor's own rollout predictions
             seq = states.unsqueeze(1).expand(B, L, L, D).clone()      # (B, anchor, pos, D)
             for j in range(1, k + 1):
                 keep = (idx + j) <= (L - 1)                           # in-range positions only

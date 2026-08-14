@@ -54,8 +54,6 @@ class FlowPolicyHead(nn.Module):
         super().__init__()
         self.action_dim = int(action_dim)
         self.H = int(H)
-        # drop_goal: ignore the incoming z_goal and condition on a learned constant instead
-        # (unconditional-policy arm; the goal pathway params stay so checkpoints stay comparable)
         self.drop_goal = bool(drop_goal)
         if self.drop_goal:
             self.null_goal = nn.Parameter(torch.zeros(z_dim))

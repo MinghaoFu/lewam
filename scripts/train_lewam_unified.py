@@ -147,22 +147,14 @@ def sample_goal_offsets(n_pos, frames_to_terminal, h_max, p_terminal_goal, p_sha
     RANDOM mode (otherwise): per position p, draw h~U[1,h_max]; goal offset = p+h clamped to the
     terminal frame -- the split FramePairDataset's sample-then-clamp, per position.
 
-    The ceiling everywhere is frames_to_terminal, so no goal lands past task completion. For
-    caches built without a terminal index (and all goal-reach datasets) the terminal frame IS the
-    episode's last frame, recovering the old episode-end clamp exactly.
-
-    close_bias>0 skews the horizon draw toward SMALL h (more close-to-goal supervision, where the
-    precision-limited tasks plateau): h = 1 + floor((h_max-1) * u^(1+close_bias)), u~U[0,1];
-    close_bias=0 recovers the uniform U[1,h_max]. Higher bias -> more mass near h=1.
-
     Args:
         n_pos (int): number of decision positions in this window.
         frames_to_terminal (int): obs-frames from the window start to the episode's terminal
             frame (the clamp ceiling for goal_offsets); >= n_pos by the anchor filter.
         h_max (int): max horizon (obs-steps) to draw h from.
-        p_terminal_goal (float): probability of TERMINAL mode (see above).
+        p_terminal_goal (float): probability of TERMINAL mode.
         p_shared (float): probability of SHARED mode among non-TERMINAL windows.
-        close_bias (float): >0 skews h toward small values (see above); 0 = uniform U[1,h_max].
+        close_bias (float): >0 skews h toward small values; 0 = uniform U[1,h_max].
 
     Returns:
         tuple: (goal_offsets (n_pos,) long, horizon (n_pos,) long, goal_at_terminal (n_pos,)
@@ -402,67 +394,40 @@ def main():
     ap.add_argument("--H_max", type=int, default=50,
                     help="max goal distance (horizon) in obs-steps (no frameskip); "
                          "each goal is at horizon h~U[1,H_max], clamped to the episode's "
-                         "terminal frame. "
-                         "Decoupled from the window length (see --context_len); does not affect "
-                         "memory (goals are looked up per position, not loaded as a tail)")
+                         "terminal frame.")
     ap.add_argument("--ablate_horizon", action="store_true",
                     help="drop the horizon conditioning: h_norm is fed as 0 everywhere. "
-                         "Hindsight h is the TRUE remaining distance to the relabelled "
-                         "goal, so conditioning on it hands the policy privileged "
-                         "information no deployment has (and under full-traj it saturates "
-                         "to a constant anyway). Recorded in the run config so eval picks "
-                         "it up automatically.")
+                         "Recorded in the run config so eval picks it up automatically.")
     ap.add_argument("--context_len", type=int, default=5,
                     help="decision points per context window = the aggregator's max sequence length "
-                         "at train (eval defaults its ctx_cap to this). Frames per item = "
-                         "2*context_len+1, so batch * context_len determines GPU memory")
+                         "at train (eval defaults its ctx_cap to this).")
     ap.add_argument("--anchor_rate", type=str, default="obs", choices=["obs", "raw"],
-                    help="an ANCHOR is the frame index where a training window starts (its first "
-                         "decision point). obs (default): anchors only on the frameskip grid, as "
-                         "stored by today's cache. raw: anchors at EVERY raw frame -- windows, "
-                         "goals and dynamics targets still stride by frameskip, but from any "
-                         "phase, so every transition trains under all block alignments (~5x the "
-                         "positions). Needs a cache built with make_preload_cache "
-                         "--anchor_rate raw (uint8 frames, per-step actions, _raw tag).")
+                    help="an ANCHOR is the frame index where a training window starts."
+                         "obs (default): anchors sampled every `frameskip` frame "
+                         "raw: anchors at every raw frame "
+                         "(goals and dynamics targets still stride by frameskip).")
     ap.add_argument("--num_chunks", type=int, default=1,
-                    help="consecutive frameskip-blocks the policy predicts per position (DP-style "
-                         "chunking). Block 1 feeds dynamics and is what eval executes; later "
-                         "blocks are extra BC supervision, masked past the window/terminal. "
-                         "mse head only -- the flow head chunks via --flow_H instead.")
+                    help="consecutive frameskip-sized blocks the policy predicts.")
     ap.add_argument("--drop_goal", action="store_true",
                     help="unconditional-policy arm: the head ignores z_goal and conditions on a "
-                         "learned constant instead. Goal frames are still loaded/encoded (dead "
-                         "compute, kept for pipeline parity); recorded in the config so eval "
-                         "rebuilds the same head.")
+                         "learned constant instead.")
     ap.add_argument("--crop_aug", type=int, default=0,
-                    help="crop size for random-crop augmentation (0 = off; e.g. 202 from 224). "
-                         "One random offset per window item covers its context frames AND their "
-                         "next-frame dynamics targets (same-crop keeps the target latent "
-                         "predictable); the goal frame gets an independent offset. Val and eval "
-                         "use a deterministic center crop (encode() handles eval).")
+                    help="random-crop augmentation (0 = off; e.g. 202 from 224). "
+                         "One random crop per window (same-crop keeps the dynamics target predictable); "
+                         "Eval uses a deterministic center crop.")
     ap.add_argument("--resume", action="store_true",
-                    help="resume from run_dir/lewam_unified_full.pt (model+optimizer+scheduler+"
-                         "epoch+RNG, saved every epoch): a killed pod loses at most one epoch. "
-                         "Skips the finished-run refusal. Resumed runs are statistically "
-                         "equivalent, not bitwise (DataLoader worker RNG is not restored).")
+                    help="resume from run_dir/lewam_unified_full.pt (model+optimizer+scheduler+epoch+RNG.")
     ap.add_argument("--p_terminal_goal", type=float, default=0.0,
-                    help="fraction of windows whose goal is the episode's TERMINAL frame (task-"
-                         "completion supervision): every position aims at it, horizon = true "
-                         "remaining distance. The terminal frame comes from the cache's "
-                         "frames_to_terminal (make_preload_cache --terminal_state); caches "
-                         "without it fall back to the episode's last frame. 0 = off (old recipe).")
+                    help="fraction of windows whose goal is the episode's terminal frame. "
+                          "(0 = none (full goal-reaching), 1 = all (full task-completion)")
     ap.add_argument("--p_shared", type=float, default=0.0,
                     help="fraction of non-terminal windows trained in SHARED-goal mode (one goal "
                          "ahead of the window, horizons counting down -- the structure eval runs); "
-                         "the rest use per-position independent goals (the split's sampling). "
-                         "0 = all random")
+                         "0 = each goal sampled randomly per position")
     ap.add_argument("--goal_close_bias", type=float, default=0.0,
                     help="skew the training goal-distance draw toward SMALL h (more close-to-goal "
                          "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
                          "Applied to train only; val stays uniform for a comparable metric.")
-    # Restored: the 0497f88 cleanup commented these two flags out but left their three usage
-    # sites (args.perturb_data at ~L707/709, args.perturb_ratio at ~L716/795), so ANY run died at
-    # startup with AttributeError. Defaults keep the feature off, exactly as before the cleanup.
     ap.add_argument("--perturb_data", type=str, default="",
                     help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
                          "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
@@ -516,10 +481,6 @@ def main():
                              "drowned by the z_dim latents (a stronger action pathway).")
     ap.add_argument("--dyn_goal_cond", action="store_true",
                     help="use z_goal in the dynamics head")
-    # dynamics-on-policy-action arm: feed the gc_head's predicted action into the dynamics head
-    # (a convex mix with the ground-truth action, weight alpha ramped by a schedule), closing the
-    # train/rollout covariate gap. The action is still BC-supervised on ground truth, so it stays a
-    # grounded action, not a latent-action model.
     ap.add_argument("--dyn_action_from_policy", action="store_true",
                     help="feed a mix of the policy's predicted action into the dynamics head "
                          "(alpha per --dyn_policy_schedule); off = dynamics on ground-truth actions")
@@ -629,9 +590,9 @@ def main():
     act_std = _zn.std.squeeze(0).cpu().numpy().tolist()
     img_t = get_img_preprocessor(source="pixels", target="pixels", img_size=args.img_size)
 
-    # --exp_tag differentiates otherwise-identical runs. There is no resume path here and
+    # --exp_tag differentiates otherwise-identical runs.
     # run_dir.mkdir(exist_ok=True) writes straight into whatever is there, so a repeated run_name
-    # silently overwrites the earlier experiment's weights and config.
+    # can silently overwrite an earlier experiment's weights and config.
     _tag = args.exp_tag.strip().strip("_")
     _run_name = f"{args.run_name}_{_tag}" if _tag else args.run_name
     if args.run_dir:
@@ -698,22 +659,14 @@ def main():
             _t0 = time.time()
             print(f"[lewam-uni] frames-cache HIT {_fp}"
                   + (" (mmap: low-RAM, fuse-latency)" if args.cache_mmap else ""), flush=True)
-            # mmap keeps large tensor on disk/fuse (kernel-evictable pages)
             Frames = torch.from_numpy(np.load(_fp, mmap_mode="r" if args.cache_mmap else None))
             _aux = np.load(_ap)
-            # cache built by the GC pipeline: A_flat is per-SAMPLE (one action block per
-            # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
-            # A_flat back to a per-FRAME tensor A_frame[t_gidx]=A_flat: every frame the window
-            # dataset reads (frames[start:start+n_pos], all valid starts) is thereby set, so this
-            # is exact -- only episode-last frames stay zero, and their action is never read.
             A_flat = torch.from_numpy(_aux["A_flat"])
             t_gidx = torch.from_numpy(_aux["t_gidx"])
             maxh = torch.from_numpy(_aux["maxh"])
             frames_to_terminal = (torch.from_numpy(_aux["frames_to_terminal"])
                                   if "frames_to_terminal" in _aux.files else None)
             if args.anchor_rate == "raw":
-                # raw cache: A_flat is FRAME-aligned per-step actions; blocks are assembled
-                # per anchor in the dataset. Index arrays are in raw-frame units.
                 assert A_flat.shape[0] == Frames.shape[0], "raw cache A_flat must be frame-aligned"
                 A_frame = A_flat
             else:
@@ -732,8 +685,8 @@ def main():
         frames_to_terminal = None
     terminal_source = "cache"
     if frames_to_terminal is None:
-        # no terminal index -> terminal = the episode's last frame, exactly the old ceiling.
-        # Task-completion datasets whose demos run past success (cube) need a cache patched
+        # no terminal index -> use the episode's last frame.
+        # Task-completion datasets whose demos run past success (cube) need to be updated
         # with make_preload_cache --patch_terminal --terminal_state success.
         frames_to_terminal = maxh.clone()
         terminal_source = "episode_last"
@@ -746,9 +699,7 @@ def main():
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=g)
-    # anchor filter: t ~ U[0, terminal] -- drop starts at/after the terminal frame (post-
-    # completion anchors; only present when the cache carries a success-based terminal index).
-    # Filtering the permutation keeps the split identical to old runs when nothing is dropped.
+    # anchor filter: t ~ U[0, terminal]
     _stride = frameskip if args.anchor_rate == "raw" else 1
     perm = perm[frames_to_terminal[perm] >= _stride]
     n_dropped = n_starts - perm.numel()
@@ -795,7 +746,7 @@ def main():
     print(f"[lewam-uni] loaders ready: workers={args.num_workers} prefetch={args.prefetch_factor} "
           f"pin_memory=True  trajectories/epoch: train={n_tr_ep} val={n_va_ep} (~1x coverage)", flush=True)
 
-    # ---- optimizer: 4 param groups ----
+    # ---- optimizer ----
     opt = torch.optim.AdamW([
         {"params": [p for p in model.encoder.parameters() if p.requires_grad], "lr": args.encoder_lr},
         {"params": list(model.aggregator.parameters()), "lr": args.agg_lr},
@@ -876,7 +827,7 @@ def main():
     D = args.embed_dim
     Hmax = float(args.H_max)
 
-    # --- off-policy transitions for the DAgger-for-the-critic dynamics mix (optional) ---
+    # --- off-policy transitions for DAgger-for-the-critic dynamics mix ---
     OP = None
     if args.perturb_data and args.perturb_ratio > 0:
         import h5py as _h5
@@ -933,7 +884,6 @@ def main():
         frames_all = torch.cat([window.reshape(n_window_frames, *window.shape[2:]),
                                 goals.reshape(B * max_pos, *goals.shape[2:])]).float()
         if was_uint8:
-            # raw cache stores unnormalized uint8; apply the same ImageNet stats img_t uses
             frames_all = (frames_all / 255.0 - _IMG_MEAN.to(frames_all.device)) \
                          / _IMG_STD.to(frames_all.device)
         z_all = model.encode(frames_all)
@@ -944,8 +894,6 @@ def main():
 
         pos = torch.arange(max_pos, device=device).unsqueeze(0)         # (1, max_pos)
         valid = pos < n_pos.unsqueeze(1)                                # (B, max_pos)
-        # SHARED-mode horizons can exceed H_max (early positions are farther from the window's
-        # goal); clamp exactly like the eval countdown's min(steps, H_max)/H_max.
         h_norm = horizon.clamp(max=args.H_max).float() / Hmax
         if args.ablate_horizon:
             h_norm = torch.zeros_like(h_norm)
@@ -964,9 +912,8 @@ def main():
         loss_mask = valid.unsqueeze(-1).float()
         n_valid = valid.sum().clamp(min=1)
 
-        # action loss (split by head type)
+        # action loss
         if getattr(model.gc_head, "head_type", "") == "flow" and model.flow_H > 1:
-            # action-CHUNK target: at position t the next flow_H blocks a_frame[t:t+H], masked past valid
             fh, adim = model.flow_H, actions.shape[-1]
             a_pad = torch.cat([actions, actions.new_zeros(B, fh - 1, adim)], dim=1)
             chunk = a_pad.unfold(1, fh, 1).permute(0, 1, 3, 2)                 # (B, max_pos, fh, adim)
@@ -976,8 +923,6 @@ def main():
                                               chunk.reshape(B * max_pos, fh, adim).float(),
                                               mask=cmask.reshape(B * max_pos, fh).float())
         elif args.num_chunks > 1:
-            # mse chunk target, same unfold as the flow branch: at position t the next num_chunks
-            # blocks a_frame[t:t+nc], per-chunk masked past the window end / terminal
             nc, adim = args.num_chunks, actions.shape[-1]
             a_pad = torch.cat([actions, actions.new_zeros(B, nc - 1, adim)], dim=1)
             chunk = a_pad.unfold(1, nc, 1).permute(0, 1, 3, 2)                 # (B, max_pos, nc, adim)
@@ -1150,8 +1095,6 @@ def main():
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
         tr_term = 0
         for batch in train_loader:
-            # goal_at_terminal (last collate element) is loop-level info, not a run_batch input:
-            # count terminal-goal positions among the valid ones for the epoch log
             _gat, _nv = batch[-1], (batch[5] if args.dyn_prefix else batch[4])
             _vmask = torch.arange(_gat.shape[1]).unsqueeze(0) < _nv.unsqueeze(1)
             tr_term += int((_gat & _vmask).sum())
@@ -1162,7 +1105,7 @@ def main():
                 else:
                     loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = run_batch(
                         *batch[:-1], train=True, dyn_mix=alpha)
-                # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout): the rollout rides the same dyn weight
+                # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout)
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_dyn * args.w_rollout * loss_roll
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc
