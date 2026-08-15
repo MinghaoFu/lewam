@@ -47,11 +47,6 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
         # success rule (a plan that passes through the goal early scores what it deserves).
         self.pm_cost = str(kwargs.pop("pm_cost", "terminal"))
         self.pm_r_rho = float(kwargs.pop("pm_r_rho", 0.1))
-        # full-input prompting: additionally learn a context prompt delta_c (applied to the
-        # HEAD's copy of the aggregated context only -- the dynamics always rolls from the true
-        # context) and a horizon shift delta_h (head input clamped back to [0,1]). Trust
-        # regions: ||delta_c|| <= pm_rho*||c_0||, |delta_h| <= pm_rho. pm_full=0 = goal-only.
-        self.pm_full = bool(kwargs.pop("pm_full", False))
         # plan length: fixed pm_H blocks, or per-episode data horizons (pm_H_auto); execute
         # the whole plan (default), the first block only, or pm_exec_k blocks per replan.
         self.pm_H = int(kwargs.pop("pm_H", 5))
@@ -95,7 +90,7 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
         print(f"[graddiag] {len(rows)} plan rows, {len(real)} realized rows -> {path}")
 
     def _policy_rollout(self, window0, win_len0, z_goal_tilt, z_goal_true, steps_left0,
-                        H_env=None, H_max=None, ctx_tilt=None, h_tilt=None):
+                        H_env=None, H_max=None):
         """AR rollout with the graph OPEN through aggregate+gc_head+dynamics. Returns
         (U (R,H,B), terminal cost against the TRUE goal). With H_env, rolls the batch max and
         gathers each env's terminal at its own data-given H_i."""
@@ -113,10 +108,7 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
                 hn = torch.zeros_like(hn)
             cctx = self._context_at_head(win, wl)
             tilt = z_goal_tilt[:, _h] if z_goal_tilt.dim() == 3 else z_goal_tilt
-            head_ctx = cctx if ctx_tilt is None else cctx + ctx_tilt
-            if h_tilt is not None:
-                hn = (hn + h_tilt).clamp(0.0, 1.0)
-            blk = self.model.gc_head.point(self.model.gc_head(head_ctx, tilt, hn))
+            blk = self.model.gc_head.point(self.model.gc_head(cctx, tilt, hn))
             blocks.append(blk)
             z_term = self._dyn_step(cctx, blk, z_goal_true)
             z_steps.append(z_term)
@@ -186,20 +178,11 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
                 H_env, H_max_b = self._env_H(replan_envs)
 
             n_seg = 0 if self.pm_seg <= 0 else max(int(np.ceil(H_max_b / self.pm_seg)), 1)
-            if self.pm_full:
-                with torch.no_grad():
-                    c0norm = self._context_at_head(window0, win_len0).norm(dim=-1, keepdim=True)
             with torch.enable_grad():
                 delta = torch.zeros(R, D, device=device, requires_grad=True)
-                delta_c = (torch.zeros(R, D, device=device, requires_grad=True)
-                           if self.pm_full else None)
-                delta_h = (torch.zeros(R, device=device, requires_grad=True)
-                           if self.pm_full else None)
                 resid = (torch.zeros(R, n_seg, D, device=device, requires_grad=True)
                          if n_seg > 0 else None)
-                extras = ([delta_c, delta_h] if self.pm_full else [])
-                opt = torch.optim.Adam([delta] + ([resid] if resid is not None else []) + extras,
-                                       lr=self.pm_lr)
+                opt = torch.optim.Adam([delta] + ([resid] if resid is not None else []), lr=self.pm_lr)
                 best_U = best_cost = best_delta = None
                 best_iter = torch.zeros(R, dtype=torch.long)
                 seg_idx = (torch.arange(H_max_b, device=device) // max(self.pm_seg, 1)).clamp(max=max(n_seg - 1, 0)) if n_seg > 0 else None
@@ -210,8 +193,7 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
                     return z_goal.unsqueeze(1) + delta.unsqueeze(1) + walk
                 for _k in range(self.pm_steps + 1):
                     U, cost = self._policy_rollout(window0, win_len0, _tilts(), z_goal, sl0,
-                                                   H_env=H_env, H_max=H_max_b,
-                                                   ctx_tilt=delta_c, h_tilt=delta_h)
+                                                   H_env=H_env, H_max=H_max_b)
                     c = cost.detach()
                     if best_cost is None:
                         best_cost, best_U = c.clone(), U.detach().clone()
@@ -227,7 +209,7 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
                     if _k == self.pm_steps:
                         break
                     opt.zero_grad(set_to_none=True)
-                    params = [delta] + ([resid] if resid is not None else []) + extras
+                    params = [delta] + ([resid] if resid is not None else [])
                     grads = torch.autograd.grad(cost.mean(), params, allow_unused=True)
                     if self.pm_random:
                         g0 = grads[0]
@@ -240,11 +222,6 @@ class LeWAMUnifiedPromptMPCPolicy(LeWAMUnifiedCEMPolicy):
                     with torch.no_grad():
                         scale = (self.pm_rho * gnorm / delta.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp(max=1.0)
                         delta.mul_(scale)
-                        if self.pm_full:
-                            sc_c = (self.pm_rho * c0norm
-                                    / delta_c.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp(max=1.0)
-                            delta_c.mul_(sc_c)
-                            delta_h.clamp_(-self.pm_rho, self.pm_rho)
                         if resid is not None:
                             rs = (self.pm_r_rho * gnorm.unsqueeze(1)
                                   / resid.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp(max=1.0)
