@@ -458,6 +458,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 pm_random=bool(ge.get("pm_random", False)),
                 pm_seg=int(ge.get("pm_seg", 0)),
                 pm_r_rho=float(ge.get("pm_r_rho", 0.1)),
+                pm_full=bool(ge.get("pm_full", False)),
                 pm_H=int(ge.get("pm_H", 5)),
                 pm_H_auto=bool(ge.get("pm_H_auto", False)),
                 pm_exec_k=int(ge.get("pm_exec_k", 0)),
