@@ -396,8 +396,8 @@ class DiffusionHead(nn.Module):
         return x_t
 
 
-class ViTEncoder(nn.Module):
-    """ViT encoder + projector"""
+class VisionEncoder(nn.Module):
+    """Visual encoder"""
 
     def __init__(self, img_size=224, size="tiny", output_type="cls",
                 output_dim=192, proj_mlp_scale=4, proj_hidden=None,
@@ -411,7 +411,6 @@ class ViTEncoder(nn.Module):
                                   pretrained=False, use_mask_token=False)
             mlp_in = self.vit.config.hidden_size
         elif backbone == "dinov3":
-            # FROZEN pretrained DINOv3
             import timm
             size_to_model = {
                 "tiny": "vit_small_patch16_dinov3",  # a true "tiny" does not exist
@@ -419,7 +418,10 @@ class ViTEncoder(nn.Module):
                 "base": "vit_base_patch16_dinov3",
                 "large": "vit_large_patch16_dinov3"
             }
-            if backbone_ckpt:
+            if backbone_ckpt == "defer":
+                # architecture only; caller restores weights from a full-model checkpoint
+                self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
+            elif backbone_ckpt:
                 self.vit = timm.create_model(size_to_model[size], pretrained=False, num_classes=0)
                 self.vit.load_state_dict(torch.load(backbone_ckpt, map_location="cpu"), strict=True)
             else:
@@ -429,31 +431,51 @@ class ViTEncoder(nn.Module):
                 p.requires_grad_(False)
             self.vit.eval()
             mlp_in = self.vit.num_features
+        elif backbone == "resnet18sp":
+            # ResNet18 conv trunk + SpatialSoftmax: 32 keypoint (x,y) coordinates -> 64-d
+            import torchvision
+            r18 = torchvision.models.resnet18(weights=None)
+            self.trunk = nn.Sequential(*list(r18.children())[:-2])   # (N,512,H/32,W/32)
+            self.kp_conv = nn.Conv2d(512, 32, kernel_size=1)
+            mlp_in = 64
         else:
             raise ValueError(f"unknown encoder backbone {backbone!r}")
         # maps to representation space using a MLP with Batch Normalization.
         # necessary because the final ViT layer applies Layer Normalization, which prevents
         # SIGReg being optimized effectively.
-        # proj_hidden overrides proj_mlp_scale*output_dim -- lets an eval loader rebuild an
-        # older checkpoint whose projector width differs from the current default.
         self.projector = MLP(input_dim=mlp_in, output_dim=output_dim,
                              hidden_dim=(proj_hidden if proj_hidden else proj_mlp_scale * output_dim),
                              norm_fn=nn.BatchNorm1d, norm_first=False)
 
     def train(self, mode=True):
         super().train(mode)
-        if self.backbone != "scratch":
-            self.vit.eval()  # keep the frozen pretrained backbone in eval mode always
+        if self.backbone == "dinov3":
+            self.vit.eval()
         return self
+
+    def _spatial_softmax(self, pixels):
+        """(N,3,H,W) -> (N,64): expected (x,y) image coordinate of each of 32 keypoint maps."""
+        fmap = self.kp_conv(self.trunk(pixels))                     # (N,32,h,w)
+        N, K, H, W = fmap.shape
+        attn = fmap.flatten(2).softmax(-1)                          # (N,32,h*w)
+        xs = torch.linspace(-1.0, 1.0, W, device=fmap.device)
+        ys = torch.linspace(-1.0, 1.0, H, device=fmap.device)
+        grid_x = xs.repeat(H)                                       # row-major flatten: col-fastest
+        grid_y = ys.repeat_interleave(W)
+        exp_x = (attn * grid_x).sum(-1)                             # (N,32)
+        exp_y = (attn * grid_y).sum(-1)
+        return torch.cat([exp_x, exp_y], dim=-1)                    # (N,64)
 
     def forward(self, pixels):
         """pixels: (N, 3, H, W)"""
+        if self.backbone == "resnet18sp":
+            return self.projector(self._spatial_softmax(pixels))
         if self.backbone == "scratch":
             out = self.vit(pixels, interpolate_pos_encoding=True)
             if self.output_type == "cls":
                 return self.projector(out.last_hidden_state[:, 0])  # (N, D)
             return self.projector(out.last_hidden_state[:, 1:])  # (N, n_patch, D)
-        # frozen pretrained backbone (timm): pooled CLS features, no graph through the backbone
+        # frozen pretrained backbone
         with torch.no_grad():
             feat = self.vit(pixels)  # (N, num_features)
         return self.projector(feat)

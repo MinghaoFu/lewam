@@ -137,7 +137,7 @@ if __name__ == "__main__":
           f"h{tuple(h.shape)} -> action{tuple(a.shape)}")
     assert a.shape == (B, 25), a.shape
 
-    # AdaLN-Zero: at init, varying horizon must NOT change the output (cond_proj=0
+    # AdaLN-Zero: at init, varying horizon ast NOT change the output (cond_proj=0
     # => scale=shift=0 => modulation is identity, horizon is a no-op at init).
     head.eval()
     with torch.no_grad():
