@@ -2,7 +2,7 @@
 # Evaluate a train_lewam_gc.py run (a LeWAMSplit checkpoint) via the DIRECT split_policy
 # adapter -- reactive goal-conditioned, 3 seeds. Unlike eval_lewam_gc.sh (which remaps the
 # checkpoint into the gcidm format and rebuilds a frozen-LeWM/JEPA whose projector no longer
-# matches module.ViTEncoder -> size-mismatch, SRs=[]), this loads the LeWAMSplit checkpoint
+# matches module.VisionEncoder -> size-mismatch, SRs=[]), this loads the LeWAMSplit checkpoint
 # directly (gip.load_lewam_split_model) and drives gip.LeWAMSplitPolicy. No remap, no JEPA.
 #
 #   bash scripts/eval_lewam_split.sh <tworoom|reacher|pusht|cube> [run_dir] [num_eval]

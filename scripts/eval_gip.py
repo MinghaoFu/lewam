@@ -5,6 +5,10 @@ Reuses eval.py's env/dataset machinery; the policy is chosen by gip_eval.mode:
   unified_policy        LeWAM-Unified reactive: the goal-conditioned action head run directly (the
                         representation channel; never touches the dynamics)
   unified_cem           LeWAM-Unified CEM: the dynamics head rolls candidate action blocks to the goal
+  unified_grad          Gradient MPC: gc_head warm-start refined by Adam on the frozen dynamics
+                        (terminal-latent cost); plan = best iterate by model cost
+  unified_prompt_mpc    Prompt-MPC (ours): a per-episode prompt delta on the goal latent, optimized
+                        through the frozen policy; pm_cost=anymin aligns the cost with reach-anytime
   split_policy          LeWAM-Split reactive action head
   gcidm                 frozen-LeWM + GCIDM head baseline
   bc (default)          a plain GIP action head run as a reactive policy
@@ -100,6 +104,18 @@ def run(cfg: DictConfig):
         cfg.eval.eval_budget = 2 * int(max(goal_offsets))
         print(f"[full-traj] {len(goal_offsets)} episodes, offsets "
               f"{min(goal_offsets)}..{max(goal_offsets)}, eval_budget={cfg.eval.eval_budget}")
+
+    # Slice into shards only after eval_budget is set above, so every shard shares the full-set budget.
+    shard_count = int(cfg.get("gip_eval", {}).get("shard_count", 1))
+    shard_idx = int(cfg.get("gip_eval", {}).get("shard_idx", 0))
+    if shard_count > 1:
+        sl = slice(shard_idx, None, shard_count)
+        episodes, starts = episodes[sl], starts[sl]
+        if goal_offsets is not None:
+            goal_offsets = goal_offsets[sl]
+        cfg.world.num_envs = len(episodes)
+        print(f"[shard] {shard_idx}/{shard_count}: {len(episodes)} of the full pick-list", flush=True)
+
     assert (
         cfg.plan_config.horizon * cfg.plan_config.action_block <= cfg.eval.eval_budget
     ), "horizon*action_block must be <= eval_budget"
@@ -315,7 +331,14 @@ def run(cfg: DictConfig):
         model._split_cfg = split_cfg
         adim = int(split_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
-    elif mode in ("unified_policy", "unified_cem"):
+    elif mode == "crossattn_policy":
+        model, ca_cfg = gip.load_crossattn_model(cfg.policy, which=cfg.get("seq_which", "best"))
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
+        model.requires_grad_(False)
+        model._crossattn_cfg = ca_cfg
+        adim = int(ca_cfg["action_dim"])
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
+    elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
         model, uni_cfg = gip.load_lewam_unified_model(cfg.policy, which=cfg.get("seq_which", "best"))
@@ -425,11 +448,25 @@ def run(cfg: DictConfig):
     print(f"==== GIP {mode} RESULTS ====")
     print(metrics)
 
+    # Dump this shard's successes; a merge step pools them into the global SR.
+    if shard_count > 1:
+        import json as _json
+        succ = np.asarray(metrics.get("episode_successes", [])).astype(bool).tolist()
+        shard_file = results_path / f"{mode}_{cfg.policy}_shard{shard_idx}of{shard_count}.json"
+        with shard_file.open("w") as f:
+            _json.dump({"shard_idx": shard_idx, "shard_count": shard_count,
+                        "episode_successes": succ, "n": len(succ),
+                        "n_success": int(sum(succ))}, f)
+        print(f"[shard] wrote {shard_file} ({int(sum(succ))}/{len(succ)})", flush=True)
+
     # trajectory-divergence probe: dump the executed per-obs-step latent trajectory if requested
     _dump = cfg.get("gip_eval", {}).get("dump_latents", "")
     if _dump and getattr(policy, "log_latents", False):
         policy.dump_latents(_dump)
         print(f"[divprobe] dumped executed latents -> {_dump}")
+    _gd = cfg.get("gip_eval", {}).get("grad_diag", "")
+    if _gd and hasattr(policy, "dump_diag"):
+        policy.dump_diag(_gd)
 
     with (results_path / f"{mode}_{cfg.policy}_results.txt").open("a") as f:
         f.write("\n==== CONFIG ====\n")

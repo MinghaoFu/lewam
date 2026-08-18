@@ -130,31 +130,38 @@ def preload_flat(base, img_t, act_mean, act_std, frameskip, max_eps=None):
 # Windows are clamped at the episode end, never cross it. Each window is a fresh start (no prior
 # history), like an eval episode / the eval adapter's sliding window.
 # --------------------------------------------------------------------------- #
-def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
+_IMG_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_IMG_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
+def sample_goal_offsets(n_pos, frames_to_terminal, h_max, p_terminal_goal, p_shared,
+                        close_bias=0.0):
     """Sample each position's goal offset (obs-frames from the window start) + horizon.
 
-    RANDOM mode (prob 1-p_shared): per position p, draw h~U[1,h_max]; goal offset = p+h clamped
-    to the episode's last frame -- the split FramePairDataset's sample-then-clamp, per position.
-    SHARED mode (prob p_shared): draw ONE h~U[1,h_max] for the LAST position; every position
-    points at that same frame, horizons counting down toward it (>= 1 by construction since the
-    goal sits at or beyond the window end even after the episode clamp).
-
-    close_bias>0 skews the horizon draw toward SMALL h (more close-to-goal supervision, where the
-    precision-limited tasks plateau): h = 1 + floor((h_max-1) * u^(1+close_bias)), u~U[0,1];
-    close_bias=0 recovers the uniform U[1,h_max]. Higher bias -> more mass near h=1.
+    Three window modes, nested independent draws:
+    TERMINAL mode (prob p_terminal_goal): every position's goal is the episode's TERMINAL frame,
+    horizons counting down toward it -- task-completion supervision on real frames at real offsets.
+    SHARED mode (prob p_shared among the rest): draw ONE h~U[1,h_max] for the LAST position; every
+    position points at that same frame, horizons counting down toward it (>= 1 by construction
+    since the goal sits at or beyond the window end even after the clamp).
+    RANDOM mode (otherwise): per position p, draw h~U[1,h_max]; goal offset = p+h clamped to the
+    terminal frame -- the split FramePairDataset's sample-then-clamp, per position.
 
     Args:
         n_pos (int): number of decision positions in this window.
-        frames_left (int): obs-frames remaining to the episode's last frame from the window start
-            (the clamp ceiling for goal_offsets).
+        frames_to_terminal (int): obs-frames from the window start to the episode's terminal
+            frame (the clamp ceiling for goal_offsets); >= n_pos by the anchor filter.
         h_max (int): max horizon (obs-steps) to draw h from.
-        p_shared (float): probability of SHARED mode vs. RANDOM mode (see above).
-        close_bias (float): >0 skews h toward small values (see above); 0 = uniform U[1,h_max].
+        p_terminal_goal (float): probability of TERMINAL mode.
+        p_shared (float): probability of SHARED mode among non-TERMINAL windows.
+        close_bias (float): >0 skews h toward small values; 0 = uniform U[1,h_max].
 
     Returns:
-        tuple: (goal_offsets (n_pos,) long, horizon (n_pos,) long). horizon can exceed h_max in
-        SHARED mode (earlier positions are farther); the trainer clamps h_norm at 1.0 exactly like
-        the eval countdown's min(steps, H_max)/H_max.
+        tuple: (goal_offsets (n_pos,) long, horizon (n_pos,) long, goal_at_terminal (n_pos,)
+        bool). horizon is the TRUE unclamped distance -- it can exceed h_max in TERMINAL/SHARED
+        mode; the trainer clamps h_norm at 1.0 exactly like the eval countdown's
+        min(steps, H_max)/H_max. goal_at_terminal marks positions whose goal IS the terminal
+        frame (also fires when a RANDOM/SHARED clamp lands there).
     """
     def _draw(shape):
         if close_bias > 0:
@@ -162,29 +169,37 @@ def sample_goal_offsets(n_pos, frames_left, h_max, p_shared, close_bias=0.0):
             return 1 + (u.pow(1.0 + close_bias) * (h_max - 1)).long()
         return torch.randint(1, h_max + 1, shape)
     positions = torch.arange(n_pos)
-    if float(torch.rand(())) < p_shared:
+    if p_terminal_goal > 0 and float(torch.rand(())) < p_terminal_goal:
+        goal_offsets = torch.full((n_pos,), frames_to_terminal)
+    elif float(torch.rand(())) < p_shared:
         h_last = int(_draw(()))
-        goal_offsets = torch.full((n_pos,), min(n_pos - 1 + h_last, frames_left))
+        goal_offsets = torch.full((n_pos,), min(n_pos - 1 + h_last, frames_to_terminal))
     else:
         h_draw = _draw((n_pos,))
         goal_offsets = torch.minimum(positions + h_draw,
-                                     torch.tensor(frames_left, dtype=torch.long))
+                                     torch.tensor(frames_to_terminal, dtype=torch.long))
     horizon = (goal_offsets - positions).clamp(min=1)
-    return goal_offsets, horizon
+    goal_at_terminal = goal_offsets.eq(frames_to_terminal)
+    return goal_offsets, horizon, goal_at_terminal
 
 
 class SeqTrajDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, p_shared,
-                 close_bias=0.0):
-        self.frames = frames          # [N,3,H,W] fp16, CPU, shared read-only; N = all obs-frames
-        self.a_frame = a_frame        # [N,adim] fp16, CPU; a_frame[t] = z-scored block taken AT t
-        self.t_gidx = t_gidx          # [M] long; episode-global obs-frame index of each valid start
-        self.maxh = maxh              # [M] long; frames from that start to the episode's last frame
+    def __init__(self, frames, a_frame, t_gidx, frames_to_terminal, indices, h_max, ctx_len,
+                 p_terminal_goal, p_shared, close_bias=0.0, stride=1):
+        self.frames = frames          # [N,3,H,W] fp16 (obs cache) or uint8 (raw cache), CPU
+        self.a_frame = a_frame        # obs cache: [N, FS*adim] block taken AT t;
+                                      # raw cache: [N, adim] per-step action at raw frame t
+        self.t_gidx = t_gidx          # [M] long; episode-global frame index of each valid start
+        self.frames_to_terminal = frames_to_terminal  # [M] long; frames from that start to the
+                                      # episode's TERMINAL frame, in the CACHE's frame units
+                                      # (obs-frames, or raw frames when stride > 1)
         self.indices = indices        # [K] long; train or val subset of the M starts
-        self.h_max = int(h_max)       # max goal distance (obs-steps)
+        self.h_max = int(h_max)       # max goal distance (prediction steps)
         self.ctx_len = int(ctx_len)   # decision points per window
+        self.p_terminal_goal = float(p_terminal_goal)
         self.p_shared = float(p_shared)
         self.close_bias = float(close_bias)  # >0 -> over-sample close goals (near-goal precision)
+        self.stride = int(stride)     # raw frames per prediction step (1 = obs cache)
 
     def __len__(self):
         return self.indices.numel()
@@ -192,16 +207,24 @@ class SeqTrajDataset(Dataset):
     def __getitem__(self, i):
         idx = int(self.indices[i])
         start = int(self.t_gidx[idx])
-        frames_left = int(self.maxh[idx])                        # >= 1 for every valid start
-        n_pos = min(self.ctx_len, frames_left)                   # frame start+n_pos exists (the
-                                                                 # last position's target), since
-                                                                 # n_pos <= frames_left
-        goal_offsets, horizon = sample_goal_offsets(n_pos, frames_left, self.h_max, self.p_shared,
-                                                    self.close_bias)
-        window = self.frames[start:start + n_pos + 1]            # (n_pos+1, 3, H, W)
-        goals = self.frames[start + goal_offsets]                # (n_pos, 3, H, W)
-        actions = self.a_frame[start:start + n_pos]              # (n_pos, adim)
-        return window, goals, actions, horizon, n_pos
+        st = self.stride
+        to_terminal = int(self.frames_to_terminal[idx]) // st    # prediction steps to terminal;
+                                                                 # >= 1 by the anchor filter
+        n_pos = min(self.ctx_len, to_terminal)                   # last position's target frame
+                                                                 # exists, and no decision position
+                                                                 # sits past the terminal frame
+        goal_offsets, horizon, goal_at_terminal = sample_goal_offsets(
+            n_pos, to_terminal, self.h_max, self.p_terminal_goal, self.p_shared, self.close_bias)
+        if st == 1:
+            window = self.frames[start:start + n_pos + 1]        # (n_pos+1, 3, H, W)
+            goals = self.frames[start + goal_offsets]            # (n_pos, 3, H, W)
+            actions = self.a_frame[start:start + n_pos]          # (n_pos, FS*adim)
+        else:
+            window = self.frames[start + st * torch.arange(n_pos + 1)]
+            goals = self.frames[start + st * goal_offsets]
+            blocks = self.a_frame[start:start + st * n_pos]      # (st*n_pos, adim)
+            actions = blocks.reshape(n_pos, -1)                  # (n_pos, st*adim)
+        return window, goals, actions, horizon, n_pos, goal_at_terminal
 
 
 def collate_pad(batch):
@@ -213,6 +236,7 @@ def collate_pad(batch):
       actions  (B, max_pos, adim)       zero-padded past each item's n_pos
       horizon  (B, max_pos) long        pad value 1 (masked from the loss anyway)
       n_pos    (B,) long                valid decision points per item (the loss mask)
+      goal_at_terminal (B, max_pos) bool  positions whose goal is the terminal frame (pad False)
 
     Frame padding repeats each item's LAST REAL frame instead of zeros: the ViT projector has a
     BatchNorm, and in train mode zero frames would corrupt the batch statistics for the real
@@ -226,15 +250,18 @@ def collate_pad(batch):
     goals = torch.zeros((B, max_pos, C, H, W), dtype=batch[0][1].dtype)
     actions = torch.zeros((B, max_pos, adim), dtype=batch[0][2].dtype)
     horizon = torch.ones((B, max_pos), dtype=torch.long)
-    for i, (item_window, item_goals, item_actions, item_horizon, item_n_pos) in enumerate(batch):
+    goal_at_terminal = torch.zeros((B, max_pos), dtype=torch.bool)
+    for i, (item_window, item_goals, item_actions, item_horizon, item_n_pos,
+            item_goal_at_term) in enumerate(batch):
         window[i, : item_n_pos + 1] = item_window
         goals[i, : item_n_pos] = item_goals
         actions[i, : item_n_pos] = item_actions
         horizon[i, : item_n_pos] = item_horizon
+        goal_at_terminal[i, : item_n_pos] = item_goal_at_term
         if item_n_pos < max_pos:
             window[i, item_n_pos + 1:] = item_window[-1]
             goals[i, item_n_pos:] = item_goals[-1]
-    return window, goals, actions, horizon, n_pos
+    return window, goals, actions, horizon, n_pos, goal_at_terminal
 
 
 # --------------------------------------------------------------------------- #
@@ -243,16 +270,22 @@ def collate_pad(batch):
 # plus a per-anchor H-action prefix. `prefix_valid[t,k]` marks anchor t's real horizons (episode end).#
 # --------------------------------------------------------------------------- #
 class PrefixSeqDataset(Dataset):
-    def __init__(self, frames, a_frame, t_gidx, maxh, indices, h_max, ctx_len, prefix_H,
-                 p_shared, close_bias=0.0):
+    def __init__(self, frames, a_frame, t_gidx, maxh, frames_to_terminal, indices, h_max,
+                 ctx_len, prefix_H, p_terminal_goal, p_shared, close_bias=0.0):
         self.frames = frames          # [N,3,H,W] fp16 CPU; all obs-frames
         self.a_frame = a_frame        # [N,adim] fp16; a_frame[t] = block taken AT frame t (0 at ep-last)
         self.t_gidx = t_gidx          # [M] episode-global frame index of each valid start
-        self.maxh = maxh              # [M] frames from that start to the episode's last frame
+        self.maxh = maxh              # [M] frames from that start to the episode's LAST frame --
+                                      # still the WM-prefix ceiling: post-completion frames are
+                                      # real (s,a,s') transitions, so dynamics may learn them
+        self.frames_to_terminal = frames_to_terminal  # [M] frames to the TERMINAL frame -- the
+                                      # anchor/goal ceiling (== maxh unless the cache carries a
+                                      # success-based terminal index)
         self.indices = indices        # [K] train/val subset of the M starts
         self.h_max = int(h_max)
         self.ctx_len = int(ctx_len)   # decision points (anchors) per window
         self.prefix_H = int(prefix_H) # world-model prefix horizon
+        self.p_terminal_goal = float(p_terminal_goal)
         self.p_shared = float(p_shared)
         self.close_bias = float(close_bias)
 
@@ -263,12 +296,14 @@ class PrefixSeqDataset(Dataset):
         idx = int(self.indices[i])
         start = int(self.t_gidx[idx])
         frames_left = int(self.maxh[idx])                        # frames start..start+frames_left exist
-        n_anchor = min(self.ctx_len, frames_left)                # anchors 0..n_anchor-1 (each >=1 future frame)
+        to_terminal = int(self.frames_to_terminal[idx])          # >= 1 by the anchor filter
+        n_anchor = min(self.ctx_len, to_terminal)                # anchors 0..n_anchor-1, none past
+                                                                 # the terminal frame
         prefix_H = self.prefix_H
         win_len = min(n_anchor + prefix_H, frames_left + 1)      # window frames: states + WM targets
         window = self.frames[start:start + win_len]              # (win_len, 3, H, W)
-        goal_offsets, horizon = sample_goal_offsets(n_anchor, frames_left, self.h_max,
-                                                    self.p_shared, self.close_bias)
+        goal_offsets, horizon, goal_at_terminal = sample_goal_offsets(
+            n_anchor, to_terminal, self.h_max, self.p_terminal_goal, self.p_shared, self.close_bias)
         goals = self.frames[start + goal_offsets]                # (n_anchor, 3, H, W) per-position policy goal
         action_dim = self.a_frame.shape[1]
         action_prefix = torch.zeros(n_anchor, prefix_H, action_dim, dtype=self.a_frame.dtype)
@@ -279,14 +314,14 @@ class PrefixSeqDataset(Dataset):
             if k_valid > 0:
                 action_prefix[t, :k_valid] = self.a_frame[start + t:start + t + k_valid]
                 prefix_valid[t, :k_valid] = True
-        return window, goals, action_prefix, horizon, prefix_valid, n_anchor
+        return window, goals, action_prefix, horizon, prefix_valid, n_anchor, goal_at_terminal
 
 
 def collate_prefix(batch):
     """Pad a batch of prefix windows. window -> (B, win_max, C, H, W) tail-padded with each item's LAST
     REAL frame (BatchNorm safety); goals -> (B, anchor_max, C, H, W); action_prefix -> (B, anchor_max,
     prefix_H, adim) zero-pad; horizon -> (B, anchor_max) pad 1; prefix_valid -> (B, anchor_max, prefix_H)
-    pad False; n_anchor -> (B,)."""
+    pad False; n_anchor -> (B,); goal_at_terminal -> (B, anchor_max) pad False."""
     n_anchor = torch.tensor([item[5] for item in batch], dtype=torch.long)
     anchor_max = int(n_anchor.max())
     win_max = max(item[0].shape[0] for item in batch)
@@ -298,7 +333,8 @@ def collate_prefix(batch):
     action_prefix = torch.zeros((B, anchor_max, prefix_H, action_dim), dtype=batch[0][2].dtype)
     horizon = torch.ones((B, anchor_max), dtype=torch.long)
     prefix_valid = torch.zeros((B, anchor_max, prefix_H), dtype=torch.bool)
-    for i, (win, goal, act_pref, hz, pv, na) in enumerate(batch):
+    goal_at_terminal = torch.zeros((B, anchor_max), dtype=torch.bool)
+    for i, (win, goal, act_pref, hz, pv, na, gat) in enumerate(batch):
         win_len = win.shape[0]
         window[i, :win_len] = win
         if win_len < win_max:
@@ -309,7 +345,8 @@ def collate_prefix(batch):
         action_prefix[i, :na] = act_pref
         horizon[i, :na] = hz
         prefix_valid[i, :na] = pv
-    return window, goals, action_prefix, horizon, prefix_valid, n_anchor
+        goal_at_terminal[i, :na] = gat
+    return window, goals, action_prefix, horizon, prefix_valid, n_anchor, goal_at_terminal
 
 
 # --------------------------------------------------------------------------- #
@@ -320,6 +357,10 @@ def main():
     # train config
     ap.add_argument("--seed", type=int, default=3072)
     ap.add_argument("--run_name", type=str, default="reacher_lewam_unified")
+    ap.add_argument("--exp_tag", type=str, default="",
+                    help="short experiment slug (e.g. 'noh', 'aggcat'). Appended to the checkpoint "
+                         "directory AND to --ckpt_sync_dir, so two experiments that differ only by "
+                         "a flag cannot silently overwrite each other's run. Recorded in the config.")
     ap.add_argument("--train_split", type=float, default=0.9)
     ap.add_argument("--max_eps", type=int, default=0)
     ap.add_argument("--dataset_name", type=str, default="reacher.h5")
@@ -352,24 +393,41 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--H_max", type=int, default=50,
                     help="max goal distance (horizon) in obs-steps (no frameskip); "
-                         "each goal is at horizon h~U[1,H_max], episode-clamped. "
-                         "Decoupled from the window length (see --context_len); does not affect "
-                         "memory (goals are looked up per position, not loaded as a tail)")
+                         "each goal is at horizon h~U[1,H_max], clamped to the episode's "
+                         "terminal frame.")
+    ap.add_argument("--ablate_horizon", action="store_true",
+                    help="drop the horizon conditioning: h_norm is fed as 0 everywhere. "
+                         "Recorded in the run config so eval picks it up automatically.")
     ap.add_argument("--context_len", type=int, default=5,
                     help="decision points per context window = the aggregator's max sequence length "
-                         "at train (eval defaults its ctx_cap to this). Frames per item = "
-                         "2*context_len+1, so batch * context_len determines GPU memory")
+                         "at train (eval defaults its ctx_cap to this).")
+    ap.add_argument("--anchor_rate", type=str, default="obs", choices=["obs", "raw"],
+                    help="an ANCHOR is the frame index where a training window starts."
+                         "obs (default): anchors sampled every `frameskip` frame "
+                         "raw: anchors at every raw frame "
+                         "(goals and dynamics targets still stride by frameskip).")
+    ap.add_argument("--num_chunks", type=int, default=1,
+                    help="consecutive frameskip-sized blocks the policy predicts.")
+    ap.add_argument("--drop_goal", action="store_true",
+                    help="unconditional-policy arm: the head ignores z_goal and conditions on a "
+                         "learned constant instead.")
+    ap.add_argument("--crop_aug", type=int, default=0,
+                    help="random-crop augmentation (0 = off; e.g. 202 from 224). "
+                         "One random crop per window (same-crop keeps the dynamics target predictable); "
+                         "Eval uses a deterministic center crop.")
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from run_dir/lewam_unified_full.pt (model+optimizer+scheduler+epoch+RNG.")
+    ap.add_argument("--p_terminal_goal", type=float, default=0.0,
+                    help="fraction of windows whose goal is the episode's terminal frame. "
+                          "(0 = none (full goal-reaching), 1 = all (full task-completion)")
     ap.add_argument("--p_shared", type=float, default=0.0,
-                    help="fraction of windows trained in SHARED-goal mode (one goal ahead of the "
-                         "window, horizons counting down -- the structure eval runs); the rest use "
-                         "per-position independent goals (the split's sampling). 0 = all random")
+                    help="fraction of non-terminal windows trained in SHARED-goal mode (one goal "
+                         "ahead of the window, horizons counting down -- the structure eval runs); "
+                         "0 = each goal sampled randomly per position")
     ap.add_argument("--goal_close_bias", type=float, default=0.0,
                     help="skew the training goal-distance draw toward SMALL h (more close-to-goal "
                          "supervision): h=1+floor((H_max-1)*u^(1+bias)). 0=uniform U[1,H_max]. "
                          "Applied to train only; val stays uniform for a comparable metric.")
-    # Restored: the 0497f88 cleanup commented these two flags out but left their three usage
-    # sites (args.perturb_data at ~L707/709, args.perturb_ratio at ~L716/795), so ANY run died at
-    # startup with AttributeError. Defaults keep the feature off, exactly as before the cleanup.
     ap.add_argument("--perturb_data", type=str, default="",
                     help="off-policy transition h5 (gen_offpolicy.py); '' = none. Mixed into the dynamics "
                          "loss only (DAgger-for-the-critic) -- the reactive/BC head stays on-policy.")
@@ -395,7 +453,8 @@ def main():
                     help="ViT backbone size: tiny | small | base | large")
     ap.add_argument("--encoder_backbone", type=str, default="scratch",
                     help="scratch = from-scratch ViT (SIGReg-trained); dinov3 = frozen pretrained "
-                         "DINOv3 ViT-{encoder_size}/16")
+                         "DINOv3 ViT-{encoder_size}/16; resnet18sp = from-scratch ResNet18 + "
+                         "SpatialSoftmax 32-keypoint coordinates")
     ap.add_argument("--encoder_ckpt", type=str, default="",
                     help="state_dict .pt for the pretrained backbone, loaded at train init only "
                          "(dinov3). At eval the frozen weights live in the full checkpoint.")
@@ -422,10 +481,6 @@ def main():
                              "drowned by the z_dim latents (a stronger action pathway).")
     ap.add_argument("--dyn_goal_cond", action="store_true",
                     help="use z_goal in the dynamics head")
-    # dynamics-on-policy-action arm: feed the gc_head's predicted action into the dynamics head
-    # (a convex mix with the ground-truth action, weight alpha ramped by a schedule), closing the
-    # train/rollout covariate gap. The action is still BC-supervised on ground truth, so it stays a
-    # grounded action, not a latent-action model.
     ap.add_argument("--dyn_action_from_policy", action="store_true",
                     help="feed a mix of the policy's predicted action into the dynamics head "
                          "(alpha per --dyn_policy_schedule); off = dynamics on ground-truth actions")
@@ -454,6 +509,17 @@ def main():
     ap.add_argument("--prefix_heads", type=int, default=4,
                     help="attention heads of the action-prefix encoder")
     # loss
+    ap.add_argument("--latent_h", type=str, default="", choices=["", "vq", "scalar"],
+                    help="condition the GC head on a horizon inferred from (c_t, z_goal) instead of "
+                         "the dataset's h. 'vq' quantizes it to --h_codes entries; 'scalar' predicts "
+                         "h and reuses the sinusoidal path (the control that separates the "
+                         "quantization from the h-supervision). The true h becomes a regression "
+                         "target only, so eval never needs it.")
+    ap.add_argument("--h_codes", type=int, default=16, help="codebook size for --latent_h vq")
+    ap.add_argument("--h_code_dim", type=int, default=64, help="code width for --latent_h vq")
+    ap.add_argument("--h_commit", type=float, default=0.25, help="VQ commitment weight")
+    ap.add_argument("--h_pred_w", type=float, default=1.0,
+                    help="weight on the h regression that grounds the code in real distance")
     ap.add_argument("--w_act", type=float, default=1.0)
     ap.add_argument("--w_dyn", type=float, default=1.0)
     ap.add_argument("--w_idm", type=float, default=0.0,
@@ -490,7 +556,14 @@ def main():
     ap.add_argument("--ablate_dynamics", action="store_true",
                         help="disable dynamics loss (w_dyn=0), train only a policy. "
                              "Behavior is idential to w_dyn=0")
+    ap.add_argument("--detach_dyn_target", action="store_true",
+                        help="stop-grad the dynamics target so it shapes the encoder only through "
+                             "the input, not by making its own next latent easy to predict")
     args = ap.parse_args()
+    if args.latent_h and args.ablate_horizon:
+        raise SystemExit("--latent_h and --ablate_horizon are different arms; pick one")
+    if args.num_chunks > 1 and args.head_type != "mse":
+        raise SystemExit("--num_chunks > 1 is mse-only; flow chunks via --flow_H, gmm is joint")
 
     if args.ablate_dynamics:
         args.w_dyn = 0.0
@@ -520,10 +593,22 @@ def main():
     act_std = _zn.std.squeeze(0).cpu().numpy().tolist()
     img_t = get_img_preprocessor(source="pixels", target="pixels", img_size=args.img_size)
 
+    # --exp_tag differentiates otherwise-identical runs.
+    # run_dir.mkdir(exist_ok=True) writes straight into whatever is there, so a repeated run_name
+    # can silently overwrite an earlier experiment's weights and config.
+    _tag = args.exp_tag.strip().strip("_")
+    _run_name = f"{args.run_name}_{_tag}" if _tag else args.run_name
     if args.run_dir:
         run_dir = Path(args.run_dir)
     else:
-        run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), args.run_name)
+        run_dir = Path(swm.data.utils.get_cache_dir(sub_folder="checkpoints"), _run_name)
+    if _tag and args.ckpt_sync_dir:
+        # keep the remote layout in step with the local one
+        args.ckpt_sync_dir = str(Path(args.ckpt_sync_dir) / _tag)
+    if (run_dir / "lewam_unified_best.pt").exists() and not args.resume:
+        raise SystemExit(f"[lewam-uni] {run_dir} already holds a finished run "
+                         f"(lewam_unified_best.pt). Pass a different --exp_tag / --run_name rather "
+                         f"than overwriting it.")
     run_dir.mkdir(parents=True, exist_ok=True)
     if os.path.realpath(run_dir).startswith(os.path.realpath(os.path.expanduser("~"))):
         print(f"[lewam-uni] WARN run_dir under $HOME ({run_dir}); checkpoints in home can fill the "
@@ -542,11 +627,16 @@ def main():
                          dyn_goal_cond=args.dyn_goal_cond,
                          dyn_action_embed_dim=args.dyn_action_embed_dim,
                          head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
+                         num_chunks=args.num_chunks,
+                         drop_goal=args.drop_goal, crop_size=args.crop_aug,
                          encoder_backbone=args.encoder_backbone,
                          encoder_ckpt=(args.encoder_ckpt or None),
                          use_idm=(args.w_idm > 0),
                          use_prefix=args.dyn_prefix, prefix_H=args.prefix_H,
-                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads).to(device)
+                         prefix_depth=args.prefix_depth, prefix_heads=args.prefix_heads,
+                         latent_h=args.latent_h, h_codes=args.h_codes,
+                         h_code_dim=args.h_code_dim, h_commit=args.h_commit,
+                         h_pred_w=args.h_pred_w).to(device)
     sigreg = SIGReg().to(device)
 
     n_enc = sum(p.numel() for p in model.encoder.parameters())
@@ -564,7 +654,7 @@ def main():
             "LEWAM_CACHE_DIR",
             "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
         _stem = os.path.basename(args.dataset_name).replace(".h5", "")
-        _tag = f"{_stem}_fs{frameskip}_i{args.img_size}"
+        _tag = f"{_stem}_fs{frameskip}_i{args.img_size}" + ("_raw" if args.anchor_rate == "raw" else "")
         _fp, _ap = f"{_cdir}/{_stem}/{_tag}.frames.npy", f"{_cdir}/{_stem}/{_tag}.aux.npz"
         if not (os.path.isfile(_fp) and os.path.isfile(_ap)):
             _fp, _ap = f"{_cdir}/{_tag}.frames.npy", f"{_cdir}/{_tag}.aux.npz"
@@ -572,49 +662,77 @@ def main():
             _t0 = time.time()
             print(f"[lewam-uni] frames-cache HIT {_fp}"
                   + (" (mmap: low-RAM, fuse-latency)" if args.cache_mmap else ""), flush=True)
-            # mmap keeps large tensor on disk/fuse (kernel-evictable pages)
             Frames = torch.from_numpy(np.load(_fp, mmap_mode="r" if args.cache_mmap else None))
             _aux = np.load(_ap)
-            # cache built by the GC pipeline: A_flat is per-SAMPLE (one action block per
-            # valid start), t_gidx/maxh are the same per-start arrays this script uses. Scatter
-            # A_flat back to a per-FRAME tensor A_frame[t_gidx]=A_flat: every frame the window
-            # dataset reads (frames[start:start+n_pos], all valid starts) is thereby set, so this
-            # is exact -- only episode-last frames stay zero, and their action is never read.
             A_flat = torch.from_numpy(_aux["A_flat"])
             t_gidx = torch.from_numpy(_aux["t_gidx"])
             maxh = torch.from_numpy(_aux["maxh"])
-            A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
-            A_frame[t_gidx] = A_flat
+            frames_to_terminal = (torch.from_numpy(_aux["frames_to_terminal"])
+                                  if "frames_to_terminal" in _aux.files else None)
+            if args.anchor_rate == "raw":
+                assert A_flat.shape[0] == Frames.shape[0], "raw cache A_flat must be frame-aligned"
+                A_frame = A_flat
+            else:
+                A_frame = torch.zeros((Frames.shape[0], A_flat.shape[1]), dtype=A_flat.dtype)
+                A_frame[t_gidx] = A_flat
             print(f"[lewam-uni] cache loaded in {time.time()-_t0:.0f}s "
                   f"frames={tuple(Frames.shape)}", flush=True)
         else:
             print(f"[lewam-uni] frames-cache MISS ({_fp}) -> classic preload", flush=True)
     if Frames is None:
+        if args.anchor_rate == "raw":
+            raise SystemExit("[lewam-uni] --anchor_rate raw needs a _raw cache "
+                             "(make_preload_cache --anchor_rate raw); classic preload is obs-only")
         Frames, A_frame, t_gidx, maxh = preload_flat(base, img_t, act_mean, act_std,
                                                      frameskip, max_eps=max_eps)
+        frames_to_terminal = None
+    terminal_source = "cache"
+    if frames_to_terminal is None:
+        # no terminal index -> use the episode's last frame.
+        # Task-completion datasets whose demos run past success (cube) need to be updated
+        # with make_preload_cache --patch_terminal --terminal_state success.
+        frames_to_terminal = maxh.clone()
+        terminal_source = "episode_last"
+    if args.p_terminal_goal > 0 and terminal_source == "episode_last":
+        print("[lewam-uni] WARN --p_terminal_goal set but no frames_to_terminal in the cache: "
+              "terminal goals fall back to the episode's LAST frame", flush=True)
     n_starts = t_gidx.shape[0]
-    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts}", flush=True)
+    print(f"[lewam-uni] frames={Frames.shape} starts={n_starts} "
+          f"terminal_source={terminal_source}", flush=True)
 
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=g)
-    n_val = int(round((1 - args.train_split) * n_starts))
+    # anchor filter: t ~ U[0, terminal]
+    _stride = frameskip if args.anchor_rate == "raw" else 1
+    perm = perm[frames_to_terminal[perm] >= _stride]
+    n_dropped = n_starts - perm.numel()
+    if n_dropped:
+        print(f"[lewam-uni] anchor filter: dropped {n_dropped}/{n_starts} post-terminal starts",
+              flush=True)
+    n_val = int(round((1 - args.train_split) * perm.numel()))
     val_idx = perm[:n_val]
     train_idx = perm[n_val:]
     print(f"[lewam-uni] train={train_idx.numel()} val={val_idx.numel()} "
           f"H_max={args.H_max} context_len={args.context_len} p_shared={args.p_shared} "
-          f"action_block={action_block_dim}", flush=True)
+          f"p_terminal_goal={args.p_terminal_goal} action_block={action_block_dim}", flush=True)
 
     # ---- DataLoaders ----
     if args.dyn_prefix:
-        train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, train_idx, args.H_max,
-                                    args.context_len, args.prefix_H, args.p_shared, args.goal_close_bias)
-        val_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, val_idx, args.H_max,
-                                  args.context_len, args.prefix_H, args.p_shared, 0.0)
+        if args.anchor_rate == "raw":
+            raise SystemExit("[lewam-uni] --anchor_rate raw + --dyn_prefix not implemented")
+        train_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, frames_to_terminal, train_idx,
+                                    args.H_max, args.context_len, args.prefix_H,
+                                    args.p_terminal_goal, args.p_shared, args.goal_close_bias)
+        val_ds = PrefixSeqDataset(Frames, A_frame, t_gidx, maxh, frames_to_terminal, val_idx,
+                                  args.H_max, args.context_len, args.prefix_H,
+                                  args.p_terminal_goal, args.p_shared, 0.0)
     else:
-        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, train_idx,
-                                  args.H_max, args.context_len, args.p_shared, args.goal_close_bias)
-        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, maxh, val_idx,
-                                args.H_max, args.context_len, args.p_shared, 0.0)
+        train_ds = SeqTrajDataset(Frames, A_frame, t_gidx, frames_to_terminal, train_idx,
+                                  args.H_max, args.context_len, args.p_terminal_goal,
+                                  args.p_shared, args.goal_close_bias, stride=_stride)
+        val_ds = SeqTrajDataset(Frames, A_frame, t_gidx, frames_to_terminal, val_idx,
+                                args.H_max, args.context_len, args.p_terminal_goal,
+                                args.p_shared, 0.0, stride=_stride)
     avg_cover = max(1.0, float(args.context_len))
     n_tr_ep = max(args.batch_size, int(train_idx.numel() / avg_cover))
     n_va_ep = max(args.batch_size, int(val_idx.numel() / avg_cover))
@@ -631,7 +749,7 @@ def main():
     print(f"[lewam-uni] loaders ready: workers={args.num_workers} prefetch={args.prefetch_factor} "
           f"pin_memory=True  trajectories/epoch: train={n_tr_ep} val={n_va_ep} (~1x coverage)", flush=True)
 
-    # ---- optimizer: 4 param groups ----
+    # ---- optimizer ----
     opt = torch.optim.AdamW([
         {"params": [p for p in model.encoder.parameters() if p.requires_grad], "lr": args.encoder_lr},
         {"params": list(model.aggregator.parameters()), "lr": args.agg_lr},
@@ -681,8 +799,12 @@ def main():
         agg_action_cond=args.agg_action_cond, dyn_goal_cond=args.dyn_goal_cond,
         dyn_action_embed_dim=args.dyn_action_embed_dim,
         H_max=args.H_max, context_len=args.context_len, p_shared=args.p_shared,
+        p_terminal_goal=args.p_terminal_goal, terminal_source=terminal_source,
+        anchor_rate=args.anchor_rate,
         frameskip=frameskip, action_raw_dim=raw_adim,
         action_mean=act_mean, action_std=act_std,
+        latent_h=args.latent_h, h_codes=args.h_codes, h_code_dim=args.h_code_dim,
+        h_commit=args.h_commit, h_pred_w=args.h_pred_w,
         w_act=args.w_act, w_dyn=args.w_dyn, w_idm=args.w_idm, w_reg=args.w_reg, w_cyc=args.w_cyc,
         w_acons=args.w_acons,
         rollout_k=args.rollout_k, w_rollout=args.w_rollout,
@@ -690,6 +812,8 @@ def main():
         prefix_heads=args.prefix_heads,
         w_straight=args.w_straight, straight_target=args.straight_target,
         head_type=args.head_type, n_mix=args.n_mix, flow_H=args.flow_H,
+        num_chunks=args.num_chunks,
+        drop_goal=args.drop_goal, crop_size=args.crop_aug,
         ablate_dynamics=args.ablate_dynamics,
         dyn_action_from_policy=args.dyn_action_from_policy,
         dyn_policy_schedule=args.dyn_policy_schedule,
@@ -698,6 +822,7 @@ def main():
         dyn_policy_detach=args.dyn_policy_detach,
         encoder_lr=args.encoder_lr, head_lr=args.head_lr,
         dynamics_lr=args.dynamics_lr, agg_lr=args.agg_lr,
+        ablate_horizon=args.ablate_horizon, exp_tag=_tag, run_name=_run_name,
     )
     (run_dir / "lewam_unified_config.json").write_text(json.dumps(cfg_out, indent=2))
     durable_sync([run_dir / "lewam_unified_config.json"], args.ckpt_sync_dir)
@@ -705,7 +830,7 @@ def main():
     D = args.embed_dim
     Hmax = float(args.H_max)
 
-    # --- off-policy transitions for the DAgger-for-the-critic dynamics mix (optional) ---
+    # --- off-policy transitions for DAgger-for-the-critic dynamics mix ---
     OP = None
     if args.perturb_data and args.perturb_ratio > 0:
         import h5py as _h5
@@ -742,9 +867,28 @@ def main():
         horizon = horizon.to(device, non_blocking=True)
         n_pos = n_pos.to(device, non_blocking=True)
 
+        if args.crop_aug:
+            cs = args.crop_aug
+            mx = window.shape[-1] - cs
+            w_crop = window.new_empty(B, window.shape[1], 3, cs, cs)
+            g_crop = goals.new_empty(B, goals.shape[1], 3, cs, cs)
+            for i in range(B):
+                if train:
+                    dy, dx = torch.randint(0, mx + 1, (2,)).tolist()
+                    gy, gx = torch.randint(0, mx + 1, (2,)).tolist()
+                else:
+                    dy = dx = gy = gx = mx // 2
+                w_crop[i] = window[i, :, :, dy:dy + cs, dx:dx + cs]
+                g_crop[i] = goals[i, :, :, gy:gy + cs, gx:gx + cs]
+            window, goals = w_crop, g_crop
+
         n_window_frames = B * (max_pos + 1)
+        was_uint8 = window.dtype == torch.uint8
         frames_all = torch.cat([window.reshape(n_window_frames, *window.shape[2:]),
                                 goals.reshape(B * max_pos, *goals.shape[2:])]).float()
+        if was_uint8:
+            frames_all = (frames_all / 255.0 - _IMG_MEAN.to(frames_all.device)) \
+                         / _IMG_STD.to(frames_all.device)
         z_all = model.encode(frames_all)
         z_window = z_all[:n_window_frames].reshape(B, max_pos + 1, D)
         z_goal = z_all[n_window_frames:].reshape(B, max_pos, D).float()
@@ -753,9 +897,9 @@ def main():
 
         pos = torch.arange(max_pos, device=device).unsqueeze(0)         # (1, max_pos)
         valid = pos < n_pos.unsqueeze(1)                                # (B, max_pos)
-        # SHARED-mode horizons can exceed H_max (early positions are farther from the window's
-        # goal); clamp exactly like the eval countdown's min(steps, H_max)/H_max.
         h_norm = horizon.clamp(max=args.H_max).float() / Hmax
+        if args.ablate_horizon:
+            h_norm = torch.zeros_like(h_norm)
 
         a_prev = a_prev_mask = None
         if model.agg_action_cond:
@@ -764,16 +908,15 @@ def main():
             a_prev_mask = valid & (pos >= 1)
 
         # model forward
-        a_out, z_pred, a_idm = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
+        a_out, z_pred, a_idm, loss_h = model.forward_seq(states, z_goal, h_norm, actions, a_prev, a_prev_mask,
                                                  dyn_action_mix=(dyn_mix if train else 0.0),
                                                  dyn_action_detach=args.dyn_policy_detach)
         
         loss_mask = valid.unsqueeze(-1).float()
         n_valid = valid.sum().clamp(min=1)
 
-        # action loss (split by head type)
+        # action loss
         if getattr(model.gc_head, "head_type", "") == "flow" and model.flow_H > 1:
-            # action-CHUNK target: at position t the next flow_H blocks a_frame[t:t+H], masked past valid
             fh, adim = model.flow_H, actions.shape[-1]
             a_pad = torch.cat([actions, actions.new_zeros(B, fh - 1, adim)], dim=1)
             chunk = a_pad.unfold(1, fh, 1).permute(0, 1, 3, 2)                 # (B, max_pos, fh, adim)
@@ -782,13 +925,24 @@ def main():
             aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
                                               chunk.reshape(B * max_pos, fh, adim).float(),
                                               mask=cmask.reshape(B * max_pos, fh).float())
+        elif args.num_chunks > 1:
+            nc, adim = args.num_chunks, actions.shape[-1]
+            a_pad = torch.cat([actions, actions.new_zeros(B, nc - 1, adim)], dim=1)
+            chunk = a_pad.unfold(1, nc, 1).permute(0, 1, 3, 2)                 # (B, max_pos, nc, adim)
+            v_pad = torch.cat([valid, valid.new_zeros(B, nc - 1)], dim=1)
+            cmask = v_pad.unfold(1, nc, 1).float()                             # (B, max_pos, nc)
+            per_chunk = ((a_out.reshape(B, max_pos, nc, adim).float() - chunk.float()) ** 2).mean(-1)
+            aloss = ((per_chunk * cmask).sum(-1)
+                     / cmask.sum(-1).clamp(min=1)).reshape(B * max_pos)        # per-sample (N,)
         else:
             aloss = model.gc_head.action_loss(a_out.reshape(B * max_pos, -1).float(),
                                               actions.reshape(B * max_pos, actions.shape[-1]).float())
         loss_act = (aloss * valid.reshape(-1).float()).sum() / n_valid
 
-        # dynamics loss
-        loss_dyn = ((z_pred - next_tgt) ** 2 * loss_mask).sum() / (n_valid * D)
+        # dynamics loss. detach_dyn_target: encoder gets no gradient from being the target, so the
+        # dynamics learns the transition without reshaping the latents to make itself easy to predict.
+        dyn_tgt = next_tgt.detach() if args.detach_dyn_target else next_tgt
+        loss_dyn = ((z_pred - dyn_tgt) ** 2 * loss_mask).sum() / (n_valid * D)
 
         # DAgger for dynamics 
         if train and OP is not None:
@@ -869,7 +1023,7 @@ def main():
             loss_straight = ((1.0 - csim) * vmask.float()).sum() / vmask.sum().clamp(min=1)
         
         return (loss_act, loss_dyn, loss_reg, loss_cyc, loss_straight, loss_idm, loss_rollout,
-                loss_acons, int(n_valid.item()))
+                loss_acons, loss_h, int(n_valid.item()))
 
     def run_batch_prefix(window, goals, action_prefix, horizon, prefix_valid, n_anchor, train):
         """One Fast-LeWM prefix step. Encodes the window (anchor states + WM targets) + policy goals in
@@ -899,8 +1053,8 @@ def main():
             anchor_action = action_prefix[:, :, 0]                         # a_t at each anchor
             a_prev = torch.zeros_like(anchor_action); a_prev[:, 1:] = anchor_action[:, :-1]
             a_prev_mask = anchor_valid & (pos >= 1)
-        action_out, pred_seq = model.forward_seq_prefix(state_seq, z_goal, horizon_norm,
-                                                        action_prefix, a_prev, a_prev_mask)
+        action_out, pred_seq, loss_h = model.forward_seq_prefix(state_seq, z_goal, horizon_norm,
+                                                                action_prefix, a_prev, a_prev_mask)
         # policy BC loss on the anchor action (prefix block 0), masked to valid anchors
         anchor_action = action_prefix[:, :, 0]                            # (B, anchor_max, adim)
         aloss = model.gc_head.action_loss(action_out.reshape(B * anchor_max, -1).float(),
@@ -916,38 +1070,58 @@ def main():
         loss_dyn = ((pred_seq - target_seq) ** 2 * prefix_mask).sum() / (n_prefix * D)
         loss_reg = sigreg(state_seq[anchor_valid].unsqueeze(0)) if train else torch.zeros((), device=device)
         zero = torch.zeros((), device=device)
-        return loss_act, loss_dyn, loss_reg, zero, zero, zero, zero, zero, int(n_valid_anchor.item())
+        return (loss_act, loss_dyn, loss_reg, zero, zero, zero, zero, zero, loss_h,
+                int(n_valid_anchor.item()))
 
     # ---- training loop ----
     best_val = float("inf")
+    start_epoch = 0
+    _full_ckpt = run_dir / "lewam_unified_full.pt"
+    if args.resume and _full_ckpt.exists():
+        _st = torch.load(_full_ckpt, map_location=device)
+        model.load_state_dict(_st["model"])
+        opt.load_state_dict(_st["optimizer"])
+        sched.load_state_dict(_st["scheduler"])
+        best_val = float(_st["best_val"])
+        start_epoch = int(_st["epoch"]) + 1
+        torch.set_rng_state(_st["cpu_rng"].cpu())
+        if torch.cuda.is_available() and _st.get("cuda_rng"):
+            torch.cuda.set_rng_state_all([r.cpu() for r in _st["cuda_rng"]])
+        print(f"[lewam-uni] RESUMED at epoch {start_epoch} (best_val={best_val:.5f})", flush=True)
 
-    for ep in range(args.epochs):
+    for ep in range(start_epoch, args.epochs):
         t0 = time.time()
         alpha = dyn_alpha(ep)
 
         # ---- train ----
         model.train()
+        tr_hsum = 0.0
         tr_act, tr_dyn, tr_reg, tr_cyc, tr_str, tr_idm, tr_roll, tr_acons, tr_count = (
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        tr_term = 0
         for batch in train_loader:
+            _gat, _nv = batch[-1], (batch[5] if args.dyn_prefix else batch[4])
+            _vmask = torch.arange(_gat.shape[1]).unsqueeze(0) < _nv.unsqueeze(1)
+            tr_term += int((_gat & _vmask).sum())
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if args.dyn_prefix:
-                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, nval = \
-                        run_batch_prefix(*batch, train=True)
+                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = \
+                        run_batch_prefix(*batch[:-1], train=True)
                 else:
-                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, nval = run_batch(
-                        *batch, train=True, dyn_mix=alpha)
-                # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout): the rollout rides the same dyn weight
+                    loss_act, loss_dyn, loss_reg, loss_cyc, loss_str, loss_idm, loss_roll, loss_acons, loss_h, nval = run_batch(
+                        *batch[:-1], train=True, dyn_mix=alpha)
+                # L_dyn = w_dyn*(L_tf + w_rollout*L_rollout)
                 loss = (args.w_act * loss_act + args.w_dyn * loss_dyn
                         + args.w_dyn * args.w_rollout * loss_roll
                         + args.w_reg * loss_reg + args.w_cyc * loss_cyc
                         + args.w_straight * loss_str + args.w_idm * loss_idm
-                        + args.w_acons * loss_acons)
+                        + args.w_acons * loss_acons + loss_h)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tr_act += loss_act.item() * nval
+            tr_hsum += float(loss_h) * nval
             tr_dyn += loss_dyn.item() * nval
             tr_reg += loss_reg.item() * nval
             tr_cyc += loss_cyc.item() * nval
@@ -960,14 +1134,15 @@ def main():
 
         # ---- val ----
         model.eval()
+        tr_h = tr_hsum / max(tr_count, 1)
         va_act, va_dyn, va_count = 0.0, 0.0, 0
         with torch.no_grad():
             for batch in val_loader:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     if args.dyn_prefix:
-                        loss_act, loss_dyn, _, _, _, _, _, _, nval = run_batch_prefix(*batch, train=False)
+                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch_prefix(*batch[:-1], train=False)
                     else:
-                        loss_act, loss_dyn, _, _, _, _, _, _, nval = run_batch(*batch, train=False)
+                        loss_act, loss_dyn, _, _, _, _, _, _, _, nval = run_batch(*batch[:-1], train=False)
                 va_act += loss_act.item() * nval
                 va_dyn += loss_dyn.item() * nval
                 va_count += nval
@@ -987,15 +1162,24 @@ def main():
         idm_str = f"  idm={tr_i:.5f}" if args.w_idm > 0 else ""
         roll_str = f"  roll{args.rollout_k}={tr_ro:.5f}" if args.rollout_k > 1 else ""
         acons_str = f"  acons={tr_ac:.5f}" if args.w_acons > 0 else ""
+        cs = model.gc_head.code_stats() if hasattr(model.gc_head, "code_stats") else {}
+        h_str = (f"  h={tr_h:.5f}" if args.latent_h else "") + (
+            f" ppl={cs['h_ppl']:.1f}/{args.h_codes} live={cs['h_live']}" if cs else "")
+        term_str = f"  term={tr_term/max(tr_count,1):.2f}" if args.p_terminal_goal > 0 else ""
         print(f"[lewam-uni] ep {ep+1}/{args.epochs}  "
-              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}  "
+              f"act={tr_a:.5f}/{va_a:.5f}  dyn={tr_d:.5f}/{va_d:.5f}  reg={tr_r:.5f}{cyc_str}{dyn_str}{str_str}{idm_str}{roll_str}{acons_str}{h_str}{term_str}  "
               f"lr_enc={lrs[0]:.2e}  {dt:.1f}s", flush=True)
 
         # ---- save checkpoints ----
         full_sd = model.state_dict()
         torch.save(full_sd, run_dir / "lewam_unified_latest.pt")
+        torch.save(dict(model=full_sd, optimizer=opt.state_dict(), scheduler=sched.state_dict(),
+                        epoch=ep, best_val=best_val, cpu_rng=torch.get_rng_state(),
+                        cuda_rng=(torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])),
+                   run_dir / "lewam_unified_full.pt")
         durable_sync([run_dir / "lewam_unified_config.json",
-                      run_dir / "lewam_unified_latest.pt"], args.ckpt_sync_dir)
+                      run_dir / "lewam_unified_latest.pt",
+                      run_dir / "lewam_unified_full.pt"], args.ckpt_sync_dir)
 
         combined_val = va_a + va_d
         if combined_val < best_val:

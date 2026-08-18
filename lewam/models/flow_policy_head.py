@@ -49,10 +49,14 @@ class DiTBlock(nn.Module):
 
 class FlowPolicyHead(nn.Module):
     def __init__(self, z_dim=192, action_dim=25, hidden_dim=256, state_dim=None,
-                 H=1, depth=3, heads=4, cond_dim=256, n_steps=8, n_freqs=64, dropout=0.0):
+                 H=1, depth=3, heads=4, cond_dim=256, n_steps=8, n_freqs=64, dropout=0.0,
+                 drop_goal=False):
         super().__init__()
         self.action_dim = int(action_dim)
         self.H = int(H)
+        self.drop_goal = bool(drop_goal)
+        if self.drop_goal:
+            self.null_goal = nn.Parameter(torch.zeros(z_dim))
         self.n_steps = int(n_steps)
         self.n_freqs = int(n_freqs)
         self.head_type = "flow"
@@ -73,6 +77,8 @@ class FlowPolicyHead(nn.Module):
         nn.init.zeros_(self.a_out.bias)
 
     def forward(self, z_t, z_goal, h_norm):
+        if self.drop_goal:
+            z_goal = self.null_goal.unsqueeze(0).expand(z_t.shape[0], -1)
         return (self.emb_state(z_t) + self.emb_goal(z_goal)
                 + self.emb_h(_sinusoid(h_norm, 2 * self.n_freqs)))
 

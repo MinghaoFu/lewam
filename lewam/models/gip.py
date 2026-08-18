@@ -219,8 +219,7 @@ def load_lewam_split_model(run_name, which="best"):
         ckpt = run_dir / "lewam_gc_latest.pt"
     assert ckpt.exists(), f"no lewam_gc_*.pt checkpoint in {run_dir}"
     sd = torch.load(ckpt, map_location="cpu")
-    # infer the projector width from the checkpoint so older ckpts (wider projector)
-    # load into the current ViTEncoder without a config field.
+    # infer the projector width from the checkpoint so older ckpts load
     proj_w = sd.get("encoder.projector.net.0.weight")
     proj_hidden = int(proj_w.shape[0]) if proj_w is not None else None
     model = LeWAMSplit(
@@ -264,6 +263,7 @@ def load_lewam_unified_model(run_name, which="best"):
     model = LeWAMUnified(
         encoder_size=str(cfg.get("encoder_size", "tiny")),
         encoder_backbone=str(cfg.get("encoder_backbone", "scratch")),
+        encoder_ckpt="defer",
         embed_dim=int(cfg["z_dim"]), action_dim=int(cfg["action_dim"]),
         hidden_dim=int(cfg["hidden_dim"]), img_size=224,
         dropout=float(cfg.get("dropout", 0.1)), proj_hidden=proj_hidden,
@@ -274,14 +274,22 @@ def load_lewam_unified_model(run_name, which="best"):
         agg_gate=bool(cfg.get("agg_gate", False)),
         agg_action_cond=bool(cfg.get("agg_action_cond", False)),
         dyn_goal_cond=bool(cfg.get("dyn_goal_cond", True)),
-        head_type=str(cfg.get("head_type", "mse")), n_mix=int(cfg.get("n_mix", 5)),
-        flow_H=int(cfg.get("flow_H", 1)),
+        head_type=str(cfg.get("head_type", "mse")), 
+        n_mix=int(cfg.get("n_mix", 5)),
+        flow_H=int(cfg.get("flow_H", 1)), 
+        num_chunks=int(cfg.get("num_chunks", 1)),
+        drop_goal=bool(cfg.get("drop_goal", False)), 
+        crop_size=int(cfg.get("crop_size", 0) or 0),
         dyn_action_embed_dim=int(cfg.get("dyn_action_embed_dim", 0) or 0),
         use_idm=bool(float(cfg.get("w_idm", 0) or 0) > 0),
         use_prefix=bool(cfg.get("use_prefix", False)),
         prefix_H=int(cfg.get("prefix_H", 5)),
         prefix_depth=int(cfg.get("prefix_depth", 2)),
         prefix_heads=int(cfg.get("prefix_heads", 4)),
+        # head must be rebuilt with flags it was trained under (load is strict)
+        latent_h=str(cfg.get("latent_h", "") or ""),
+        h_codes=int(cfg.get("h_codes", 16)),
+        h_code_dim=int(cfg.get("h_code_dim", 64)),
     )
     res = model.load_state_dict(sd, strict=True)
     print(f"[UNIFIED] load {run_name} <- {ckpt.name}: action_block={cfg['action_dim']} "
@@ -292,6 +300,23 @@ def load_lewam_unified_model(run_name, which="best"):
 
 
 # GC-IDM: planning-free goal-conditioned IDM on frozen LeWM latents (arXiv 2605.08732). mode=gcidm. NO CEM / NO WM.
+def load_crossattn_model(run_name, which="best"):
+    """Load a trained cross-attention LeWAM (scripts/train_crossattn.py) + its config, which carries
+    the action z-score stats / frameskip / block dim used to un-normalize predicted actions."""
+    from lewam.models.lewam_crossattn import build_model
+
+    cache = Path(get_cache_dir(sub_folder="checkpoints"))
+    run_dir = cache / run_name
+    cfg = json.loads((run_dir / "crossattn_config.json").read_text())
+    ckpt = run_dir / ("crossattn_latest.pt" if which == "latest" else "crossattn_best.pt")
+    if not ckpt.exists():
+        ckpt = run_dir / "crossattn_latest.pt"
+    assert ckpt.exists(), f"no crossattn_*.pt checkpoint in {run_dir}"
+    model = build_model(cfg)
+    model.load_state_dict(torch.load(ckpt, map_location="cpu"), strict=True)
+    return model, cfg
+
+
 def load_gcidm_model(run_name):
     """Load a trained GC-IDM: the FROZEN LeWM encoder + the GCIDMHead.
 
@@ -315,9 +340,7 @@ def load_gcidm_model(run_name):
         gcfg["weights"], embed_dim=int(gcfg["emb_dim"]), history_size=3,
         img_size=224, action_block_dim=int(gcfg["action_dim"]),
     )
-    # end-to-end (from-scratch) model: the encoder was trained jointly with the head,
-    # so its weights are in the full-model checkpoint under "encoder.*", not a frozen
-    # file. build_frozen_lewm built the arch only; load the trained encoder here.
+
     if gcfg.get("from_scratch") or gcfg.get("weights") == "self":
         full_pt = run_dir / "gcidm_full_model_best.pt"
         if not full_pt.exists():
@@ -412,9 +435,26 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             ablate_horizon=bool(ge.get("ablate_horizon", split_cfg.get("ablate_horizon", False))),
         )
 
+    if mode == "crossattn_policy":
+        ge = cfg.get("gip_eval", {})
+        ca_cfg = getattr(model, "_crossattn_cfg")
+        horizon0 = ge.get("horizon0", None)
+        if horizon0 is None:
+            horizon0 = h0_full if h0_full is not None else \
+                float(cfg.eval.goal_offset_steps) / float(action_block)
+        if ge.get("flow_steps"):
+            model.policy_head.n_flow_steps = int(ge["flow_steps"])
+        return CrossAttnPolicy(
+            model=model, cfg=ca_cfg, action_block=action_block,
+            action_dim=adim // action_block, horizon0=_as_h0(horizon0),
+            H_max=int(ge.get("horizon_H_max", ca_cfg.get("H_max", 50))),
+            process=process, transform=transform,
+            ablate_horizon=bool(ge.get("ablate_horizon", ca_cfg.get("ablate_horizon", False))),
+            exec_actions=int(ge.get("exec_actions", 0)))
+
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
-    if mode in ("unified_policy", "unified_cem"):
+    if mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         ge = cfg.get("gip_eval", {})
         uni_cfg = getattr(model, "_unified_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -425,7 +465,12 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                       action_dim=adim // action_block, horizon0=_as_h0(horizon0),
                       H_max=int(ge.get("horizon_H_max", uni_cfg.get("H_max", 50))),
                       process=process, transform=transform,
-                      ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))))
+                      ablate_horizon=bool(ge.get("ablate_horizon", uni_cfg.get("ablate_horizon", False))),
+                      exec_blocks=int(ge.get("exec_blocks", 1)),
+                      exec_actions=int(ge.get("exec_actions", 0)))
+        # flow head eval-time ODE steps
+        if ge.get("flow_steps") and hasattr(model.gc_head, "n_steps"):
+            model.gc_head.n_steps = int(ge["flow_steps"])
         if mode == "unified_cem":
             return LeWAMUnifiedCEMPolicy(
                 cem_K=int(ge.get("cem_K", 256)), cem_M=int(ge.get("cem_M", 32)),
@@ -437,6 +482,42 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 cem_propose=str(ge.get("cem_propose", "cem")),
                 cem_cost=str(ge.get("cem_cost", "final")),
                 cem_dyn_mode=str(ge.get("cem_dyn_mode", "auto")),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- Prompt-MPC (OURS; paper name). Per-episode prompt delta on the goal latent
+        # through the frozen policy. pm_seg>0 = per-step prompts; pm_cost=anymin = the
+        # reach-anytime-aligned cost (task-completion default).
+        if mode == "unified_prompt_mpc":
+            from lewam.models.prompt_mpc import LeWAMUnifiedPromptMPCPolicy
+            return LeWAMUnifiedPromptMPCPolicy(
+                pm_steps=int(ge.get("pm_steps", 20)), pm_lr=float(ge.get("pm_lr", 0.02)),
+                pm_clip=float(ge.get("pm_clip", 5.0)), pm_rho=float(ge.get("pm_rho", 0.3)),
+                pm_cost=str(ge.get("pm_cost", "terminal")),
+                pm_random=bool(ge.get("pm_random", False)),
+                pm_seg=int(ge.get("pm_seg", 0)),
+                pm_r_rho=float(ge.get("pm_r_rho", 0.1)),
+                pm_H=int(ge.get("pm_H", 5)),
+                pm_H_auto=bool(ge.get("pm_H_auto", False)),
+                pm_exec_k=int(ge.get("pm_exec_k", 0)),
+                pm_exec_full=bool(ge.get("pm_exec_full", True)),
+                cem_seed=int(cfg.seed),
+                log_latents=bool(ge.get("dump_latents", "")),
+                ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
+        # ---- Gradient MPC (Jyothir et al., arXiv:2312.17227 lineage): the action sequence
+        # is the parameter, warm-started from the policy.
+        if mode == "unified_grad":
+            from lewam.models.grad_mpc import LeWAMUnifiedGradPolicy
+            return LeWAMUnifiedGradPolicy(
+                grad_steps=int(ge.get("grad_steps", 50)), grad_lr=float(ge.get("grad_lr", 0.05)),
+                grad_H=int(ge.get("grad_H", 5)), grad_clip=float(ge.get("grad_clip", 10.0)),
+                grad_action_clip=ge.get("grad_action_clip", None),
+                grad_dyn_mode=str(ge.get("grad_dyn_mode", "auto")),
+                grad_exec_full=bool(ge.get("grad_exec_full", True)),
+                grad_warm=bool(ge.get("grad_warm", True)),
+                grad_H_auto=bool(ge.get("grad_H_auto", False)),
+                grad_exec_k=int(ge.get("grad_exec_k", 0)),
+                grad_tr=float(ge.get("grad_tr", 0.0)),
                 cem_seed=int(cfg.seed),
                 log_latents=bool(ge.get("dump_latents", "")),
                 ctx_cap=int(ge.get("ctx_cap", uni_cfg.get("context_len", 5))), **common)
@@ -831,6 +912,92 @@ class LeWAMSplitPolicy(BasePolicy):
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
 
+class CrossAttnPolicy(LeWAMSplitPolicy):
+    """Eval adapter for the cross-attention LeWAM. Reactive: each replan encodes the current frame,
+    caches it, and cross-attends the flow head over the last `policy_history_len` frame latents plus
+    the goal. The head returns raw actions directly; only the executed prefix is un-z-scored and
+    buffered. Dynamics head is unused on this path."""
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        self.exec_actions = int(kwargs.pop("exec_actions", 0))
+        super().__init__(model, cfg, *args, **kwargs)
+        self.type = "crossattn_policy"
+        self.policy_history_len = int(cfg["policy_history_len"])
+        self.goal_conditioning = bool(cfg["goal_conditioning"])
+        self.n_tokens = int(cfg["fs"]) * int(cfg["num_chunks"])
+        self._lat_buf = None
+
+    def set_env(self, env):
+        super().set_env(env)
+        self._lat_buf = [[] for _ in range(getattr(env, "num_envs", 1))]
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kwargs):
+        info_dict = self._prepare_info(info_dict)
+        num_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        hl = self.policy_history_len
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(num_envs)]
+            self._steps_left = np.full(num_envs, self.horizon0, dtype=np.float64)
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(num_envs)]
+
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(num_envs):
+                if flush[i]:
+                    self._action_buffer[i].clear()
+                    self._lat_buf[i].clear()
+                    self._steps_left[i] = _h0_at(self.horizon0, i)
+
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
+
+        # dense raw history: encode the current frame every step (not just at replan), keep the last hl
+        active = [i for i in range(num_envs) if not dead[i]]
+        if active:
+            curr = info_dict["pixels"][active]
+            c_obs = curr[:, -1] if curr.ndim == 5 else curr
+            z_cur = self.model.encode(c_obs.to(device).float())
+            for row, i in enumerate(active):
+                self._lat_buf[i].append(z_cur[row])
+                if len(self._lat_buf[i]) > hl:
+                    self._lat_buf[i] = self._lat_buf[i][-hl:]
+
+        replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            assert "goal" in info_dict, "crossattn eval needs info_dict['goal'] (goal-reaching)"
+            goal = info_dict["goal"][replan]
+            g_obs = goal[:, -1] if goal.ndim == 5 else goal
+            z_g = self.model.encode(g_obs.to(device).float())
+            R, D = len(replan), z_g.shape[-1]
+            frames = torch.zeros(R, hl, D, device=device)
+            frame_pad = torch.ones(R, hl, dtype=torch.bool, device=device)
+            for row, i in enumerate(replan):
+                buf = self._lat_buf[i][-hl:]
+                frames[row, hl - len(buf):] = torch.stack(buf)
+                frame_pad[row, hl - len(buf):] = False
+
+            steps = np.maximum(self._steps_left[replan], 1.0)
+            h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                  device=device, dtype=torch.float32)
+            if self.ablate_horizon:
+                h_norm = torch.zeros_like(h_norm)
+            raw = self.model.policy_head.act(frames, frame_pad, z_g, self.goal_conditioning, h_norm)
+            raw = (raw * self._astd + self._amean).cpu()               # (R, N, raw_adim)
+            take = self.exec_actions if 0 < self.exec_actions < self.n_tokens else self.action_block
+            for row, i in enumerate(replan):
+                self._action_buffer[i].extend(raw[row, :take])
+                self._steps_left[i] = max(self._steps_left[i] - take / self.action_block, 1.0)
+
+        action = torch.full((num_envs, self.action_dim), float("nan"))
+        for i in range(num_envs):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
 # LeWAM-Unified eval adapter (mode: unified_policy = reactive, full-causal from episode start)
 class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
     """Eval adapter for LeWAM-Unified. Full-causal from the episode start, mirroring training (each
@@ -854,8 +1021,11 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
         # ctx_cap > 0 -> aggregate only the LAST ctx_cap cached latents (i.e. sliding window)
         # 0 = full causal history from episode start (default behaviour).
         self.ctx_cap = int(kwargs.pop("ctx_cap", 0))
-        # log_latents -> record the executed per-obs-step current latent + goal latent for probes
-        # (e.g., ompare ctx_cap=1 vs full rollouts).
+        # exec_blocks > 1 -> execute that many chunk blocks per replan (chunk-trained flow head
+        # 1 = replan every block, the default
+        self.exec_blocks = int(kwargs.pop("exec_blocks", 1))
+        # exec_actions < action_block -> execute only the first N raw actions of a block
+        self.exec_actions = int(kwargs.pop("exec_actions", 0))
         self.log_latents = bool(kwargs.pop("log_latents", False))
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "lewam_unified_policy"
@@ -977,15 +1147,26 @@ class LeWAMUnifiedPolicy(LeWAMSplitPolicy):
             if self.ablate_horizon:
                 h_norm = torch.zeros_like(h_norm)
 
-            z_blk = self.model.gc_head.point(self.model.gc_head(c_last, z_g, h_norm))   # (R, blk) z-scored (mixture mean for gmm)
+            head_out = self.model.gc_head(c_last, z_g, h_norm)
+            if self.exec_blocks > 1 and hasattr(self.model.gc_head, "_integrate"):
+                chunk = self.model.gc_head._integrate(head_out, K=1)[:, 0]   # (R, H, blk) one ODE draw
+                n_exec = min(self.exec_blocks, chunk.shape[1])
+                z_blocks = [chunk[:, b] for b in range(n_exec)]              # z-scored blocks, in order
+            else:
+                z_blocks = [self.model.gc_head.point(head_out)]              # (R, blk)
+                n_exec = 1
             for row, i in enumerate(replan):
-                self._last_blk[i] = z_blk[row].detach()            # z-scored, next frame's prev
-            raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
-                   * self._astd + self._amean)                     # un-z-score per raw dim
-            raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
+                self._last_blk[i] = z_blocks[-1][row].detach()     # last EXECUTED block, next frame's prev
+            take = self.exec_actions if 0 < self.exec_actions < self.action_block else self.action_block
+            for z_blk in z_blocks:
+                raw = (z_blk.reshape(len(replan), self.frameskip, self.raw_adim)
+                       * self._astd + self._amean)                 # un-z-score per raw dim
+                raw = raw.reshape(len(replan), self.action_block, self.action_dim).cpu()
+                for row, i in enumerate(replan):
+                    self._action_buffer[i].extend(raw[row][:take])
             for row, i in enumerate(replan):
-                self._action_buffer[i].extend(raw[row])
-                self._steps_left[i] = max(self._steps_left[i] - 1.0, 1.0)  # one obs-step consumed
+                consumed = float(n_exec) * take / self.action_block
+                self._steps_left[i] = max(self._steps_left[i] - consumed, 1.0)  # obs-steps consumed
 
         action = torch.full((num_envs, self.action_dim), float("nan"))
         for i in range(num_envs):
@@ -1140,11 +1321,10 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 win_len0[row] = real_latents.shape[0]
             # goal replicated once per candidate sample: (n_replan*n_samples, latent_dim)
             z_goal_rep = z_goal.unsqueeze(1).expand(n_replan, n_samples, latent_dim).reshape(n_replan * n_samples, latent_dim)
-            # ---- propose candidate H-block plans, keep the WM-verified best -> `plan_mean` (n_replan,H,block_dim) ----
+            # propose candidate H-block plans, keep the WM-verified best -> `plan_mean` (n_replan,H,block_dim)
             if self.cem_propose in ("policy", "policy_modes"):
                 # policy-proposal MPC: sample n_samples sequences from a probabilistic policy autoregressively,
                 # roll each through the dynamics, score, keep the best per env.
-                # No CEM gaussian sampling -> candidates stay on the policy's action manifold
                 sample_noise = (self.cem_propose == "policy")
                 window = window0.unsqueeze(1).expand(n_replan, n_samples, ctx_cap, latent_dim).reshape(n_replan * n_samples, ctx_cap, latent_dim).clone()
                 win_len = win_len0.unsqueeze(1).expand(n_replan, n_samples).reshape(n_replan * n_samples).clone()
@@ -1153,6 +1333,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                 for _h in range(plan_horizon):
                     horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
                                                 device=device, dtype=torch.float32)
+                    if self.ablate_horizon:
+                        horizon_norm = torch.zeros_like(horizon_norm)
                     context = self._context_at_head(window, win_len)    # (n_replan*n_samples, latent_dim)
                     action_blk = self.model.gc_head.sample(
                         self.model.gc_head(context, z_goal_rep, horizon_norm), 1, 
@@ -1173,6 +1355,8 @@ class LeWAMUnifiedCEMPolicy(LeWAMUnifiedPolicy):
                     for _h in range(plan_horizon):
                         horizon_norm = torch.tensor(np.minimum(steps_left, self.H_max) / self.H_max,
                                                     device=device, dtype=torch.float32)
+                        if self.ablate_horizon:
+                            horizon_norm = torch.zeros_like(horizon_norm)
                         context = self._context_at_head(window, win_len)    # (n_replan, latent_dim) trained context
                         action_blk = self.model.gc_head.point(self.model.gc_head(context, z_goal, horizon_norm))
                         warm_blocks.append(action_blk)
