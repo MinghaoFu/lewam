@@ -162,7 +162,7 @@ class JointFlow(nn.Module):
 
     @torch.no_grad()
     def sample(self, z_history, history_pad, generator=None):
-        """Joint Euler ODE on tied schedule. 
+        """Joint Euler ODE on tied schedule.
         Returns the action chunks (z-scored raw space) and next-state latents."""
         B = z_history.shape[0]
         memory = self._memory(z_history)
@@ -176,6 +176,27 @@ class JointFlow(nn.Module):
             action = action + v_action / self.n_flow_steps
             state = state + v_state / self.n_flow_steps
         return action, state
+
+    @torch.no_grad()
+    def sample_inpaint(self, z_history, history_pad, action_plan, noise_action=None,
+                       noise_state=None):
+        """Euler ODE over the state slots only; action slots are clamped to the plan's
+        flow path a_tau = (1-tau)*noise + tau*plan at every step. Passing the same
+        noise tensors across calls makes candidate plans comparable within a replan.
+        Returns the next-state latents imagined under the plan."""
+        B = z_history.shape[0]
+        memory = self._memory(z_history)
+        if noise_action is None:
+            noise_action = torch.randn_like(action_plan)
+        if noise_state is None:
+            noise_state = torch.randn(B, self.num_states, self.z_dim, device=z_history.device)
+        state = noise_state
+        for i in range(self.n_flow_steps):
+            tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
+            action = torch.lerp(noise_action, action_plan, tau[:, None, None])
+            _, v_state = self.velocity(action, state, memory, history_pad, tau, tau)
+            state = state + v_state / self.n_flow_steps
+        return state
 
 
 def build_model(cfg):

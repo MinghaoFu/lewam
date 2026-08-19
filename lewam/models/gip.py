@@ -471,7 +471,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             ablate_horizon=bool(ge.get("ablate_horizon", ca_cfg.get("ablate_horizon", False))),
             exec_actions=int(ge.get("exec_actions", 0)))
 
-    if mode == "jointflow_policy":
+    if mode in ("jointflow_policy", "jointflow_plan"):
         ge = cfg.get("gip_eval", {})
         jf_cfg = getattr(model, "_jointflow_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -480,12 +480,20 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
                 float(cfg.eval.goal_offset_steps) / float(action_block)
         if ge.get("flow_steps"):
             model.n_flow_steps = int(ge["flow_steps"])
-        return JointFlowPolicy(
+        shared = dict(
             model=model, cfg=jf_cfg, action_block=action_block,
             action_dim=adim // action_block, horizon0=_as_h0(horizon0),
             H_max=int(ge.get("horizon_H_max", 50)),
             process=process, transform=transform,
             exec_actions=int(ge.get("exec_actions", 0)))
+        if mode == "jointflow_policy":
+            return JointFlowPolicy(**shared)
+        return JointFlowPlanPolicy(
+            plan_mode=str(ge.get("plan_mode", "best_of_k")),
+            plan_k=int(ge.get("plan_k", 32)),
+            cem_iters=int(ge.get("cem_iters", 3)),
+            cem_elites=int(ge.get("cem_elites", 6)),
+            cem_std=float(ge.get("cem_std", 0.5)), **shared)
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
@@ -1067,9 +1075,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         if flush is not None:
             for i in range(num_envs):
                 if flush[i]:
-                    self._action_buffer[i].clear()
-                    self._lat_buf[i].clear()
-                    self._steps_left[i] = _h0_at(self.horizon0, i)
+                    self._flush_env(i)
 
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
@@ -1095,9 +1101,9 @@ class JointFlowPolicy(LeWAMSplitPolicy):
                 buf = self._lat_buf[i][-hl:]
                 history[row, hl - len(buf):] = torch.stack(buf)
                 history_pad[row, hl - len(buf):] = False
-            action_chunk, _imagined = self.model.sample(history, history_pad)
+            action_chunk = self._propose(info_dict, replan, history, history_pad)
             raw = (action_chunk * self._astd + self._amean).cpu()      # (R, num_actions, raw_adim)
-            take = self.exec_actions if 0 < self.exec_actions <= self.num_actions else self.action_block
+            take = self._take()
             for row, i in enumerate(replan):
                 self._action_buffer[i].extend(raw[row, :take])
                 self._steps_left[i] = max(self._steps_left[i] - take / self.action_block, 1.0)
@@ -1107,6 +1113,118 @@ class JointFlowPolicy(LeWAMSplitPolicy):
             if not dead[i]:
                 action[i] = self._action_buffer[i].popleft()
         return action.reshape(*self.env.action_space.shape).float().numpy()
+
+    def _take(self):
+        return self.exec_actions if 0 < self.exec_actions <= self.num_actions else self.action_block
+
+    def _flush_env(self, i):
+        self._action_buffer[i].clear()
+        self._lat_buf[i].clear()
+        self._steps_left[i] = _h0_at(self.horizon0, i)
+
+    def _propose(self, info_dict, replan, history, history_pad):
+        action_chunk, _imagined = self.model.sample(history, history_pad)
+        return action_chunk
+
+
+class JointFlowPlanPolicy(JointFlowPolicy):
+    """Goal-reaching planner on a trained jointflow (mode=jointflow_plan). Candidate action
+    chunks are scored by the final cost ||z_imag_last - z_goal||^2 over the imagined boundary
+    latents; the winner's first `exec_actions` are executed.
+
+      plan_mode=best_of_k: plan_k independent joint samples, cheapest wins
+      plan_mode=cem: iterative refit of a candidate mean, warm-started from the previous
+        replan's plan shifted by the executed prefix. Candidates are evaluated with
+        sample_inpaint under noise fixed per replan, so their costs are comparable.
+    """
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
+        self.plan_k = int(kwargs.pop("plan_k", 32))
+        self.cem_iters = int(kwargs.pop("cem_iters", 3))
+        self.cem_elites = int(kwargs.pop("cem_elites", 6))
+        self.cem_std = float(kwargs.pop("cem_std", 0.5))
+        super().__init__(model, cfg, *args, **kwargs)
+        assert self.plan_mode in ("best_of_k", "cem"), self.plan_mode
+        assert self.model.num_states > 0, "planning needs imagined state tokens"
+        self.type = f"jointflow_plan_{self.plan_mode}"
+        self._prev_plan = None
+
+    def set_env(self, env):
+        super().set_env(env)
+        self._prev_plan = [None] * getattr(env, "num_envs", 1)
+
+    def _flush_env(self, i):
+        super()._flush_env(i)
+        if self._prev_plan is not None:
+            self._prev_plan[i] = None
+
+    @staticmethod
+    def _final_cost(z_imag, z_goal):
+        return ((z_imag[:, -1] - z_goal) ** 2).mean(-1)
+
+    def _propose(self, info_dict, replan, history, history_pad):
+        assert "goal" in info_dict, "jointflow_plan eval needs info_dict['goal'] (goal-reaching)"
+        device = history.device
+        goal = info_dict["goal"][replan]
+        g_obs = goal[:, -1] if goal.ndim == 5 else goal
+        z_goal = self.model.encode(g_obs.to(device).float())
+        if self.plan_mode == "best_of_k":
+            plan = self._best_of_k(history, history_pad, z_goal)
+        else:
+            plan = self._cem(history, history_pad, z_goal, replan)
+        if self._prev_plan is not None:
+            for row, i in enumerate(replan):
+                self._prev_plan[i] = plan[row]
+        return plan
+
+    def _best_of_k(self, history, history_pad, z_goal):
+        R, K = history.shape[0], self.plan_k
+        action, z_imag = self.model.sample(history.repeat_interleave(K, 0),
+                                           history_pad.repeat_interleave(K, 0))
+        cost = self._final_cost(z_imag, z_goal.repeat_interleave(K, 0)).view(R, K)
+        pick = cost.argmin(1)
+        return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
+
+    def _cem(self, history, history_pad, z_goal, replan):
+        R, P = history.shape[0], self.plan_k
+        A, adim = self.model.num_actions, self.model.action_raw_dim
+        device = history.device
+        take = self._take()
+
+        mean, _ = self.model.sample(history, history_pad)
+        for row, i in enumerate(replan):
+            prev = self._prev_plan[i] if self._prev_plan is not None else None
+            if prev is not None:
+                mean[row] = torch.cat([prev[take:], prev[-1:].expand(take, adim)])
+        std = torch.full_like(mean, self.cem_std)
+
+        noise_action = torch.randn(R, 1, A, adim, device=device) \
+            .expand(R, P, A, adim).reshape(R * P, A, adim)
+        noise_state = torch.randn(R, 1, self.model.num_states, self.model.z_dim, device=device) \
+            .expand(R, P, self.model.num_states, self.model.z_dim) \
+            .reshape(R * P, self.model.num_states, self.model.z_dim)
+        hist = history.repeat_interleave(P, 0)
+        pad = history_pad.repeat_interleave(P, 0)
+        goal = z_goal.repeat_interleave(P, 0)
+        rows = torch.arange(R, device=device)
+
+        best_plan = mean.clone()
+        best_cost = torch.full((R,), float("inf"), device=device)
+        for _ in range(self.cem_iters):
+            cand = mean[:, None] + std[:, None] * torch.randn(R, P, A, adim, device=device)
+            cand[:, 0] = mean
+            z_imag = self.model.sample_inpaint(hist, pad, cand.reshape(R * P, A, adim),
+                                               noise_action, noise_state)
+            cost = self._final_cost(z_imag, goal).view(R, P)
+            iter_cost, iter_pick = cost.min(1)
+            better = iter_cost < best_cost
+            best_plan[better] = cand[rows, iter_pick][better]
+            best_cost = torch.minimum(iter_cost, best_cost)
+            elite_idx = cost.topk(min(self.cem_elites, P), dim=1, largest=False).indices
+            elites = cand[rows[:, None], elite_idx]
+            mean, std = elites.mean(1), elites.std(1, correction=0).clamp_min(0.02)
+        return best_plan
 
 
 # LeWAM-Unified eval adapter (mode: unified_policy = reactive, full-causal from episode start)
