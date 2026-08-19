@@ -90,6 +90,25 @@ class NoEarlyStop(gymnasium.Wrapper):
         return obs, rew, False, truncated, info
 
 
+class BudgetTruncate(gymnasium.Wrapper):
+    """Per-episode step budget (DP's eval semantics): truncate the env once its OWN budget is
+    spent, so success counts only if it fired within 2x that episode's length — not within the
+    global 2x-max rollout. `budget` is set per env after world construction."""
+
+    budget = None
+
+    def reset(self, **kwargs):
+        self.t = 0
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        obs, rew, terminated, truncated, info = self.env.step(action)
+        self.t += 1
+        if self.budget is not None and self.t >= self.budget:
+            truncated = True
+        return obs, rew, terminated, truncated, info
+
+
 @hydra.main(version_base=None, config_path="../configs/eval", config_name="pusht")
 def run(cfg: DictConfig):
     mode = cfg.get("gip_eval", {}).get("mode", "bc")
@@ -121,10 +140,28 @@ def run(cfg: DictConfig):
     ), "horizon*action_block must be <= eval_budget"
     cfg.world.max_episode_steps = 2 * cfg.eval.eval_budget
     no_early_stop = bool(cfg.get("gip_eval", {}).get("no_early_stop", False))
+    # full-traj budget protocol: 'per_episode' (default, DP semantics — each episode gets 2x its
+    # OWN offset) or 'global' (pre-2026-08-19 behavior — every episode gets 2x the max offset).
+    budget_mode = str(cfg.get("gip_eval", {}).get("budget_mode", "per_episode"))
+    per_episode_budget = budget_mode == "per_episode" and goal_offsets is not None
+    wrappers = ([BudgetTruncate] if per_episode_budget else []) + ([NoEarlyStop] if no_early_stop else [])
     world = swm.World(**cfg.world, image_shape=(224, 224),
-                      extra_wrappers=[NoEarlyStop] if no_early_stop else None)
+                      extra_wrappers=wrappers or None)
     if no_early_stop:
         print("[GIP] no_early_stop ON: envs run the full eval_budget; reporting ever-reached AND final-state SR")
+    if per_episode_budget:
+        if world.num_envs == len(goal_offsets):
+            for i, _e in enumerate(world.envs.envs):
+                _w = _e
+                while not isinstance(_w, BudgetTruncate):
+                    _w = _w.env
+                _w.budget = 2 * int(goal_offsets[i])
+            print(f"[full-traj] budget_mode=per_episode: per-env budgets "
+                  f"{2 * min(goal_offsets)}..{2 * max(goal_offsets)}", flush=True)
+        else:
+            per_episode_budget = False
+            print(f"[full-traj] WARN budget_mode=per_episode needs num_envs==episodes "
+                  f"({world.num_envs} vs {len(goal_offsets)}); falling back to the global budget", flush=True)
 
     # -- optional strict success criterion: judge the BLOCK pose only (pos dims [2:4] + angle dim 4),
     # agent excluded. Mirrors env.eval_state (incl. angle wrap); pusht state layout only.
