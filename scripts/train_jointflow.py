@@ -52,7 +52,7 @@ def parse_args():
     ap.add_argument("--encoder_backbone", default="resnet18dp")
     ap.add_argument("--encoder_size", default="tiny")
     ap.add_argument("--z_dim", type=int, default=512)
-    ap.add_argument("--proj_hidden", type=int, default=512,
+    ap.add_argument("--proj_hidden", type=int, default=1024,
                     help="encoder projector hidden width (64-d keypoints -> proj_hidden -> z_dim)")
     ap.add_argument("--d_model", type=int, default=512,
                     help="flow transformer width; = z_dim so state/memory tokens are never compressed")
