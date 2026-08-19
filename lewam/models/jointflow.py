@@ -102,9 +102,6 @@ class JointFlow(nn.Module):
         return self.frame_in(z_history) + self.frame_pos
 
     def _cond(self, tau_action, tau_state):
-        """tau_cond='per_modality' (DreamZero-style): action tokens are modulated by tau_action and
-        state tokens by tau_state — returns per-token cond (B, n_slots, dim). 'summed' (UWM-style
-        global dual-timestep AdaLN, the round-1 wiring): one blended cond (B, dim) for all tokens."""
         emb_action = self.tau_action_in(sinusoid(tau_action, self.dim))
         emb_state = self.tau_state_in(sinusoid(tau_state, self.dim))
         if self.tau_cond == "summed":
@@ -186,7 +183,5 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
-                    # default 'summed' so round-1 checkpoints (configs without the key) rebuild
-                    # with their trained wiring; the trainer records 'per_modality' for new runs.
-                    tau_cond="summed")
+                    tau_cond="summed")   # round-1 checkpoints: configs without the key
     return JointFlow({**defaults, **cfg})

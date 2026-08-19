@@ -72,8 +72,8 @@ def parse_args():
     ap.add_argument("--split_tau", action="store_true",
                     help="draw tau_action and tau_state independently instead of one shared tau")
     ap.add_argument("--tau_cond", default="per_modality", choices=["per_modality", "summed"],
-                    help="per_modality (DreamZero-style): action/state tokens modulated by their "
-                         "own flow-time; summed: one blended AdaLN cond (UWM-style, round-1 wiring)")
+                    help="per_modality: each modality modulated by its own flow-time; "
+                         "summed: one blended cond (round-1 checkpoints)")
     ap.add_argument("--w_reg", type=float, default=0.04,
                     help="SIGReg anti-collapse weight on the encoder latent")
     ap.add_argument("--state_ema_target", action="store_true",

@@ -91,9 +91,7 @@ class NoEarlyStop(gymnasium.Wrapper):
 
 
 class BudgetTruncate(gymnasium.Wrapper):
-    """Per-episode step budget (DP's eval semantics): truncate the env once its OWN budget is
-    spent, so success counts only if it fired within 2x that episode's length — not within the
-    global 2x-max rollout. `budget` is set per env after world construction."""
+    """Truncate the env at its own step budget. `budget` is set per env after world construction."""
 
     budget = None
 
@@ -140,8 +138,7 @@ def run(cfg: DictConfig):
     ), "horizon*action_block must be <= eval_budget"
     cfg.world.max_episode_steps = 2 * cfg.eval.eval_budget
     no_early_stop = bool(cfg.get("gip_eval", {}).get("no_early_stop", False))
-    # full-traj budget protocol: 'per_episode' (default, DP semantics — each episode gets 2x its
-    # OWN offset) or 'global' (pre-2026-08-19 behavior — every episode gets 2x the max offset).
+    # 'per_episode' = 2x each episode's own offset; 'global' = 2x the max offset for every episode
     budget_mode = str(cfg.get("gip_eval", {}).get("budget_mode", "per_episode"))
     per_episode_budget = budget_mode == "per_episode" and goal_offsets is not None
     wrappers = ([BudgetTruncate] if per_episode_budget else []) + ([NoEarlyStop] if no_early_stop else [])

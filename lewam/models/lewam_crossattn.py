@@ -36,8 +36,7 @@ class CrossAttnBlock(nn.Module):
         nn.init.zeros_(self.ada[-1].bias)
 
     def forward(self, x, memory, cond, self_mask, memory_pad):
-        # cond: (B, dim) = one modulation for all tokens, or (B, n_tokens, dim) = per-token
-        # modulation (jointflow's per-modality flow-time conditioning).
+        # cond: (B, dim) or per-token (B, n_tokens, dim)
         gates = self.ada(cond).chunk(9, dim=-1)
         sh_s, sc_s, g_s, sh_c, sc_c, g_c, sh_m, sc_m, g_m = \
             (t.unsqueeze(1) if t.dim() == 2 else t for t in gates)
