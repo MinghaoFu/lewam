@@ -26,5 +26,9 @@ jobRunParams:
     mkdir -p /opt/tiger/lewam_job && cd /opt/tiger/lewam_job
     cp /mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/code/merged_wam_v2.sh .
     bash merged_wam_v2.sh
-  envsList: {}
+  envsList:
+    MERLIN_JOB_INSTANCE_TYPE: 'Train'
+    HAS_TT_DATA: 'False'
+    STORAGE_TYPE: 'HDFS'
+    ML_FRAMEWORK: 'pytorch'
 namespace: /user/minghao.fu
