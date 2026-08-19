@@ -51,12 +51,12 @@ def parse_args():
     # model
     ap.add_argument("--encoder_backbone", default="resnet18dp")
     ap.add_argument("--encoder_size", default="tiny")
-    ap.add_argument("--z_dim", type=int, default=512)
-    ap.add_argument("--proj_hidden", type=int, default=1024,
+    ap.add_argument("--z_dim", type=int, default=384)
+    ap.add_argument("--proj_hidden", type=int, default=768,
                     help="encoder projector hidden width (64-d keypoints -> proj_hidden -> z_dim)")
-    ap.add_argument("--d_model", type=int, default=512,
+    ap.add_argument("--d_model", type=int, default=384,
                     help="flow transformer width; = z_dim so state/memory tokens are never compressed")
-    ap.add_argument("--n_heads", type=int, default=8)
+    ap.add_argument("--n_heads", type=int, default=6)
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--n_flow_steps", type=int, default=8)

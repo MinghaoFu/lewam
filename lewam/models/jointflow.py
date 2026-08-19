@@ -152,7 +152,7 @@ class JointFlow(nn.Module):
 
 def build_model(cfg):
     defaults = dict(encoder_size="tiny", encoder_backbone="resnet18dp", encoder_ckpt=None,
-                    img_size=224, z_dim=512, proj_hidden=1024, d_model=512, n_heads=8, depth=8,
+                    img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False)
     return JointFlow({**defaults, **cfg})
