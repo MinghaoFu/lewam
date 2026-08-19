@@ -67,3 +67,9 @@ Promote the scratch suites (`test_jointflow.py`, `test_jointflow_policy.py`, cur
 session tmp dir) into `tests/`: slot layout, mask zero-gradient statements, dataset boundary
 indexing, loss/backward reach, adapter replan cadence/denorm/flush. They are the regression net
 for the whole refactor.
+
+## In-code markers
+
+The owner leaves `#RE:` comments in the code (style pass 71e5ef4 onward) marking refactor-time
+renames: `grep -rn "#RE:" lewam/ scripts/` at refactor time and clear every one (e.g.
+split_tau -> indep_schedule, dim -> embed_dim, slot_pos -> pos_emb, one shared sinusoid home).
