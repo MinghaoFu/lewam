@@ -56,7 +56,8 @@ class JointFlow(nn.Module):
         self.encoder = VisionEncoder(size=cfg["encoder_size"], output_type="cls",
                                      output_dim=self.z_dim, img_size=cfg["img_size"],
                                      backbone=cfg["encoder_backbone"],
-                                     backbone_ckpt=cfg.get("encoder_ckpt"))
+                                     backbone_ckpt=cfg.get("encoder_ckpt"),
+                                     proj_hidden=cfg["proj_hidden"])
 
         is_state, times = slot_layout(self.num_actions, self.num_states, self.fs)
         self.register_buffer("is_state", is_state)
@@ -151,7 +152,7 @@ class JointFlow(nn.Module):
 
 def build_model(cfg):
     defaults = dict(encoder_size="tiny", encoder_backbone="resnet18dp", encoder_ckpt=None,
-                    img_size=224, z_dim=512, d_model=256, n_heads=4, depth=6, dropout=0.1,
-                    n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
+                    img_size=224, z_dim=512, proj_hidden=512, d_model=512, n_heads=8, depth=8,
+                    dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False)
     return JointFlow({**defaults, **cfg})

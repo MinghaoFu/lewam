@@ -43,8 +43,8 @@ def parse_args():
     ap.add_argument("--num_workers", type=int, default=6)
     ap.add_argument("--prefetch_factor", type=int, default=4)
     ap.add_argument("--train_split", type=float, default=0.9)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--encoder_lr", type=float, default=1e-4)
+    ap.add_argument("--lr", type=float, default=1e-4,
+                    help="one uniform rate for encoder + flow transformer (UWM precedent)")
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
@@ -52,9 +52,12 @@ def parse_args():
     ap.add_argument("--encoder_backbone", default="resnet18dp")
     ap.add_argument("--encoder_size", default="tiny")
     ap.add_argument("--z_dim", type=int, default=512)
-    ap.add_argument("--d_model", type=int, default=256)
-    ap.add_argument("--n_heads", type=int, default=4)
-    ap.add_argument("--depth", type=int, default=6)
+    ap.add_argument("--proj_hidden", type=int, default=512,
+                    help="encoder projector hidden width (64-d keypoints -> proj_hidden -> z_dim)")
+    ap.add_argument("--d_model", type=int, default=512,
+                    help="flow transformer width; = z_dim so state/memory tokens are never compressed")
+    ap.add_argument("--n_heads", type=int, default=8)
+    ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--n_flow_steps", type=int, default=8)
     ap.add_argument("--num_actions_pred", type=int, default=5)
@@ -152,7 +155,8 @@ def main():
 
     cfg = dict(fs=args.frameskip, action_raw_dim=int(a_frame.shape[1]), img_size=args.img_size,
                encoder_size=args.encoder_size, encoder_backbone=args.encoder_backbone,
-               encoder_ckpt=None, z_dim=args.z_dim, d_model=args.d_model, n_heads=args.n_heads,
+               encoder_ckpt=None, z_dim=args.z_dim, proj_hidden=args.proj_hidden,
+               d_model=args.d_model, n_heads=args.n_heads,
                depth=args.depth, dropout=args.dropout, n_flow_steps=args.n_flow_steps,
                num_actions_pred=args.num_actions_pred, num_states_pred=args.num_states_pred,
                policy_history_len=args.policy_history_len,
@@ -165,11 +169,7 @@ def main():
     print(f"[jointflow] params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
           f"state_target={'ema' if args.state_ema_target else 'online'}", flush=True)
 
-    enc_ids = {id(p) for p in model.encoder.parameters()}
-    opt = torch.optim.AdamW([
-        {"params": [p for p in model.parameters() if id(p) in enc_ids], "lr": args.encoder_lr},
-        {"params": [p for p in model.parameters() if id(p) not in enc_ids], "lr": args.lr},
-    ], weight_decay=args.weight_decay)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     def lr_scale(epoch):
         if epoch < args.warmup_epochs:
@@ -272,7 +272,7 @@ def main():
                 accumulate(val_stats, loss_terms, n); val_n += n
         val_act = val_stats.get("act", 0.0) / max(val_n, 1)   # best-checkpoint metric = val action loss
         print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(train_stats,train_n)}]  "
-              f"val[{fmt(val_stats,val_n)}]  lr={sched.get_last_lr()[1]:.2e}  "
+              f"val[{fmt(val_stats,val_n)}]  lr={sched.get_last_lr()[0]:.2e}  "
               f"{time.time()-t0:.1f}s", flush=True)
 
         torch.save(model.state_dict(), run_dir / "jointflow_latest.pt")
