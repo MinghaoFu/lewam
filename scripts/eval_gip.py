@@ -338,6 +338,13 @@ def run(cfg: DictConfig):
         model._crossattn_cfg = ca_cfg
         adim = int(ca_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
+    elif mode == "jointflow_policy":
+        model, jf_cfg = gip.load_jointflow_model(cfg.policy, which=cfg.get("seq_which", "best"))
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
+        model.requires_grad_(False)
+        model._jointflow_cfg = jf_cfg
+        adim = int(jf_cfg["action_dim"])
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
     elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).

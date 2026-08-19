@@ -317,6 +317,25 @@ def load_crossattn_model(run_name, which="best"):
     return model, cfg
 
 
+def load_jointflow_model(run_name, which="best"):
+    """Load a trained jointflow (scripts/train_jointflow.py) + its config. `action_dim` (the
+    frameskip block dim the eval harness sizes adim with) is derived here; the trainer config
+    stores only fs and action_raw_dim."""
+    from lewam.models.jointflow import build_model as build_jointflow
+
+    cache = Path(get_cache_dir(sub_folder="checkpoints"))
+    run_dir = cache / run_name
+    cfg = json.loads((run_dir / "jointflow_config.json").read_text())
+    cfg.setdefault("action_dim", int(cfg["fs"]) * int(cfg["action_raw_dim"]))
+    ckpt = run_dir / ("jointflow_latest.pt" if which == "latest" else "jointflow_best.pt")
+    if not ckpt.exists():
+        ckpt = run_dir / "jointflow_latest.pt"
+    assert ckpt.exists(), f"no jointflow_*.pt checkpoint in {run_dir}"
+    model = build_jointflow(cfg)
+    model.load_state_dict(torch.load(ckpt, map_location="cpu"), strict=True)
+    return model, cfg
+
+
 def load_gcidm_model(run_name):
     """Load a trained GC-IDM: the FROZEN LeWM encoder + the GCIDMHead.
 
@@ -450,6 +469,22 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             H_max=int(ge.get("horizon_H_max", ca_cfg.get("H_max", 50))),
             process=process, transform=transform,
             ablate_horizon=bool(ge.get("ablate_horizon", ca_cfg.get("ablate_horizon", False))),
+            exec_actions=int(ge.get("exec_actions", 0)))
+
+    if mode == "jointflow_policy":
+        ge = cfg.get("gip_eval", {})
+        jf_cfg = getattr(model, "_jointflow_cfg")
+        horizon0 = ge.get("horizon0", None)
+        if horizon0 is None:
+            horizon0 = h0_full if h0_full is not None else \
+                float(cfg.eval.goal_offset_steps) / float(action_block)
+        if ge.get("flow_steps"):
+            model.n_flow_steps = int(ge["flow_steps"])
+        return JointFlowPolicy(
+            model=model, cfg=jf_cfg, action_block=action_block,
+            action_dim=adim // action_block, horizon0=_as_h0(horizon0),
+            H_max=int(ge.get("horizon_H_max", 50)),
+            process=process, transform=transform,
             exec_actions=int(ge.get("exec_actions", 0)))
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
@@ -987,6 +1022,82 @@ class CrossAttnPolicy(LeWAMSplitPolicy):
             raw = self.model.policy_head.act(frames, frame_pad, z_g, self.goal_conditioning, h_norm)
             raw = (raw * self._astd + self._amean).cpu()               # (R, N, raw_adim)
             take = self.exec_actions if 0 < self.exec_actions < self.n_tokens else self.action_block
+            for row, i in enumerate(replan):
+                self._action_buffer[i].extend(raw[row, :take])
+                self._steps_left[i] = max(self._steps_left[i] - take / self.action_block, 1.0)
+
+        action = torch.full((num_envs, self.action_dim), float("nan"))
+        for i in range(num_envs):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).float().numpy()
+
+
+class JointFlowPolicy(LeWAMSplitPolicy):
+    """Eval adapter for jointflow (lewam.models.jointflow). Reactive and goal-blind: every step
+    encodes the current frame into the rolling latent history; a replan samples the joint
+    [action chunk; imagined boundary latents] and executes the first `exec_actions` raw actions
+    (default one frameskip block). The imagined latents are discarded on this path."""
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        self.exec_actions = int(kwargs.pop("exec_actions", 0))
+        super().__init__(model, cfg, *args, **kwargs)
+        self.type = "jointflow_policy"
+        self.history_len = int(cfg["policy_history_len"])
+        self.num_actions = int(cfg["num_actions_pred"])
+        self._lat_buf = None
+
+    def set_env(self, env):
+        super().set_env(env)
+        self._lat_buf = [[] for _ in range(getattr(env, "num_envs", 1))]
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kwargs):
+        info_dict = self._prepare_info(info_dict)
+        num_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        hl = self.history_len
+        if self._action_buffer is None:
+            self._action_buffer = [deque() for _ in range(num_envs)]
+            self._steps_left = np.full(num_envs, self.horizon0, dtype=np.float64)
+        if self._lat_buf is None:
+            self._lat_buf = [[] for _ in range(num_envs)]
+
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(num_envs):
+                if flush[i]:
+                    self._action_buffer[i].clear()
+                    self._lat_buf[i].clear()
+                    self._steps_left[i] = _h0_at(self.horizon0, i)
+
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
+
+        # dense raw history: encode the current frame every step (not just at replan), keep the
+        # last history_len latents (the training-time raw-consecutive obs structure)
+        active = [i for i in range(num_envs) if not dead[i]]
+        if active:
+            curr = info_dict["pixels"][active]
+            c_obs = curr[:, -1] if curr.ndim == 5 else curr
+            z_cur = self.model.encode(c_obs.to(device).float())
+            for row, i in enumerate(active):
+                self._lat_buf[i].append(z_cur[row])
+                if len(self._lat_buf[i]) > hl:
+                    self._lat_buf[i] = self._lat_buf[i][-hl:]
+
+        replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            R, D = len(replan), self.model.z_dim
+            history = torch.zeros(R, hl, D, device=device)
+            history_pad = torch.ones(R, hl, dtype=torch.bool, device=device)
+            for row, i in enumerate(replan):
+                buf = self._lat_buf[i][-hl:]
+                history[row, hl - len(buf):] = torch.stack(buf)
+                history_pad[row, hl - len(buf):] = False
+            action_chunk, _imagined = self.model.sample(history, history_pad)
+            raw = (action_chunk * self._astd + self._amean).cpu()      # (R, num_actions, raw_adim)
+            take = self.exec_actions if 0 < self.exec_actions <= self.num_actions else self.action_block
             for row, i in enumerate(replan):
                 self._action_buffer[i].extend(raw[row, :take])
                 self._steps_left[i] = max(self._steps_left[i] - take / self.action_block, 1.0)
