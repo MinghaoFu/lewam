@@ -71,6 +71,9 @@ def parse_args():
                          "0: mask action tokens from attending the (noisy) state tokens")
     ap.add_argument("--split_tau", action="store_true",
                     help="draw tau_action and tau_state independently instead of one shared tau")
+    ap.add_argument("--tau_cond", default="per_modality", choices=["per_modality", "summed"],
+                    help="per_modality (DreamZero-style): action/state tokens modulated by their "
+                         "own flow-time; summed: one blended AdaLN cond (UWM-style, round-1 wiring)")
     ap.add_argument("--w_reg", type=float, default=0.04,
                     help="SIGReg anti-collapse weight on the encoder latent")
     ap.add_argument("--state_ema_target", action="store_true",
@@ -160,7 +163,8 @@ def main():
                depth=args.depth, dropout=args.dropout, n_flow_steps=args.n_flow_steps,
                num_actions_pred=args.num_actions_pred, num_states_pred=args.num_states_pred,
                policy_history_len=args.policy_history_len,
-               actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau)
+               actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau,
+               tau_cond=args.tau_cond)
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
