@@ -1,40 +1,56 @@
-"""Joint flow matching (docs/wip/LEWAM_FLOW_DESIGN.md): one rectified-flow objective over
-per-timestep action tokens and block-boundary next-state latent tokens. The denoised sequence
-interleaves frameskip actions with one state token per block boundary; causal temporal attention,
-cross-attention into the frame-history memory. No separate dynamics head, no per-modality loss
-weight: L = mean_MSE(v_action) + mean_MSE(v_state), each in its own native space."""
+"""Joint flow matching over action and next-state latent tokens"""
 
 import torch
 import torch.nn as nn
 
-from lewam.models.lewam_crossattn import CrossAttnBlock, sinusoid
+from lewam.models.lewam_crossattn import CrossAttnBlock, sinusoid   #RE: stop rewriting sinusoid, put reusable module in one place
 from lewam.models.module import VisionEncoder
 
 
-def slot_layout(num_actions, num_states, frameskip):
-    """Temporal slot order a[1..fs], z[fs], a[fs+1..2fs], z[2fs], ..., trailing actions.
-    Returns (is_state bool (n_slots,), times float (n_slots,)); the state token for boundary q sits
-    at time q*fs + 0.5 because a[q*fs] precedes the state it causes."""
+def state_act_layout(num_actions, num_states, frameskip):
+    """
+    Orders a sequence of states and actions a[1..fs], z[fs], a[fs+1..2fs], z[2fs],...
+
+    Args:
+        num_actions (int): number of action tokens to predict
+        num_states (int): number of state tokens to predict
+        frameskip (int): number of action tokens between state tokens i.e. 
+            how many actions are executed before the next state is observed
+    Returns:
+        is_state (torch.Tensor): boolean tensor of size (n_tokens,) indicating state vs action
+        times (torch.Tensor): float tensor of size (n_tokens,) indicating the timestep
+    """
     assert num_actions >= num_states * frameskip, "pad num_actions up to num_states*frameskip first"
-    kinds, times = [], []
+    is_state, times = [], []
     for j in range(1, num_actions + 1):
-        kinds.append(False)
+        is_state.append(False)
         times.append(float(j))
         if j % frameskip == 0 and j // frameskip <= num_states:
-            kinds.append(True)
+            is_state.append(True)
             times.append(j + 0.5)
-    return torch.tensor(kinds), torch.tensor(times)
+    return torch.tensor(is_state), torch.tensor(times)
 
 
-def attn_mask(is_state, times, actions_attend_states):
-    """Float mask (n_slots, n_slots), 0 = attend, -inf = blocked. A token attends tokens at earlier
-    or equal time. actions_attend_states=False additionally blocks action tokens from attending the
-    (noisy) state tokens; state tokens always see the actions that cause them."""
-    allowed = times[None, :] <= times[:, None]
+def joint_attn_mask(is_state, times, actions_attend_states=True):
+    """
+    Returns attention mask (n_tokens, n_tokens), 0 = attend, -inf = blocked. 
+    Temporal ordering: tokens attned only to tokens at earlier or equal time
+
+    Args:
+        is_state (torch.Tensor): boolean tensor of shape (n_tokens) indicating 
+            which tokens are states
+        times (torch.Tensor): float tensor of shape (n_tokens) of (env/trajectory) 
+            timestpes for each token
+        actions_attend_states (bool): if False, blocks action tokens from attending
+            to (noisy) state tokens
+    """
+    attends = times[None, :] <= times[:, None]
     if not actions_attend_states:
-        allowed &= ~(~is_state[:, None] & is_state[None, :])
+        # action cannot attend to imagined state 
+        attends &= ~(~is_state[:, None] & is_state[None, :])
+
     mask = torch.zeros(times.numel(), times.numel())
-    mask[~allowed] = float("-inf")
+    mask[~attends] = float("-inf")
     return mask
 
 
@@ -48,10 +64,9 @@ class JointFlow(nn.Module):
         self.action_raw_dim = cfg["action_raw_dim"]
         self.history_len = cfg["policy_history_len"]
         self.actions_attend_states = cfg["actions_attend_states"]
-        self.split_tau = cfg["split_tau"]
+        self.split_tau = cfg["split_tau"]   #RE: prefer indep_schedule or similar
         self.n_flow_steps = cfg["n_flow_steps"]
-        dim = cfg["d_model"]
-        self.dim = dim
+        self.dim = cfg["d_model"]   #RE: prefer embed_dim or similar; dim is too vague
 
         self.encoder = VisionEncoder(size=cfg["encoder_size"], output_type="cls",
                                      output_dim=self.z_dim, img_size=cfg["img_size"],
@@ -59,27 +74,25 @@ class JointFlow(nn.Module):
                                      backbone_ckpt=cfg.get("encoder_ckpt"),
                                      proj_hidden=cfg["proj_hidden"])
 
-        is_state, times = slot_layout(self.num_actions, self.num_states, self.fs)
+        is_state, times = state_act_layout(self.num_actions, self.num_states, self.fs)
         self.register_buffer("is_state", is_state)
         self.register_buffer("action_slots", (~is_state).nonzero().squeeze(-1))
         self.register_buffer("state_slots", is_state.nonzero().squeeze(-1))
-        self.register_buffer("self_mask", attn_mask(is_state, times, self.actions_attend_states))
+        self.register_buffer("self_mask", joint_attn_mask(is_state, times, self.actions_attend_states))
 
-        self.frame_in = nn.Linear(self.z_dim, dim)
-        self.frame_pos = nn.Parameter(torch.zeros(1, self.history_len, dim))
-        self.action_in = nn.Linear(self.action_raw_dim, dim)
-        self.state_in = nn.Linear(self.z_dim, dim)
-        self.slot_pos = nn.Parameter(torch.zeros(1, is_state.numel(), dim))
-        self.modality_emb = nn.Embedding(2, dim)
-        # separate projections keep tau_action and tau_state distinguishable under --split_tau;
-        # with the tied default both project the same sinusoid.
-        self.tau_action_in = nn.Linear(dim, dim)
-        self.tau_state_in = nn.Linear(dim, dim)
-        self.cond = nn.Sequential(nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.blocks = nn.ModuleList(CrossAttnBlock(dim, cfg["n_heads"], dropout=cfg["dropout"])
+        self.frame_in = nn.Linear(self.z_dim, self.dim)
+        self.frame_pos = nn.Parameter(torch.zeros(1, self.history_len, self.dim))
+        self.action_in = nn.Linear(self.action_raw_dim, self.dim)
+        self.state_in = nn.Linear(self.z_dim, self.dim)
+        self.slot_pos = nn.Parameter(torch.zeros(1, is_state.numel(), self.dim))    #RE: idk, I think self.pos_emb is fine enough
+        self.modality_emb = nn.Embedding(2, self.dim)
+        self.tau_action_in = nn.Linear(self.dim, self.dim)
+        self.tau_state_in = nn.Linear(self.dim, self.dim)
+        self.cond = nn.Sequential(nn.Linear(self.dim, self.dim), nn.SiLU(), nn.Linear(self.dim, self.dim))
+        self.blocks = nn.ModuleList(CrossAttnBlock(self.dim, cfg["n_heads"], dropout=cfg["dropout"])
                                     for _ in range(cfg["depth"]))
-        self.action_out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, self.action_raw_dim))
-        self.state_out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, self.z_dim))
+        self.action_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.action_raw_dim))
+        self.state_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.z_dim))
 
     def encode(self, pixels):
         return self.encoder(pixels)
@@ -93,15 +106,19 @@ class JointFlow(nn.Module):
         return self.cond(emb)
 
     def velocity(self, noisy_action, noisy_state, memory, memory_pad, tau_action, tau_state):
+        """Rectified flow forward pass"""
         B = noisy_action.shape[0]
         x = noisy_action.new_zeros(B, self.is_state.numel(), self.dim)
+
         x[:, self.action_slots] = self.action_in(noisy_action)
         if self.num_states:
             x[:, self.state_slots] = self.state_in(noisy_state)
+
         x = x + self.slot_pos + self.modality_emb(self.is_state.long())
         cond = self._cond(tau_action, tau_state)
         for block in self.blocks:
             x = block(x, memory, cond, self.self_mask, memory_pad)
+            
         v_action = self.action_out(x[:, self.action_slots])
         v_state = self.state_out(x[:, self.state_slots])
         return v_action, v_state
@@ -112,8 +129,11 @@ class JointFlow(nn.Module):
         return (per_token.sum(-1) / valid.sum(-1).clamp(min=1)).mean()
 
     def loss(self, z_history, history_pad, action_target, action_valid, state_target, state_valid):
-        """Rectified flow, straight path: x_tau = (1-tau)*x0 + tau*x1, velocity target x1 - x0.
-        One shared tau across both modalities unless split_tau draws them independently."""
+        """
+        Rectified flow loss
+            pred: velocity((1-tau)*x0 + tau*x1, tau, cond)
+            target: x1 - x0
+        """
         B = action_target.shape[0]
         memory = self._memory(z_history)
         tau_action = torch.rand(B, device=action_target.device)
@@ -134,8 +154,8 @@ class JointFlow(nn.Module):
 
     @torch.no_grad()
     def sample(self, z_history, history_pad, generator=None):
-        """Joint Euler ODE on the tied schedule. Returns the action chunk (z-scored raw space) and
-        the imagined block-boundary latents."""
+        """Joint Euler ODE on tied schedule. 
+        Returns the action chunks (z-scored raw space) and next-state latents."""
         B = z_history.shape[0]
         memory = self._memory(z_history)
         action = torch.randn(B, self.num_actions, self.action_raw_dim, device=z_history.device,
