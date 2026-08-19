@@ -59,7 +59,10 @@ def parse_args():
     ap.add_argument("--n_flow_steps", type=int, default=8)
     ap.add_argument("--num_actions_pred", type=int, default=5)
     ap.add_argument("--num_states_pred", type=int, default=1)
-    ap.add_argument("--policy_history_len", type=int, default=3)
+    ap.add_argument("--policy_history_len", type=int, default=2,
+                    help="raw-consecutive obs frames (DP To=2, the DDPM-90 substrate)")
+    ap.add_argument("--steps_per_epoch", type=int, default=0,
+                    help="cap train/val batches per epoch (0 = one pass over the decision points)")
     ap.add_argument("--noimag", action="store_true",
                     help="mask action tokens from attending the (noisy) state tokens; default lets "
                          "trailing action blocks condition on the imagined boundary state")
@@ -138,6 +141,8 @@ def main():
                               args.policy_history_len, args.num_actions_pred, args.frameskip,
                               args.num_states_pred)
         n = max(args.batch_size, int(idx.numel()))
+        if args.steps_per_epoch:
+            n = min(n, args.steps_per_epoch * args.batch_size)
         return DataLoader(ds, sampler=RandomSampler(ds, replacement=True, num_samples=n), **loader_args)
     train_loader, val_loader = make_loader(train_idx), make_loader(val_idx)
 
