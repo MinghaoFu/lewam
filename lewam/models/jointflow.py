@@ -183,5 +183,5 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
-                    tau_cond="summed")   # round-1 checkpoints: configs without the key
+                    tau_cond="summed")   # checkpoints saved without the key trained with the summed wiring
     return JointFlow({**defaults, **cfg})

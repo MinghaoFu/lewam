@@ -73,7 +73,7 @@ def parse_args():
                     help="draw tau_action and tau_state independently instead of one shared tau")
     ap.add_argument("--tau_cond", default="per_modality", choices=["per_modality", "summed"],
                     help="per_modality: each modality modulated by its own flow-time; "
-                         "summed: one blended cond (round-1 checkpoints)")
+                         "summed: one blended cond for all tokens")
     ap.add_argument("--w_reg", type=float, default=0.04,
                     help="SIGReg anti-collapse weight on the encoder latent")
     ap.add_argument("--state_ema_target", action="store_true",
