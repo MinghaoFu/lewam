@@ -26,12 +26,12 @@ def slot_layout(num_actions, num_states, frameskip):
     return torch.tensor(kinds), torch.tensor(times)
 
 
-def attn_mask(is_state, times, allow_imag):
+def attn_mask(is_state, times, actions_attend_states):
     """Float mask (n_slots, n_slots), 0 = attend, -inf = blocked. A token attends tokens at earlier
-    or equal time. allow_imag=False additionally blocks action tokens from attending (noisy) state
-    tokens; state tokens always see the actions that cause them."""
+    or equal time. actions_attend_states=False additionally blocks action tokens from attending the
+    (noisy) state tokens; state tokens always see the actions that cause them."""
     allowed = times[None, :] <= times[:, None]
-    if not allow_imag:
+    if not actions_attend_states:
         allowed &= ~(~is_state[:, None] & is_state[None, :])
     mask = torch.zeros(times.numel(), times.numel())
     mask[~allowed] = float("-inf")
@@ -47,7 +47,7 @@ class JointFlow(nn.Module):
         self.num_states = cfg["num_states_pred"]
         self.action_raw_dim = cfg["action_raw_dim"]
         self.history_len = cfg["policy_history_len"]
-        self.allow_imag = cfg["allow_imag"]
+        self.actions_attend_states = cfg["actions_attend_states"]
         self.split_tau = cfg["split_tau"]
         self.n_flow_steps = cfg["n_flow_steps"]
         dim = cfg["d_model"]
@@ -62,7 +62,7 @@ class JointFlow(nn.Module):
         self.register_buffer("is_state", is_state)
         self.register_buffer("action_slots", (~is_state).nonzero().squeeze(-1))
         self.register_buffer("state_slots", is_state.nonzero().squeeze(-1))
-        self.register_buffer("self_mask", attn_mask(is_state, times, self.allow_imag))
+        self.register_buffer("self_mask", attn_mask(is_state, times, self.actions_attend_states))
 
         self.frame_in = nn.Linear(self.z_dim, dim)
         self.frame_pos = nn.Parameter(torch.zeros(1, self.history_len, dim))
@@ -83,8 +83,8 @@ class JointFlow(nn.Module):
     def encode(self, pixels):
         return self.encoder(pixels)
 
-    def _memory(self, z_ctx):
-        return self.frame_in(z_ctx) + self.frame_pos
+    def _memory(self, z_history):
+        return self.frame_in(z_history) + self.frame_pos
 
     def _cond(self, tau_action, tau_state):
         emb = self.tau_action_in(sinusoid(tau_action, self.dim)) \
@@ -110,11 +110,11 @@ class JointFlow(nn.Module):
         per_token = ((pred - target) ** 2).mean(-1) * valid
         return (per_token.sum(-1) / valid.sum(-1).clamp(min=1)).mean()
 
-    def loss(self, z_ctx, ctx_pad, action_target, action_valid, state_target, state_valid):
+    def loss(self, z_history, history_pad, action_target, action_valid, state_target, state_valid):
         """Rectified flow, straight path: x_tau = (1-tau)*x0 + tau*x1, velocity target x1 - x0.
         One shared tau across both modalities unless split_tau draws them independently."""
         B = action_target.shape[0]
-        memory = self._memory(z_ctx)
+        memory = self._memory(z_history)
         tau_action = torch.rand(B, device=action_target.device)
         tau_state = torch.rand(B, device=action_target.device) if self.split_tau else tau_action
 
@@ -123,7 +123,7 @@ class JointFlow(nn.Module):
         noise_state = torch.randn_like(state_target)
         noisy_state = torch.lerp(noise_state, state_target, tau_state[:, None, None])
 
-        v_action, v_state = self.velocity(noisy_action, noisy_state, memory, ctx_pad,
+        v_action, v_state = self.velocity(noisy_action, noisy_state, memory, history_pad,
                                           tau_action, tau_state)
         loss_action = self._masked_mse(v_action, action_target - noise_action, action_valid)
         if self.num_states == 0:
@@ -132,18 +132,18 @@ class JointFlow(nn.Module):
         return loss_action, loss_state
 
     @torch.no_grad()
-    def sample(self, z_ctx, ctx_pad, generator=None):
+    def sample(self, z_history, history_pad, generator=None):
         """Joint Euler ODE on the tied schedule. Returns the action chunk (z-scored raw space) and
         the imagined block-boundary latents."""
-        B = z_ctx.shape[0]
-        memory = self._memory(z_ctx)
-        action = torch.randn(B, self.num_actions, self.action_raw_dim, device=z_ctx.device,
+        B = z_history.shape[0]
+        memory = self._memory(z_history)
+        action = torch.randn(B, self.num_actions, self.action_raw_dim, device=z_history.device,
                              generator=generator)
-        state = torch.randn(B, self.num_states, self.z_dim, device=z_ctx.device,
+        state = torch.randn(B, self.num_states, self.z_dim, device=z_history.device,
                             generator=generator)
         for i in range(self.n_flow_steps):
-            tau = torch.full((B,), i / self.n_flow_steps, device=z_ctx.device)
-            v_action, v_state = self.velocity(action, state, memory, ctx_pad, tau, tau)
+            tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
+            v_action, v_state = self.velocity(action, state, memory, history_pad, tau, tau)
             action = action + v_action / self.n_flow_steps
             state = state + v_state / self.n_flow_steps
         return action, state
@@ -153,5 +153,5 @@ def build_model(cfg):
     defaults = dict(encoder_size="tiny", encoder_backbone="resnet18dp", encoder_ckpt=None,
                     img_size=224, z_dim=512, d_model=256, n_heads=4, depth=6, dropout=0.1,
                     n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
-                    policy_history_len=3, allow_imag=True, split_tau=False)
+                    policy_history_len=2, actions_attend_states=True, split_tau=False)
     return JointFlow({**defaults, **cfg})

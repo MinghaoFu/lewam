@@ -63,9 +63,9 @@ def parse_args():
                     help="raw-consecutive obs frames (DP To=2, the DDPM-90 substrate)")
     ap.add_argument("--steps_per_epoch", type=int, default=0,
                     help="cap train/val batches per epoch (0 = one pass over the decision points)")
-    ap.add_argument("--noimag", action="store_true",
-                    help="mask action tokens from attending the (noisy) state tokens; default lets "
-                         "trailing action blocks condition on the imagined boundary state")
+    ap.add_argument("--actions_attend_states", type=int, default=1,
+                    help="1: trailing action blocks condition on the imagined boundary state; "
+                         "0: mask action tokens from attending the (noisy) state tokens")
     ap.add_argument("--split_tau", action="store_true",
                     help="draw tau_action and tau_state independently instead of one shared tau")
     ap.add_argument("--w_reg", type=float, default=0.04,
@@ -90,18 +90,21 @@ class JointFlowDataset(RawContextDataset):
         self.num_states = num_states
 
     def __getitem__(self, i):
-        context, ctx_pad, target, target_valid, _goal, _next_frame, _dyn_valid = super().__getitem__(i)
+        history_frames, history_pad, target, target_valid, _goal, _next_frame, _dyn_valid = \
+            super().__getitem__(i)
         idx = int(self.indices[i])
         p = int(self.t_gidx[idx])
         ttl = int(self.frames_to_terminal[idx])
-        fs, S = self.frameskip, self.num_states
-        if S:
-            state_frames = torch.stack([self.frames[p + min(q * fs, ttl)] for q in range(1, S + 1)])
-            state_valid = torch.tensor([1.0 if q * fs <= ttl else 0.0 for q in range(1, S + 1)])
+        fs, n_states = self.frameskip, self.num_states
+        if n_states:
+            state_frames = torch.stack([self.frames[p + min(q * fs, ttl)]
+                                        for q in range(1, n_states + 1)])
+            state_valid = torch.tensor([1.0 if q * fs <= ttl else 0.0
+                                        for q in range(1, n_states + 1)])
         else:
             state_frames = torch.zeros((0, *self.frames.shape[1:]), dtype=self.frames.dtype)
             state_valid = torch.zeros(0)
-        return context, ctx_pad, target, target_valid, state_frames, state_valid
+        return history_frames, history_pad, target, target_valid, state_frames, state_valid
 
 
 def main():
@@ -124,7 +127,8 @@ def main():
     n_starts = t_gidx.shape[0]
     print(f"[jointflow] frames={tuple(frames.shape)} starts={n_starts} raw_dim={a_frame.shape[1]} "
           f"layout=(a{args.num_actions_pred},s{args.num_states_pred},fs{args.frameskip}) "
-          f"imag={not args.noimag} split_tau={args.split_tau}", flush=True)
+          f"actions_attend_states={bool(args.actions_attend_states)} split_tau={args.split_tau}",
+          flush=True)
 
     gen = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=gen)
@@ -151,8 +155,8 @@ def main():
                encoder_ckpt=None, z_dim=args.z_dim, d_model=args.d_model, n_heads=args.n_heads,
                depth=args.depth, dropout=args.dropout, n_flow_steps=args.n_flow_steps,
                num_actions_pred=args.num_actions_pred, num_states_pred=args.num_states_pred,
-               policy_history_len=args.policy_history_len, allow_imag=not args.noimag,
-               split_tau=args.split_tau)
+               policy_history_len=args.policy_history_len,
+               actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau)
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
@@ -192,45 +196,48 @@ def main():
 
     mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)
     sigreg = SIGReg().to(device)
-    S = args.num_states_pred
+    n_states = args.num_states_pred
 
     def run_batch(batch):
-        context, ctx_pad, action_target, action_valid, state_frames, state_valid = batch
-        context = context.to(device, non_blocking=True)
-        ctx_pad = ctx_pad.to(device, non_blocking=True)
+        history_frames, history_pad, action_target, action_valid, state_frames, state_valid = batch
+        history_frames = history_frames.to(device, non_blocking=True)
+        history_pad = history_pad.to(device, non_blocking=True)
         action_target = action_target.to(device, non_blocking=True).float()
         action_valid = action_valid.to(device, non_blocking=True)
         state_frames = state_frames.to(device, non_blocking=True)
         state_valid = state_valid.to(device, non_blocking=True)
-        B, hl = context.shape[0], context.shape[1]
-        was_uint8 = context.dtype == torch.uint8
+        B, n_history = history_frames.shape[0], history_frames.shape[1]
+        was_uint8 = history_frames.dtype == torch.uint8
         norm = lambda x: (x / 255.0 - mean) / std if was_uint8 else x
 
-        pixels = norm(torch.cat([context.reshape(B * hl, *context.shape[2:]),
-                                 state_frames.reshape(B * S, *state_frames.shape[2:])]).float())
+        pixels = norm(torch.cat([
+            history_frames.reshape(B * n_history, *history_frames.shape[2:]),
+            state_frames.reshape(B * n_states, *state_frames.shape[2:])]).float())
         z = model.encode(pixels)
-        z_ctx = z[:B * hl].reshape(B, hl, args.z_dim)
-        z_state_online = z[B * hl:].reshape(B, S, args.z_dim)
+        z_history = z[:B * n_history].reshape(B, n_history, args.z_dim)
+        z_state_online = z[B * n_history:].reshape(B, n_states, args.z_dim)
         if tgt_encoder is not None:
             with torch.no_grad():
-                z_tgt = tgt_encoder(norm(state_frames.reshape(B * S, *state_frames.shape[2:]).float()))
-            state_target = F.layer_norm(z_tgt, (args.z_dim,)).reshape(B, S, args.z_dim)
+                z_target_raw = tgt_encoder(
+                    norm(state_frames.reshape(B * n_states, *state_frames.shape[2:]).float()))
+            state_target = F.layer_norm(z_target_raw, (args.z_dim,)).reshape(B, n_states, args.z_dim)
         else:
             state_target = z_state_online          # the encoder learns from being the target
 
-        loss_action, loss_state = model.loss(z_ctx, ctx_pad, action_target, action_valid,
+        loss_action, loss_state = model.loss(z_history, history_pad, action_target, action_valid,
                                              state_target, state_valid)
         loss = loss_action + loss_state
-        comps = {"act": loss_action.item(), "state": loss_state.item()}
+        loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
         if args.w_reg > 0:
-            z_states = torch.cat([z_ctx[:, -1], state_target.reshape(B * S, args.z_dim)]).unsqueeze(0)
+            z_states = torch.cat([z_history[:, -1],
+                                  state_target.reshape(B * n_states, args.z_dim)]).unsqueeze(0)
             loss_reg = sigreg(z_states)
             loss = loss + args.w_reg * loss_reg
-            comps["reg"] = loss_reg.item()
-        return loss, comps, B
+            loss_terms["reg"] = loss_reg.item()
+        return loss, loss_terms, B
 
-    def accumulate(store, comps, n):
-        for k, v in comps.items():
+    def accumulate(store, loss_terms, n):
+        for k, v in loss_terms.items():
             store[k] = store.get(k, 0.0) + v * n
 
     def fmt(store, n):
@@ -240,39 +247,41 @@ def main():
         t0 = time.time()
         mom_now = args.state_ema_base + (1.0 - args.state_ema_base) * (epoch / max(1, args.epochs))
         model.train()
-        tr, tr_n = {}, 0.0
+        train_stats, train_n = {}, 0.0
         for batch in train_loader:
-            loss, comps, n = run_batch(batch)
+            loss, loss_terms, n = run_batch(batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             if tgt_encoder is not None:
                 with torch.no_grad():
-                    for pt, ps in zip(tgt_encoder.parameters(), model.encoder.parameters()):
-                        pt.mul_(mom_now).add_(ps.detach(), alpha=1.0 - mom_now)
-                    for bt, bs in zip(tgt_encoder.buffers(), model.encoder.buffers()):
-                        bt.copy_(bs)
-            accumulate(tr, comps, n); tr_n += n
+                    for p_target, p_online in zip(tgt_encoder.parameters(),
+                                                  model.encoder.parameters()):
+                        p_target.mul_(mom_now).add_(p_online.detach(), alpha=1.0 - mom_now)
+                    for b_target, b_online in zip(tgt_encoder.buffers(), model.encoder.buffers()):
+                        b_target.copy_(b_online)
+            accumulate(train_stats, loss_terms, n); train_n += n
         sched.step()
 
         model.eval()
-        va, va_n = {}, 0.0
+        val_stats, val_n = {}, 0.0
         with torch.no_grad():
             for batch in val_loader:
-                loss, comps, n = run_batch(batch)
-                accumulate(va, comps, n); va_n += n
-        va_act = va.get("act", 0.0) / max(va_n, 1)     # best-checkpoint metric = val action loss
-        print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(tr,tr_n)}]  val[{fmt(va,va_n)}]  "
-              f"lr={sched.get_last_lr()[1]:.2e}  {time.time()-t0:.1f}s", flush=True)
+                loss, loss_terms, n = run_batch(batch)
+                accumulate(val_stats, loss_terms, n); val_n += n
+        val_act = val_stats.get("act", 0.0) / max(val_n, 1)   # best-checkpoint metric = val action loss
+        print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(train_stats,train_n)}]  "
+              f"val[{fmt(val_stats,val_n)}]  lr={sched.get_last_lr()[1]:.2e}  "
+              f"{time.time()-t0:.1f}s", flush=True)
 
         torch.save(model.state_dict(), run_dir / "jointflow_latest.pt")
         torch.save(dict(model=model.state_dict(), optimizer=opt.state_dict(),
                         scheduler=sched.state_dict(), epoch=epoch, best_val=best_val),
                    full_path)
         files = [run_dir / "jointflow_config.json", run_dir / "jointflow_latest.pt", full_path]
-        if va_act < best_val:
-            best_val = va_act
+        if val_act < best_val:
+            best_val = val_act
             torch.save(model.state_dict(), run_dir / "jointflow_best.pt")
             files.append(run_dir / "jointflow_best.pt")
         if args.ckpt_sync_dir:
