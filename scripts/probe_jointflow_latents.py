@@ -48,16 +48,15 @@ def ridge_r2(z_train, y_train, z_test, y_test, lam=1e-3):
 
 
 def geometry(z):
-    std = z.std(0)
     cov = np.cov(z.T)
     eig = np.clip(np.linalg.eigvalsh(cov), 0, None)[::-1]
-    pr = float(eig.sum() ** 2 / ((eig ** 2).sum() + 1e-12))
-    csum = np.cumsum(eig) / (eig.sum() + 1e-12)
-    return {"zstd_mean": float(std.mean()), "zstd_min": float(std.min()),
-            "zstd_max": float(std.max()), "participation_ratio": pr,
-            "rank_90pct": int(np.searchsorted(csum, 0.90) + 1),
+    p = eig / (eig.sum() + 1e-12)
+    erank = float(np.exp(-(p * np.log(p + 1e-20)).sum()))   # Roy-Vetterli effective rank
+    csum = np.cumsum(p)
+    return {"rank_90pct": int(np.searchsorted(csum, 0.90) + 1),
             "rank_99pct": int(np.searchsorted(csum, 0.99) + 1),
-            "total_var": float(eig.sum())}
+            "effective_rank": erank,
+            "spectrum_normalized": [float(x) for x in p]}
 
 
 def main():
@@ -78,7 +77,7 @@ def main():
     state = np.asarray(f["state"][:])[idx].astype(np.float64)
     action = np.asarray(f["action"][:]).astype(np.float64)
     proprio = np.asarray(f["proprio"][:])[idx].astype(np.float64)
-    idm_y = np.stack([action[i:i + args.idm_gap].mean(0) for i in idx])
+    idm_y = np.stack([action[i:i + args.idm_gap].reshape(-1) for i in idx])
 
     n = len(idx)
     split = int(0.8 * n)
@@ -138,6 +137,26 @@ def main():
 
     Path(args.out).write_text(json.dumps(results, indent=1))
     print(f"[probe] wrote {args.out}", flush=True)
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for name, res in results.items():
+            ax.plot(np.arange(1, len(res["geometry"]["spectrum_normalized"]) + 1),
+                    res["geometry"]["spectrum_normalized"], label=name)
+        ax.set_yscale("log")
+        ax.set_xlabel("eigenvalue index")
+        ax.set_ylabel("normalized eigenvalue")
+        ax.set_title("latent covariance spectra (normalized)")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        png = str(Path(args.out).with_suffix(".png"))
+        fig.savefig(png, dpi=150)
+        print(f"[probe] wrote {png}", flush=True)
+    except Exception as ex:
+        print(f"[probe] spectrum plot skipped: {ex}", flush=True)
 
 
 if __name__ == "__main__":
