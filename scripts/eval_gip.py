@@ -379,7 +379,7 @@ def run(cfg: DictConfig):
         model._dp_cfg = dp_cfg
         adim = int(dp_cfg.task.shape_meta["action"]["shape"][0])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
-    elif mode in ("jointflow_policy", "jointflow_plan"):
+    elif mode in ("jointflow_policy", "jointflow_plan", "jointflow_gc"):
         model, jf_cfg = gip.load_jointflow_model(cfg.policy, which=cfg.get("seq_which", "best"))
         model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
         model.requires_grad_(False)

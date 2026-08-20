@@ -114,6 +114,48 @@ class ModalityAdapter(nn.Module):
         return self.adapter(x) + self.token
 
 
+def sinusoid(x, dim):
+    half = dim // 2
+    freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=x.device) / half)
+    a = x[:, None].float() * freqs[None]
+    return torch.cat([a.sin(), a.cos()], dim=-1)
+
+
+class GCHeadMSE(nn.Module):
+    """Goal + horizon conditioned readout (GCHead distilled to its MSE path): per-token
+    features are concatenated with the goal latent and run through AdaLN blocks conditioned
+    on the horizon embedding. A learned null goal stands in for rows whose goal is dropped,
+    so the goal-free mode stays trainable."""
+
+    def __init__(self, in_dim, goal_dim, out_dim, hidden_dim=512, cond_dim=128, depth=3,
+                 dropout=0.1):
+        super().__init__()
+        self.cond_dim = cond_dim
+        self.null_goal = nn.Parameter(torch.zeros(goal_dim))
+        self.h_mlp = nn.Sequential(nn.Linear(cond_dim, cond_dim), nn.SiLU(),
+                                   nn.Linear(cond_dim, cond_dim))
+        dims = [in_dim + goal_dim] + [hidden_dim] * (depth - 1)
+        self.blocks = nn.ModuleList(AdaLNBlock(dims[i], hidden_dim, cond_dim, dropout)
+                                    for i in range(depth))
+        self.out = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x, z_goal=None, h_norm=None, goal_keep=None):
+        """x: (B, T, D) token features; z_goal: (B, G); h_norm: (B,) in [0, 1];
+        goal_keep: (B,) bool -- False rows use the null goal."""
+        B, T = x.shape[0], x.shape[1]
+        if z_goal is None:
+            z_goal = self.null_goal.expand(B, -1)
+        elif goal_keep is not None:
+            z_goal = torch.where(goal_keep[:, None], z_goal, self.null_goal.expand(B, -1))
+        if h_norm is None:
+            h_norm = x.new_zeros(B)
+        cond = self.h_mlp(sinusoid(h_norm, self.cond_dim)).unsqueeze(1)
+        x = torch.cat([x, z_goal[:, None, :].expand(B, T, -1)], dim=-1)
+        for block in self.blocks:
+            x = block(x, cond)
+        return self.out(x)
+
+
 class AdaLNBlock(nn.Module):
     """One MLP layer with AdaLN-Zero conditioning: LayerNorm (no affine) -> modulate
     by (scale, shift) from `cond` -> Linear -> GELU -> Dropout. The (scale, shift)

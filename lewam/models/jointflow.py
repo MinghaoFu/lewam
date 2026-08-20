@@ -3,8 +3,8 @@
 import torch
 import torch.nn as nn
 
-from lewam.models.lewam_crossattn import CrossAttnBlock, sinusoid   #RE: stop rewriting sinusoid, put reusable module in one place
-from lewam.models.module import VisionEncoder
+from lewam.models.lewam_crossattn import CrossAttnBlock
+from lewam.models.module import GCHeadMSE, VisionEncoder, sinusoid
 
 
 def state_act_layout(num_actions, num_states, frameskip):
@@ -94,9 +94,14 @@ class JointFlow(nn.Module):
 
         self.blocks = nn.ModuleList(CrossAttnBlock(self.dim, cfg["n_heads"], dropout=cfg["dropout"])
                                     for _ in range(cfg["depth"]))
-        #TODO: allow for goal + horizon conditioning on action_out
-        # best plan is prob make a cleaner MSE-only version of split.GCHead and move to modules
-        self.action_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.action_raw_dim))
+        # goal + horizon condition ONLY the action readout: the trunk and the state stream
+        # never see the goal, so the imagined states stay goal-free dynamics
+        self.goal_conditioning = bool(cfg.get("goal_conditioning", False))
+        if self.goal_conditioning:
+            self.action_out = GCHeadMSE(self.dim, self.z_dim, self.action_raw_dim,
+                                        dropout=cfg["dropout"])
+        else:
+            self.action_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.action_raw_dim))
         self.state_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.z_dim))
 
     def encode(self, pixels):
@@ -117,7 +122,8 @@ class JointFlow(nn.Module):
         cond[:, self.state_slots] = cond_state.unsqueeze(1)
         return cond
 
-    def velocity(self, noisy_action, noisy_state, memory, memory_pad, tau_action, tau_state):
+    def velocity(self, noisy_action, noisy_state, memory, memory_pad, tau_action, tau_state,
+                 z_goal=None, h_norm=None, goal_keep=None):
         """Rectified flow forward pass"""
         B = noisy_action.shape[0]
         x = noisy_action.new_zeros(B, self.is_state.numel(), self.dim)
@@ -130,8 +136,11 @@ class JointFlow(nn.Module):
         cond = self._cond(tau_action, tau_state)
         for block in self.blocks:
             x = block(x, memory, cond, self.self_mask, memory_pad)
-            
-        v_action = self.action_out(x[:, self.action_slots])
+
+        if self.goal_conditioning:
+            v_action = self.action_out(x[:, self.action_slots], z_goal, h_norm, goal_keep)
+        else:
+            v_action = self.action_out(x[:, self.action_slots])
         v_state = self.state_out(x[:, self.state_slots])
         return v_action, v_state
 
@@ -140,7 +149,8 @@ class JointFlow(nn.Module):
         per_token = ((pred - target) ** 2).mean(-1) * valid
         return (per_token.sum(-1) / valid.sum(-1).clamp(min=1)).mean()
 
-    def loss(self, z_history, history_pad, action_target, action_valid, state_target, state_valid):
+    def loss(self, z_history, history_pad, action_target, action_valid, state_target, state_valid,
+             z_goal=None, h_norm=None, goal_keep=None):
         """
         Rectified flow loss
             pred: velocity((1-tau)*x0 + tau*x1, tau, cond)
@@ -157,7 +167,7 @@ class JointFlow(nn.Module):
         noisy_state = torch.lerp(noise_state, state_target, tau_state[:, None, None])
 
         v_action, v_state = self.velocity(noisy_action, noisy_state, memory, history_pad,
-                                          tau_action, tau_state)
+                                          tau_action, tau_state, z_goal, h_norm, goal_keep)
         loss_action = self._masked_mse(v_action, action_target - noise_action, action_valid)
         if self.num_states == 0:
             return loss_action, loss_action.new_zeros(())
@@ -165,7 +175,7 @@ class JointFlow(nn.Module):
         return loss_action, loss_state
 
     @torch.no_grad()
-    def sample(self, z_history, history_pad, generator=None):
+    def sample(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None):
         """Joint Euler ODE on tied schedule.
         Returns the action chunks (z-scored raw space) and next-state latents."""
         B = z_history.shape[0]
@@ -176,14 +186,15 @@ class JointFlow(nn.Module):
                             generator=generator)
         for i in range(self.n_flow_steps):
             tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
-            v_action, v_state = self.velocity(action, state, memory, history_pad, tau, tau)
+            v_action, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
+                                              z_goal, h_norm)
             action = action + v_action / self.n_flow_steps
             state = state + v_state / self.n_flow_steps
         return action, state
 
     @torch.no_grad()
     def sample_inpaint(self, z_history, history_pad, action_plan, noise_action=None,
-                       noise_state=None):
+                       noise_state=None, z_goal=None, h_norm=None):
         """Euler ODE over the state slots only; action slots are clamped to the plan's
         flow path a_tau = (1-tau)*noise + tau*plan at every step. Passing the same
         noise tensors across calls makes candidate plans comparable within a replan.
@@ -198,7 +209,8 @@ class JointFlow(nn.Module):
         for i in range(self.n_flow_steps):
             tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
             action = torch.lerp(noise_action, action_plan, tau[:, None, None])
-            _, v_state = self.velocity(action, state, memory, history_pad, tau, tau)
+            _, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
+                                       z_goal, h_norm)
             state = state + v_state / self.n_flow_steps
         return state
 
@@ -208,5 +220,5 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
-                    tau_cond="summed")
+                    goal_conditioning=False, tau_cond="summed")
     return JointFlow({**defaults, **cfg})

@@ -494,7 +494,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
         dp_cfg = getattr(model, "_dp_cfg")
         return DPTPolicy(model=model, cfg=dp_cfg, action_dim=adim, process={}, transform={})
 
-    if mode in ("jointflow_policy", "jointflow_plan"):
+    if mode in ("jointflow_policy", "jointflow_plan", "jointflow_gc"):
         ge = cfg.get("gip_eval", {})
         jf_cfg = getattr(model, "_jointflow_cfg")
         horizon0 = ge.get("horizon0", None)
@@ -511,6 +511,8 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             exec_actions=int(ge.get("exec_actions", 0)))
         if mode == "jointflow_policy":
             return JointFlowPolicy(**shared)
+        if mode == "jointflow_gc":
+            return JointFlowGCPolicy(**shared)
         return JointFlowPlanPolicy(
             plan_mode=str(ge.get("plan_mode", "best_of_k")),
             plan_k=int(ge.get("plan_k", 32)),
@@ -1076,6 +1078,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         self.type = "jointflow_policy"
         self.history_len = int(cfg["policy_history_len"])
         self.num_actions = int(cfg["num_actions_pred"])
+        self._append_every_step = True
         self._lat_buf = None
 
     def set_env(self, env):
@@ -1103,9 +1106,12 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
 
-        # dense raw history: encode the current frame every step (not just at replan), keep the
-        # last history_len latents (the training-time raw-consecutive obs structure)
-        active = [i for i in range(num_envs) if not dead[i]]
+        # history cadence: raw-consecutive models encode EVERY step; anchor-spaced models
+        # (GR on the fs-strided cache) encode only at replans, so eval history matches the
+        # training spacing in both cases
+        replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        active = ([i for i in range(num_envs) if not dead[i]]
+                  if self._append_every_step else replan)
         if active:
             curr = info_dict["pixels"][active]
             c_obs = curr[:, -1] if curr.ndim == 5 else curr
@@ -1115,7 +1121,6 @@ class JointFlowPolicy(LeWAMSplitPolicy):
                 if len(self._lat_buf[i]) > hl:
                     self._lat_buf[i] = self._lat_buf[i][-hl:]
 
-        replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
         if replan:
             R, D = len(replan), self.model.z_dim
             history = torch.zeros(R, hl, D, device=device)
@@ -1230,6 +1235,31 @@ class DPTPolicy(BasePolicy):
         return action.reshape(*self.env.action_space.shape).astype(np.float32)
 
 
+class JointFlowGCPolicy(JointFlowPolicy):
+    """Goal + horizon conditioned jointflow (mode=jointflow_gc): each replan encodes the goal
+    frame and passes h_norm from the inherited horizon countdown into the joint sample."""
+
+    def __init__(self, model, cfg, *args, **kwargs):
+        super().__init__(model, cfg, *args, **kwargs)
+        self.type = "jointflow_gc"
+        assert getattr(model, "goal_conditioning", False), "checkpoint lacks goal conditioning"
+        # fs-strided training cache -> history anchors are one replan (= fs steps) apart
+        self._append_every_step = False
+
+    def _propose(self, info_dict, replan, history, history_pad):
+        assert "goal" in info_dict, "jointflow_gc eval needs info_dict['goal'] (goal-reaching)"
+        device = history.device
+        goal = info_dict["goal"][replan]
+        g_obs = goal[:, -1] if goal.ndim == 5 else goal
+        z_goal = self.model.encode(g_obs.to(device).float())
+        steps = np.maximum(self._steps_left[replan], 1.0)
+        h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                              device=device, dtype=torch.float32)
+        action_chunk, _imagined = self.model.sample(history, history_pad,
+                                                    z_goal=z_goal, h_norm=h_norm)
+        return action_chunk
+
+
 class JointFlowPlanPolicy(JointFlowPolicy):
     """Goal-reaching planner on a trained jointflow (mode=jointflow_plan). Candidate action
     chunks are scored by the final cost ||z_imag_last - z_goal||^2 over the imagined boundary
@@ -1272,30 +1302,42 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         goal = info_dict["goal"][replan]
         g_obs = goal[:, -1] if goal.ndim == 5 else goal
         z_goal = self.model.encode(g_obs.to(device).float())
+        h_norm = None
+        if getattr(self.model, "goal_conditioning", False):
+            steps = np.maximum(self._steps_left[replan], 1.0)
+            h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                  device=device, dtype=torch.float32)
         if self.plan_mode == "best_of_k":
-            plan = self._best_of_k(history, history_pad, z_goal)
+            plan = self._best_of_k(history, history_pad, z_goal, h_norm)
         else:
-            plan = self._cem(history, history_pad, z_goal, replan)
+            plan = self._cem(history, history_pad, z_goal, h_norm, replan)
         if self._prev_plan is not None:
             for row, i in enumerate(replan):
                 self._prev_plan[i] = plan[row]
         return plan
 
-    def _best_of_k(self, history, history_pad, z_goal):
+    def _cond_args(self, z_goal, h_norm, repeat):
+        if not getattr(self.model, "goal_conditioning", False):
+            return dict()
+        return dict(z_goal=z_goal.repeat_interleave(repeat, 0),
+                    h_norm=h_norm.repeat_interleave(repeat, 0))
+
+    def _best_of_k(self, history, history_pad, z_goal, h_norm=None):
         R, K = history.shape[0], self.plan_k
         action, z_imag = self.model.sample(history.repeat_interleave(K, 0),
-                                           history_pad.repeat_interleave(K, 0))
+                                           history_pad.repeat_interleave(K, 0),
+                                           **self._cond_args(z_goal, h_norm, K))
         cost = self._final_cost(z_imag, z_goal.repeat_interleave(K, 0)).view(R, K)
         pick = cost.argmin(1)
         return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
 
-    def _cem(self, history, history_pad, z_goal, replan):
+    def _cem(self, history, history_pad, z_goal, h_norm, replan):
         R, P = history.shape[0], self.plan_k
         A, adim = self.model.num_actions, self.model.action_raw_dim
         device = history.device
         take = self._take()
 
-        mean, _ = self.model.sample(history, history_pad)
+        mean, _ = self.model.sample(history, history_pad, **self._cond_args(z_goal, h_norm, 1))
         for row, i in enumerate(replan):
             prev = self._prev_plan[i] if self._prev_plan is not None else None
             if prev is not None:
@@ -1318,7 +1360,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             cand = mean[:, None] + std[:, None] * torch.randn(R, P, A, adim, device=device)
             cand[:, 0] = mean
             z_imag = self.model.sample_inpaint(hist, pad, cand.reshape(R * P, A, adim),
-                                               noise_action, noise_state)
+                                               noise_action, noise_state,
+                                               **self._cond_args(z_goal, h_norm, P))
             cost = self._final_cost(z_imag, goal).view(R, P)
             iter_cost, iter_pick = cost.min(1)
             better = iter_cost < best_cost

@@ -65,6 +65,17 @@ def parse_args():
     ap.add_argument("--tau_cond", default="per_modality", choices=["per_modality", "summed"],
                     help="per_modality: each modality modulated by its own flow-time; "
                          "summed: one blended cond for all tokens")
+    # goal reaching
+    ap.add_argument("--goal_conditioning", action="store_true",
+                    help="goal + horizon condition the action readout (GCHeadMSE); requires "
+                         "--gr_cache")
+    ap.add_argument("--H_max", type=int, default=50,
+                    help="horizon cap in obs-steps; h_norm = min(h, H_max)/H_max")
+    ap.add_argument("--p_drop_goal", type=float, default=0.0,
+                    help="per-row goal dropout to the learned null goal (0 = every sample "
+                         "keeps its goal)")
+    ap.add_argument("--gr_cache", action="store_true",
+                    help="load the fs-strided (old GR) cache and sample goals at anchor offsets")
     # anti-collapse
     ap.add_argument("--w_reg", type=float, default=0.0,
                     help="SIGReg anti-collapse weight on the encoder latent")
@@ -74,6 +85,87 @@ def parse_args():
     ap.add_argument("--state_ema_base", type=float, default=0.998,
                     help="base momentum for the target encoder, linearly annealed to 1.0")
     return ap.parse_args()
+
+
+def load_cache_obs(args):
+    """fs-strided (old GR) cache: one frame + one z-scored fs-block of actions per anchor,
+    anchor-space indexing (t_gidx into frames, maxh = anchors to terminal)."""
+    cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
+        "LEWAM_CACHE_DIR", "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
+    stem = os.path.basename(args.dataset_name).replace(".h5", "")
+    tag = f"{stem}_fs{args.frameskip}_i{args.img_size}"
+    frames = torch.from_numpy(np.load(f"{cdir}/{stem}/{tag}.frames.npy",
+                                      mmap_mode="r" if args.cache_mmap else None))
+    aux = np.load(f"{cdir}/{stem}/{tag}.aux.npz")
+    a_block = torch.from_numpy(aux["A_flat"])
+    t_gidx = torch.from_numpy(aux["t_gidx"])
+    maxh = torch.from_numpy(aux["maxh"])
+    ep_base = torch.from_numpy(aux["ep_base"])
+    action_stats = (aux["act_mean"].tolist(), aux["act_std"].tolist())
+    return frames, a_block, t_gidx, maxh, ep_base, action_stats
+
+
+class JointFlowGRDataset(torch.utils.data.Dataset):
+    """Goal-reaching sampling on the fs-strided cache: anchors are the decision points.
+    History = the last `history_len` anchor frames (left-padded at the episode start);
+    actions = the next ceil(num_actions/fs) anchor blocks unstacked to raw steps; state
+    targets at +q anchors; goal at +h anchors with h ~ U[1, H_max] clamped to the tail,
+    h_norm = min(h, H_max)/H_max."""
+
+    def __init__(self, frames, a_block, t_gidx, maxh, ep_base, indices, history_len,
+                 num_actions, num_states, frameskip, h_max):
+        self.frames = frames
+        self.a_block = a_block
+        self.t_gidx = t_gidx
+        self.maxh = maxh
+        self.ep_base = ep_base
+        self.indices = indices
+        self.history_len = history_len
+        self.num_actions = num_actions
+        self.num_states = num_states
+        self.frameskip = frameskip
+        self.h_max = h_max
+        self.raw_adim = a_block.shape[1] // frameskip
+        assert num_actions % frameskip == 0, "num_actions must be whole anchor blocks on gr_cache"
+
+    def __len__(self):
+        return self.indices.numel()
+
+    def __getitem__(self, i):
+        idx = int(self.indices[i])
+        ti = int(self.t_gidx[idx])
+        mh = int(self.maxh[idx])
+        e0 = int(self.ep_base[idx])
+        hl, fs = self.history_len, self.frameskip
+        n_blocks = self.num_actions // fs
+
+        lo = max(e0, ti - hl + 1)
+        recent = self.frames[lo:ti + 1].float()
+        history = torch.zeros((hl, *recent.shape[1:]), dtype=torch.float32)
+        history[hl - recent.shape[0]:] = recent
+        history_pad = torch.ones(hl, dtype=torch.bool)
+        history_pad[hl - recent.shape[0]:] = False
+
+        target = torch.zeros((self.num_actions, self.raw_adim), dtype=torch.float32)
+        target_valid = torch.zeros(self.num_actions, dtype=torch.float32)
+        for b in range(min(n_blocks, mh)):
+            target[b * fs:(b + 1) * fs] = self.a_block[idx + b].float().view(fs, self.raw_adim)
+            target_valid[b * fs:(b + 1) * fs] = 1.0
+
+        if self.num_states:
+            state_frames = torch.stack([self.frames[ti + min(q, mh)].float()
+                                        for q in range(1, self.num_states + 1)])
+            state_valid = torch.tensor([1.0 if q <= mh else 0.0
+                                        for q in range(1, self.num_states + 1)])
+        else:
+            state_frames = torch.zeros((0, *self.frames.shape[1:]), dtype=torch.float32)
+            state_valid = torch.zeros(0)
+
+        h = min(int(torch.randint(1, self.h_max + 1, (1,)).item()), mh)
+        goal_frame = self.frames[ti + h].float()
+        h_norm = torch.tensor(min(h, self.h_max) / self.h_max, dtype=torch.float32)
+        return history, history_pad, target, target_valid, state_frames, state_valid, \
+            goal_frame, h_norm
 
 
 class JointFlowDataset(RawContextDataset):
@@ -121,16 +213,25 @@ def main():
     run_dir = Path(args.run_dir) if args.run_dir else Path(f"runs/{args.run_name}_{tag}" if tag else args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    frames, a_frame, t_gidx, ep_base, frames_to_terminal, action_stats = load_cache(args)
-    n_starts = t_gidx.shape[0]
-    print(f"[jointflow] frames={tuple(frames.shape)} starts={n_starts} raw_dim={a_frame.shape[1]} "
+    assert not (args.goal_conditioning and not args.gr_cache), "--goal_conditioning needs --gr_cache"
+    if args.gr_cache:
+        frames, a_block, t_gidx, maxh, ep_base, action_stats = load_cache_obs(args)
+        raw_adim = a_block.shape[1] // args.frameskip
+        n_starts = t_gidx.shape[0]
+        tail = maxh
+    else:
+        frames, a_frame, t_gidx, ep_base, frames_to_terminal, action_stats = load_cache(args)
+        raw_adim = a_frame.shape[1]
+        n_starts = t_gidx.shape[0]
+        tail = frames_to_terminal
+    print(f"[jointflow] frames={tuple(frames.shape)} starts={n_starts} raw_dim={raw_adim} "
           f"layout=(a{args.num_actions_pred},s{args.num_states_pred},fs{args.frameskip}) "
-          f"actions_attend_states={bool(args.actions_attend_states)} split_tau={args.split_tau}",
-          flush=True)
+          f"actions_attend_states={bool(args.actions_attend_states)} split_tau={args.split_tau} "
+          f"gr={args.gr_cache} goal_cond={args.goal_conditioning}", flush=True)
 
     gen = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=gen)
-    perm = perm[frames_to_terminal[perm] >= args.frameskip]
+    perm = perm[tail[perm] >= (1 if args.gr_cache else args.frameskip)]
     n_val = int(round((1 - args.train_split) * perm.numel()))
     val_idx, train_idx = perm[:n_val], perm[n_val:]
 
@@ -139,16 +240,21 @@ def main():
         loader_args.update(prefetch_factor=args.prefetch_factor, persistent_workers=True)
 
     def make_loader(idx):
-        ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
-                              args.policy_history_len, args.num_actions_pred, args.frameskip,
-                              args.num_states_pred)
+        if args.gr_cache:
+            ds = JointFlowGRDataset(frames, a_block, t_gidx, maxh, ep_base, idx,
+                                    args.policy_history_len, args.num_actions_pred,
+                                    args.num_states_pred, args.frameskip, args.H_max)
+        else:
+            ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
+                                  args.policy_history_len, args.num_actions_pred, args.frameskip,
+                                  args.num_states_pred)
         n = max(args.batch_size, int(idx.numel()))
         if args.steps_per_epoch:
             n = min(n, args.steps_per_epoch * args.batch_size)
         return DataLoader(ds, sampler=RandomSampler(ds, replacement=True, num_samples=n), **loader_args)
     train_loader, val_loader = make_loader(train_idx), make_loader(val_idx)
 
-    cfg = dict(fs=args.frameskip, action_raw_dim=int(a_frame.shape[1]), img_size=args.img_size,
+    cfg = dict(fs=args.frameskip, action_raw_dim=raw_adim, img_size=args.img_size,
                encoder_size=args.encoder_size, encoder_backbone=args.encoder_backbone,
                encoder_ckpt=None, z_dim=args.z_dim, proj_hidden=args.proj_hidden,
                d_model=args.d_model, n_heads=args.n_heads,
@@ -156,7 +262,7 @@ def main():
                num_actions_pred=args.num_actions_pred, num_states_pred=args.num_states_pred,
                policy_history_len=args.policy_history_len,
                actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau,
-               tau_cond=args.tau_cond)
+               goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond)
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
@@ -194,8 +300,15 @@ def main():
     sigreg = SIGReg().to(device)
     n_states = args.num_states_pred
 
-    def run_batch(batch):
-        history_frames, history_pad, action_target, action_valid, state_frames, state_valid = batch
+    def run_batch(batch, train=True):
+        if args.gr_cache:
+            (history_frames, history_pad, action_target, action_valid, state_frames,
+             state_valid, goal_frames, h_norm) = batch
+            goal_frames = goal_frames.to(device, non_blocking=True)
+            h_norm = h_norm.to(device, non_blocking=True)
+        else:
+            history_frames, history_pad, action_target, action_valid, state_frames, state_valid = batch
+            goal_frames = h_norm = None
         history_frames = history_frames.to(device, non_blocking=True)
         history_pad = history_pad.to(device, non_blocking=True)
         action_target = action_target.to(device, non_blocking=True).float()
@@ -206,12 +319,19 @@ def main():
         was_uint8 = history_frames.dtype == torch.uint8
         norm = lambda x: (x / 255.0 - mean) / std if was_uint8 else x
 
-        pixels = norm(torch.cat([
-            history_frames.reshape(B * n_history, *history_frames.shape[2:]),
-            state_frames.reshape(B * n_states, *state_frames.shape[2:])]).float())
+        pix = [history_frames.reshape(B * n_history, *history_frames.shape[2:]),
+               state_frames.reshape(B * n_states, *state_frames.shape[2:])]
+        if args.goal_conditioning:
+            pix.append(goal_frames)
+        pixels = norm(torch.cat(pix).float())
         z = model.encode(pixels)
         z_history = z[:B * n_history].reshape(B, n_history, args.z_dim)
-        z_state_online = z[B * n_history:].reshape(B, n_states, args.z_dim)
+        z_state_online = z[B * n_history:B * (n_history + n_states)].reshape(B, n_states, args.z_dim)
+        z_goal = goal_keep = None
+        if args.goal_conditioning:
+            z_goal = z[B * (n_history + n_states):]
+            if train and args.p_drop_goal > 0:
+                goal_keep = torch.rand(B, device=device) >= args.p_drop_goal
         if tgt_encoder is not None:
             with torch.no_grad():
                 z_target_raw = tgt_encoder(
@@ -221,7 +341,8 @@ def main():
             state_target = z_state_online          # the encoder learns from being the target
 
         loss_action, loss_state = model.loss(z_history, history_pad, action_target, action_valid,
-                                             state_target, state_valid)
+                                             state_target, state_valid,
+                                             z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep)
         loss = loss_action + loss_state
         loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
         if n_states:
@@ -268,7 +389,7 @@ def main():
         val_stats, val_n = {}, 0.0
         with torch.no_grad():
             for batch in val_loader:
-                loss, loss_terms, n = run_batch(batch)
+                loss, loss_terms, n = run_batch(batch, train=False)
                 accumulate(val_stats, loss_terms, n); val_n += n
         val_act = val_stats.get("act", 0.0) / max(val_n, 1)   # best-checkpoint metric = val action loss
         print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(train_stats,train_n)}]  "
