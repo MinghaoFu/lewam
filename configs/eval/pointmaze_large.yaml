@@ -1,0 +1,46 @@
+# pointmaze on OGBench's 9x12 "large" maze. Same env plugin, same 224 render, same protocol as the
+# medium cell -- only the maze and the dataset differ. Mean shortest path is 1.56x medium's, and
+# the official task paths run 12-19 cells against medium's 6-10, with the horizon unchanged at 1001.
+defaults:
+  - launcher: local
+  - solver: cem
+  - _self_
+world:
+  env_name: swm/PointMaze-v0
+  task: large
+  num_envs: ${eval.num_eval}
+  max_episode_steps: ???
+  # Large is 9x12, but OGBench's top-down camera scales its distance with maze width, so against
+  # mujoco's 45deg vertical FOV the maze still fills 91% of a square frame. 224 keeps this cell
+  # identical to the other seven -- no cropping, stretching or resampling anywhere.
+  resolution: 224
+dataset:
+  stats: ${eval.dataset_name}
+  keys_to_cache:
+    - action
+    - proprio
+    - state
+seed: 42
+policy: random
+plan_config:
+  horizon: 10
+  receding_horizon: 10
+  action_block: 5
+eval:
+  num_eval: 50
+  goal_offset_steps: 50
+  eval_budget: 100
+  img_size: 224
+  dataset_name: pointmaze_large
+  callables:
+    - method: set_state
+      args:
+        state: {value: state}
+    - method: _set_goal_state
+      args:
+        goal_state: {value: goal_state}
+    - method: _set_goal_proprio
+      args:
+        goal_proprio: {value: goal_proprio}
+output:
+  filename: pointmaze_large_results.txt

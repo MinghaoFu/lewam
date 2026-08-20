@@ -4,8 +4,12 @@ A per-episode prompt vector delta is added to the goal latent fed to the frozen
 goal-conditioned policy head, and optimized at test time against the frozen world model's
 cost. Every action of every iterate is the frozen policy's own output, so the search can
 never leave the policy's behavioral manifold -- the off-manifold exploitation channel that
-breaks Gradient MPC does not exist as a coordinate. Iterate 0 (delta=0) is the pure policy
-plan and stays in the candidate set: the floor is "do not optimize".
+breaks Gradient MPC does not exist as a coordinate. In these checkpoints the dynamics is a
+pure forward model (dyn_goal_cond=False), so the head's goal input is the ONLY place goal
+information enters the imagination loop: the prompt steers behavior selection while the
+rollout and the cost (always scored against the true goal) are structurally goal-blind.
+Iterate 0 (delta=0) is the pure policy plan and stays in the candidate set: the floor is
+"do not optimize".
 
 pm_cost="anymin" aligns the planning cost with the benchmark's reach-anytime success rule
 (min over rolled steps instead of the terminal step); pm_seg>0 enables per-step prompts
