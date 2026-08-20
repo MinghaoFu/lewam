@@ -1,12 +1,3 @@
-"""Train jointflow (docs/wip/LEWAM_FLOW_DESIGN.md): one rectified-flow objective over per-timestep
-action tokens + block-boundary next-state latent tokens, on the raw-anchor cache.
-
-L = mean_MSE(v_action) + mean_MSE(v_state) + w_reg * SIGReg(z)      (w_reg=0.04)
-
-Per-modality means summed 1:1 -- there is no dynamics loss weight. State targets come from the
-online encoder (gradients flow) by default; --state_ema_target switches to a momentum copy
-(layernormed, detached, V-JEPA style)."""
-
 import argparse
 import copy
 import json
@@ -63,22 +54,23 @@ def parse_args():
     ap.add_argument("--num_actions_pred", type=int, default=5)
     ap.add_argument("--num_states_pred", type=int, default=1)
     ap.add_argument("--policy_history_len", type=int, default=2,
-                    help="raw-consecutive obs frames (DP To=2, the DDPM-90 substrate)")
+                    help="raw-consecutive obs frames the model uses as history")
     ap.add_argument("--steps_per_epoch", type=int, default=0,
                     help="cap train/val batches per epoch (0 = one pass over the decision points)")
     ap.add_argument("--actions_attend_states", type=int, default=1,
-                    help="1: trailing action blocks condition on the imagined boundary state; "
+                    help="1: action tokens can attend to jointly predicted state tokens; "
                          "0: mask action tokens from attending the (noisy) state tokens")
     ap.add_argument("--split_tau", action="store_true",
                     help="draw tau_action and tau_state independently instead of one shared tau")
     ap.add_argument("--tau_cond", default="per_modality", choices=["per_modality", "summed"],
                     help="per_modality: each modality modulated by its own flow-time; "
                          "summed: one blended cond for all tokens")
-    ap.add_argument("--w_reg", type=float, default=0.04,
+    # anti-collapse
+    ap.add_argument("--w_reg", type=float, default=0.0,
                     help="SIGReg anti-collapse weight on the encoder latent")
     ap.add_argument("--state_ema_target", action="store_true",
                     help="state flow targets from a momentum copy of the encoder, layernormed and "
-                         "stop-gradded (V-JEPA style), instead of the online encoder")
+                         "stop-gradded")
     ap.add_argument("--state_ema_base", type=float, default=0.998,
                     help="base momentum for the target encoder, linearly annealed to 1.0")
     return ap.parse_args()

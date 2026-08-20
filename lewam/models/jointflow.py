@@ -87,11 +87,15 @@ class JointFlow(nn.Module):
         self.state_in = nn.Linear(self.z_dim, self.dim)
         self.slot_pos = nn.Parameter(torch.zeros(1, is_state.numel(), self.dim))    #RE: idk, I think self.pos_emb is fine enough
         self.modality_emb = nn.Embedding(2, self.dim)
+
         self.tau_action_in = nn.Linear(self.dim, self.dim)
         self.tau_state_in = nn.Linear(self.dim, self.dim)
-        self.cond = nn.Sequential(nn.Linear(self.dim, self.dim), nn.SiLU(), nn.Linear(self.dim, self.dim))
+        self.cond = nn.Sequential(nn.Linear(self.dim, self.dim), nn.SiLU(), nn.Linear(self.dim, self.dim))  #RE: pretty sure modules.MLP supports this
+
         self.blocks = nn.ModuleList(CrossAttnBlock(self.dim, cfg["n_heads"], dropout=cfg["dropout"])
                                     for _ in range(cfg["depth"]))
+        #TODO: allow for goal + horizon conditioning on action_out
+        # best plan is prob make a cleaner MSE-only version of split.GCHead and move to modules
         self.action_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.action_raw_dim))
         self.state_out = nn.Sequential(nn.LayerNorm(self.dim), nn.Linear(self.dim, self.z_dim))
 
@@ -204,5 +208,5 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
-                    tau_cond="summed")   # checkpoints saved without the key trained with the summed wiring
+                    tau_cond="summed")
     return JointFlow({**defaults, **cfg})
