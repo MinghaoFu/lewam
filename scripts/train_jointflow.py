@@ -232,6 +232,9 @@ def main():
                                              state_target, state_valid)
         loss = loss_action + loss_state
         loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
+        if n_states:
+            # collapse telemetry: per-dim std of the online state latents (collapse -> ~0)
+            loss_terms["zstd"] = z_state_online.reshape(-1, args.z_dim).std(0).mean().item()
         if args.w_reg > 0:
             z_states = torch.cat([z_history[:, -1],
                                   state_target.reshape(B * n_states, args.z_dim)]).unsqueeze(0)
@@ -245,7 +248,8 @@ def main():
             store[k] = store.get(k, 0.0) + v * n
 
     def fmt(store, n):
-        return " ".join(f"{k}={store[k]/max(n,1):.5f}" for k in ("act", "state", "reg") if k in store)
+        return " ".join(f"{k}={store[k]/max(n,1):.5f}"
+                        for k in ("act", "state", "reg", "zstd") if k in store)
 
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
