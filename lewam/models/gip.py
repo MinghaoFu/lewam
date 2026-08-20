@@ -317,6 +317,25 @@ def load_crossattn_model(run_name, which="best"):
     return model, cfg
 
 
+def load_dp_model(run_name):
+    """Load a diffusion_policy checkpoint (dill payload: hydra cfg + EMA weights) from
+    $STABLEWM_HOME/checkpoints/<run_name>/dp.ckpt. Needs the diffusion_policy repo on
+    PYTHONPATH."""
+    import dill
+    import hydra as _hydra
+    import robomimic.models.base_nets as _rmbn
+    if not hasattr(_rmbn, "CropRandomizer"):   # robomimic 0.3 moved it out of base_nets
+        import robomimic.models.obs_core as _rmoc
+        _rmbn.CropRandomizer = _rmoc.CropRandomizer
+    ckpt = Path(get_cache_dir(sub_folder="checkpoints")) / run_name / "dp.ckpt"
+    assert ckpt.exists(), f"no dp.ckpt in {ckpt.parent}"
+    payload = torch.load(open(ckpt, "rb"), pickle_module=dill, map_location="cpu")
+    cfg = payload["cfg"]
+    policy = _hydra.utils.instantiate(cfg.policy)
+    policy.load_state_dict(payload["state_dicts"]["ema_model"])
+    return policy.eval(), cfg
+
+
 def load_jointflow_model(run_name, which="best"):
     """Load a trained jointflow (scripts/train_jointflow.py) + its config. `action_dim` (the
     frameskip block dim the eval harness sizes adim with) is derived here; the trainer config
@@ -470,6 +489,10 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             process=process, transform=transform,
             ablate_horizon=bool(ge.get("ablate_horizon", ca_cfg.get("ablate_horizon", False))),
             exec_actions=int(ge.get("exec_actions", 0)))
+
+    if mode == "dp_policy":
+        dp_cfg = getattr(model, "_dp_cfg")
+        return DPTPolicy(model=model, cfg=dp_cfg, action_dim=adim, process={}, transform={})
 
     if mode in ("jointflow_policy", "jointflow_plan"):
         ge = cfg.get("gip_eval", {})
@@ -1125,6 +1148,86 @@ class JointFlowPolicy(LeWAMSplitPolicy):
     def _propose(self, info_dict, replan, history, history_pad):
         action_chunk, _imagined = self.model.sample(history, history_pad)
         return action_chunk
+
+
+class DPTPolicy(BasePolicy):
+    """Eval adapter for a diffusion_policy checkpoint (mode=dp_policy). Receding horizon
+    exactly as the DP codebase evals: stack the last n_obs_steps raw frames (plus proprio
+    keys when the checkpoint consumes them), predict_action, execute the first
+    n_action_steps actions raw -- the checkpoint carries its own normalizer. Pixels must
+    arrive UNTRANSFORMED (uint8 HWC); build_policy passes transform={} for this mode."""
+
+    def __init__(self, model, cfg, action_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.type = "dp_policy"
+        self.model = model
+        self.obs_keys = set(cfg.task.shape_meta["obs"].keys())
+        self.n_obs = int(cfg.n_obs_steps)
+        self.n_act = int(cfg.n_action_steps)
+        self.action_dim = int(action_dim)
+        self._hist = None
+        self._action_buffer = None
+
+    def set_env(self, env):
+        self.env = env
+        n = getattr(env, "num_envs", 1)
+        self._hist = [deque(maxlen=self.n_obs) for _ in range(n)]
+        self._action_buffer = [deque() for _ in range(n)]
+
+    @torch.no_grad()
+    def get_action(self, info_dict, **kwargs):
+        info_dict = self._prepare_info(info_dict)
+        num_envs = self.env.num_envs
+        device = next(self.model.parameters()).device
+        if self._hist is None:
+            self.set_env(self.env)
+
+        flush = info_dict.pop("_needs_flush", None)
+        if flush is not None:
+            for i in range(num_envs):
+                if flush[i]:
+                    self._hist[i].clear()
+                    self._action_buffer[i].clear()
+
+        term = info_dict.get("terminated")
+        dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
+
+        pixels = np.asarray(info_dict["pixels"])
+        if pixels.ndim == 5:
+            pixels = pixels[:, -1]
+        proprio = np.asarray(info_dict["proprio"]) if "proprio" in info_dict else None
+        for i in range(num_envs):
+            if dead[i]:
+                continue
+            pr = proprio[i] if proprio is not None else None
+            if not self._hist[i]:
+                for _ in range(self.n_obs):   # first stack = n_obs repeats, as DP pads at reset
+                    self._hist[i].append((pixels[i], pr))
+            else:
+                self._hist[i].append((pixels[i], pr))
+
+        replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
+        if replan:
+            frames = np.stack([np.stack([f for f, _ in self._hist[i]]) for i in replan])
+            frames = np.moveaxis(frames.astype(np.float32) / 255.0, -1, 2)   # (R, To, 3, H, W)
+            t = lambda x: torch.from_numpy(np.ascontiguousarray(x)).to(device)
+            full = {"sideview_image": t(frames)}
+            if proprio is not None:
+                props = np.stack([np.stack([p for _, p in self._hist[i]])
+                                  for i in replan]).astype(np.float32)
+                full.update({"robot0_eef_pos": t(props[..., 0:3]),
+                             "robot0_eef_quat": t(props[..., 3:7]),
+                             "robot0_gripper_qpos": t(props[..., 7:9])})
+            obs = {k: v for k, v in full.items() if k in self.obs_keys}
+            chunk = self.model.predict_action(obs)["action"].cpu().numpy()
+            for row, i in enumerate(replan):
+                self._action_buffer[i].extend(chunk[row, :self.n_act])
+
+        action = np.full((num_envs, self.action_dim), np.nan, dtype=np.float32)
+        for i in range(num_envs):
+            if not dead[i]:
+                action[i] = self._action_buffer[i].popleft()
+        return action.reshape(*self.env.action_space.shape).astype(np.float32)
 
 
 class JointFlowPlanPolicy(JointFlowPolicy):

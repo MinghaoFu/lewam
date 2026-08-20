@@ -372,6 +372,13 @@ def run(cfg: DictConfig):
         model._crossattn_cfg = ca_cfg
         adim = int(ca_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
+    elif mode == "dp_policy":
+        model, dp_cfg = gip.load_dp_model(cfg.policy)
+        model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
+        model.requires_grad_(False)
+        model._dp_cfg = dp_cfg
+        adim = int(dp_cfg.task.shape_meta["action"]["shape"][0])
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
     elif mode in ("jointflow_policy", "jointflow_plan"):
         model, jf_cfg = gip.load_jointflow_model(cfg.policy, which=cfg.get("seq_which", "best"))
         model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
