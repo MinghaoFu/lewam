@@ -85,12 +85,24 @@ def main():
     perm = rng.permutation(n)
     tr, te = perm[:split], perm[split:]
 
+    # read every needed frame ONCE into RAM (~6GB for 40k frames); h5 fancy reads are far
+    # too slow to repeat per checkpoint
+    all_rows = np.unique(np.concatenate([idx, idx + args.idm_gap]))
+    row_pos = {r: i for i, r in enumerate(all_rows)}
+    print(f"[probe] caching {len(all_rows)} frames to RAM", flush=True)
+    px_cache = np.empty((len(all_rows), 224, 224, 3), dtype=np.uint8)
+    for b0 in range(0, len(all_rows), 2048):
+        rb = all_rows[b0:b0 + 2048]
+        px_cache[b0:b0 + len(rb)] = f["pixels"][rb[0]:rb[-1] + 1][rb - rb[0]]
+    print("[probe] frame cache ready", flush=True)
+
     def encode_all(model, rows):
+        pos = np.array([row_pos[r] for r in rows])
         zs = []
         with torch.no_grad():
-            for b0 in range(0, len(rows), args.batch_size):
-                rb = rows[b0:b0 + args.batch_size]
-                px = torch.from_numpy(f["pixels"][rb]).permute(0, 3, 1, 2).float() / 255.0
+            for b0 in range(0, len(pos), args.batch_size):
+                pb = pos[b0:b0 + args.batch_size]
+                px = torch.from_numpy(px_cache[pb]).permute(0, 3, 1, 2).float() / 255.0
                 px = ((px - _IMG_MEAN) / _IMG_STD).to(device)
                 zs.append(model.encode(px).cpu().numpy())
         return np.concatenate(zs).astype(np.float64)
