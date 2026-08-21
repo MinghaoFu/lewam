@@ -153,7 +153,10 @@ def main():
         model.zero_grad(set_to_none=True)
         v_a, _ = model.velocity(na, ns, memory, pad, t, t, z_goal, h_norm)
         ((v_a - (target - na0)) ** 2).mean().backward()
-        return torch.cat([p.grad.flatten() for p in head_params]).detach().clone()
+        # null_goal (and any other non-participating param) has grad None when every row
+        # carries a real goal -- substitute zeros so the vector layout is call-invariant
+        return torch.cat([(p.grad if p.grad is not None else torch.zeros_like(p)).flatten()
+                          for p in head_params]).detach().clone()
 
     def cos(a_, b_):
         return round(F.cosine_similarity(a_, b_, dim=0).item(), 4)
