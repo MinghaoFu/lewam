@@ -131,15 +131,33 @@ def main():
 
     from lewam.models.jointflow import build_model
 
+    def load_probe_model(run_dir, device):
+        """A jointflow run dir (jointflow_config.json) loads the full model; a lewam_unified
+        run dir (lewam_unified_config.json) loads ONLY its VisionEncoder submodule, so a
+        reference encoder (e.g. the pusht idm05 SOTA) probes on the same frames."""
+        jf_cfg = run_dir / "jointflow_config.json"
+        if jf_cfg.exists():
+            cfg = json.loads(jf_cfg.read_text())
+            model = build_model(cfg)
+            model.load_state_dict(torch.load(run_dir / "jointflow_best.pt", map_location="cpu"),
+                                  strict=True)
+            return model.to(device).eval()
+        from types import SimpleNamespace
+        from lewam.models.module import VisionEncoder
+        cfg = json.loads((run_dir / "lewam_unified_config.json").read_text())
+        enc = VisionEncoder(img_size=224, size=cfg.get("encoder_size", "tiny"),
+                            output_dim=int(cfg["z_dim"]),
+                            backbone=cfg.get("encoder_backbone", "scratch"))
+        sd = torch.load(run_dir / "lewam_unified_best.pt", map_location="cpu")
+        enc.load_state_dict({k[len("encoder."):]: v for k, v in sd.items()
+                             if k.startswith("encoder.")}, strict=True)
+        return SimpleNamespace(encode=enc.to(device).eval())
+
     results = {}
     for run_dir in args.ckpt_dirs.split(","):
         run_dir = Path(run_dir)
         name = run_dir.name if run_dir.name else run_dir.parent.name
-        cfg = json.loads((run_dir / "jointflow_config.json").read_text())
-        model = build_model(cfg)
-        model.load_state_dict(torch.load(run_dir / "jointflow_best.pt", map_location="cpu"),
-                              strict=True)
-        model.to(device).eval()
+        model = load_probe_model(run_dir, device)
 
         z = encode_all(model, idx)
         z_next = encode_all(model, idx + args.idm_gap)
