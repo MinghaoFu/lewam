@@ -16,7 +16,17 @@ import torch
 _IMG_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 _IMG_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
-FACTORS = {"stand": (10, 13), "frame": (17, 20), "tool": (24, 27)}
+FACTORS_TOOLHANG = "stand:10:13,frame:17:20,tool:24:27"
+
+
+def parse_factors(spec):
+    """"name:lo:hi,..." -> {name: (lo, hi)}. A name ending in _angle with a single column
+    is probed as (sin, cos) of that column (wraparound-safe)."""
+    out = {}
+    for part in spec.split(","):
+        name, lo, hi = part.split(":")
+        out[name] = (int(lo), int(hi))
+    return out
 
 
 def parse_args():
@@ -28,6 +38,12 @@ def parse_args():
     ap.add_argument("--idm_gap", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--factors", default=FACTORS_TOOLHANG,
+                    help='state-column blocks to probe, "name:lo:hi,...". pusht: '
+                         '"agent:0:2,block:2:4,block_angle:4:5"')
+    ap.add_argument("--pixel_scale", default="norm", choices=["norm", "raw255"],
+                    help="encoder input scale: norm = /255+ImageNet (fp16-cache-era ckpts); "
+                         "raw255 = raw 0-255 floats (uint8-cache-era ckpts, pixel-scale bug)")
     ap.add_argument("--out", default="/tmp/probe_latents.json")
     return ap.parse_args()
 
@@ -66,7 +82,8 @@ def main():
 
     f = h5py.File(args.h5, "r")
     n_total = f["pixels"].shape[0]
-    ep_idx = np.asarray(f["ep_idx"][:])
+    ep_key = "ep_idx" if "ep_idx" in f else "episode_idx"
+    ep_idx = np.asarray(f[ep_key][:])
     # frame sample: only rows whose t+gap stays inside the same episode, so every row
     # also serves as an IDM pair start
     ok = np.zeros(n_total, dtype=bool)
@@ -92,7 +109,11 @@ def main():
     px_cache = np.empty((len(all_rows), 224, 224, 3), dtype=np.uint8)
     for b0 in range(0, len(all_rows), 2048):
         rb = all_rows[b0:b0 + 2048]
-        px_cache[b0:b0 + len(rb)] = f["pixels"][rb[0]:rb[-1] + 1][rb - rb[0]]
+        span = int(rb[-1]) - int(rb[0]) + 1
+        if span <= 4 * len(rb):        # dense rows: one span read
+            px_cache[b0:b0 + len(rb)] = f["pixels"][rb[0]:rb[-1] + 1][rb - rb[0]]
+        else:                          # sparse rows (big h5): sorted fancy read, no span blowup
+            px_cache[b0:b0 + len(rb)] = f["pixels"][rb.tolist()]
     print("[probe] frame cache ready", flush=True)
 
     def encode_all(model, rows):
@@ -101,8 +122,10 @@ def main():
         with torch.no_grad():
             for b0 in range(0, len(pos), args.batch_size):
                 pb = pos[b0:b0 + args.batch_size]
-                px = torch.from_numpy(px_cache[pb]).permute(0, 3, 1, 2).float() / 255.0
-                px = ((px - _IMG_MEAN) / _IMG_STD).to(device)
+                px = torch.from_numpy(px_cache[pb]).permute(0, 3, 1, 2).float()
+                if args.pixel_scale == "norm":
+                    px = (px / 255.0 - _IMG_MEAN) / _IMG_STD
+                px = px.to(device)
                 zs.append(model.encode(px).cpu().numpy())
         return np.concatenate(zs).astype(np.float64)
 
@@ -122,8 +145,11 @@ def main():
         z_next = encode_all(model, idx + args.idm_gap)
 
         res = {"geometry": geometry(z)}
-        for fac, (lo, hi) in FACTORS.items():
-            res[f"probe_{fac}_r2"] = ridge_r2(z[tr], state[tr, lo:hi], z[te], state[te, lo:hi])
+        for fac, (lo, hi) in parse_factors(args.factors).items():
+            y = state[:, lo:hi]
+            if fac.endswith("_angle") and hi - lo == 1:
+                y = np.concatenate([np.sin(y), np.cos(y)], 1)
+            res[f"probe_{fac}_r2"] = ridge_r2(z[tr], y[tr], z[te], y[te])
         if proprio.std(0).max() > 1e-6:
             res["probe_proprio_r2"] = ridge_r2(z[tr], proprio[tr], z[te], proprio[te])
         zz = np.concatenate([z, z_next], 1)

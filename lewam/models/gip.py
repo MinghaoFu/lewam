@@ -508,11 +508,12 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             action_dim=adim // action_block, horizon0=_as_h0(horizon0),
             H_max=int(ge.get("horizon_H_max", 50)),
             process=process, transform=transform,
+            pixel_scale=str(ge.get("pixel_scale", "norm")),
             exec_actions=int(ge.get("exec_actions", 0)))
         if mode == "jointflow_policy":
             return JointFlowPolicy(**shared)
         if mode == "jointflow_gc":
-            return JointFlowGCPolicy(**shared)
+            return JointFlowGCPolicy(shuffle_goal=bool(ge.get("shuffle_goal", False)), **shared)
         return JointFlowPlanPolicy(
             plan_mode=str(ge.get("plan_mode", "best_of_k")),
             plan_k=int(ge.get("plan_k", 32)),
@@ -1074,12 +1075,26 @@ class JointFlowPolicy(LeWAMSplitPolicy):
 
     def __init__(self, model, cfg, *args, **kwargs):
         self.exec_actions = int(kwargs.pop("exec_actions", 0))
+        # pixel_scale=raw255: the checkpoint trained on raw 0-255 floats (uint8 cache whose
+        # frames the GR dataset floated before run_batch's dtype check could normalize), so
+        # the eval transform's ImageNet normalization must be reverted before encode.
+        self.pixel_scale = str(kwargs.pop("pixel_scale", "norm"))
+        assert self.pixel_scale in ("norm", "raw255"), self.pixel_scale
+        stats = spt.data.dataset_stats.ImageNet
+        self._in_mean = torch.tensor(stats["mean"]).view(1, 3, 1, 1)
+        self._in_std = torch.tensor(stats["std"]).view(1, 3, 1, 1)
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "jointflow_policy"
         self.history_len = int(cfg["policy_history_len"])
         self.num_actions = int(cfg["num_actions_pred"])
         self._append_every_step = True
         self._lat_buf = None
+
+    def _enc(self, x):
+        """Encode eval pixels at the checkpoint's training scale (see pixel_scale above)."""
+        if self.pixel_scale == "raw255":
+            x = (x * self._in_std.to(x.device) + self._in_mean.to(x.device)) * 255.0
+        return self.model.encode(x)
 
     def set_env(self, env):
         super().set_env(env)
@@ -1115,7 +1130,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         if active:
             curr = info_dict["pixels"][active]
             c_obs = curr[:, -1] if curr.ndim == 5 else curr
-            z_cur = self.model.encode(c_obs.to(device).float())
+            z_cur = self._enc(c_obs.to(device).float())
             for row, i in enumerate(active):
                 self._lat_buf[i].append(z_cur[row])
                 if len(self._lat_buf[i]) > hl:
@@ -1240,6 +1255,9 @@ class JointFlowGCPolicy(JointFlowPolicy):
     frame and passes h_norm from the inherited horizon countdown into the joint sample."""
 
     def __init__(self, model, cfg, *args, **kwargs):
+        # diagnostic: hand each env another env's goal (roll across the replan batch), so SR
+        # measures how much of the policy is actually goal-driven vs goal-blind behavior
+        self.shuffle_goal = bool(kwargs.pop("shuffle_goal", False))
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "jointflow_gc"
         assert getattr(model, "goal_conditioning", False), "checkpoint lacks goal conditioning"
@@ -1251,7 +1269,11 @@ class JointFlowGCPolicy(JointFlowPolicy):
         device = history.device
         goal = info_dict["goal"][replan]
         g_obs = goal[:, -1] if goal.ndim == 5 else goal
-        z_goal = self.model.encode(g_obs.to(device).float())
+        z_goal = self._enc(g_obs.to(device).float())
+        if self.shuffle_goal:
+            # identity when only one env is replanning (late-episode tail) -- acceptable
+            # for the diagnostic since most replans carry the full batch
+            z_goal = torch.roll(z_goal, 1, dims=0)
         steps = np.maximum(self._steps_left[replan], 1.0)
         h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                               device=device, dtype=torch.float32)
@@ -1281,6 +1303,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         assert self.plan_mode in ("best_of_k", "cem"), self.plan_mode
         assert self.model.num_states > 0, "planning needs imagined state tokens"
         self.type = f"jointflow_plan_{self.plan_mode}"
+        if getattr(model, "goal_conditioning", False):
+            # GR checkpoints train on anchor-spaced history -> encode only at replans
+            self._append_every_step = False
         self._prev_plan = None
 
     def set_env(self, env):
@@ -1301,7 +1326,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         device = history.device
         goal = info_dict["goal"][replan]
         g_obs = goal[:, -1] if goal.ndim == 5 else goal
-        z_goal = self.model.encode(g_obs.to(device).float())
+        z_goal = self._enc(g_obs.to(device).float())
         h_norm = None
         if getattr(self.model, "goal_conditioning", False):
             steps = np.maximum(self._steps_left[replan], 1.0)

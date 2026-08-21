@@ -140,8 +140,11 @@ class JointFlowGRDataset(torch.utils.data.Dataset):
         n_blocks = self.num_actions // fs
 
         lo = max(e0, ti - hl + 1)
-        recent = self.frames[lo:ti + 1].float()
-        history = torch.zeros((hl, *recent.shape[1:]), dtype=torch.float32)
+        # frames keep the CACHE dtype (uint8 raw / fp16 pre-normalized): run_batch's
+        # was_uint8 branch does the /255-mean-std on GPU. Floating here would both defeat
+        # that normalization (the ep-48 pixel-scale bug) and 4x the loader traffic.
+        recent = self.frames[lo:ti + 1]
+        history = torch.zeros((hl, *recent.shape[1:]), dtype=recent.dtype)
         history[hl - recent.shape[0]:] = recent
         history_pad = torch.ones(hl, dtype=torch.bool)
         history_pad[hl - recent.shape[0]:] = False
@@ -153,16 +156,16 @@ class JointFlowGRDataset(torch.utils.data.Dataset):
             target_valid[b * fs:(b + 1) * fs] = 1.0
 
         if self.num_states:
-            state_frames = torch.stack([self.frames[ti + min(q, mh)].float()
+            state_frames = torch.stack([self.frames[ti + min(q, mh)]
                                         for q in range(1, self.num_states + 1)])
             state_valid = torch.tensor([1.0 if q <= mh else 0.0
                                         for q in range(1, self.num_states + 1)])
         else:
-            state_frames = torch.zeros((0, *self.frames.shape[1:]), dtype=torch.float32)
+            state_frames = torch.zeros((0, *self.frames.shape[1:]), dtype=self.frames.dtype)
             state_valid = torch.zeros(0)
 
         h = min(int(torch.randint(1, self.h_max + 1, (1,)).item()), mh)
-        goal_frame = self.frames[ti + h].float()
+        goal_frame = self.frames[ti + h]
         h_norm = torch.tensor(min(h, self.h_max) / self.h_max, dtype=torch.float32)
         return history, history_pad, target, target_valid, state_frames, state_valid, \
             goal_frame, h_norm
