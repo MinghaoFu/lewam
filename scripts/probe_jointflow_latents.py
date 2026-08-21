@@ -9,6 +9,10 @@ import argparse
 import json
 from pathlib import Path
 
+try:
+    import hdf5plugin  # noqa: F401  registers external HDF5 filters (pusht.h5 pixels need it)
+except ImportError:
+    pass
 import h5py
 import numpy as np
 import torch
