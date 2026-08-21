@@ -164,8 +164,13 @@ class RawContextDataset(Dataset):
 
         recent = self.frames[max(ep0, p - hl + 1):p + 1]
         k = recent.shape[0]
-        context = torch.zeros((hl, *recent.shape[1:]), dtype=recent.dtype)
+        context = torch.empty((hl, *recent.shape[1:]), dtype=recent.dtype)
         context[hl - k:] = recent                            # right-aligned, most recent last
+        if k < hl:
+            # repeat-edge pad (masked in attention): zero frames through the encoder would
+            # corrupt its projector BatchNorm batch stats (see train_lewam_unified collate_pad).
+            # NOTE: crossattn_bc board numbers predate this fix (they trained with zero-pad).
+            context[:hl - k] = recent[0]
         ctx_pad = torch.ones(hl, dtype=torch.bool)
         ctx_pad[hl - k:] = False
 

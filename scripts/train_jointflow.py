@@ -144,10 +144,17 @@ class JointFlowGRDataset(torch.utils.data.Dataset):
         # was_uint8 branch does the /255-mean-std on GPU. Floating here would both defeat
         # that normalization (the ep-48 pixel-scale bug) and 4x the loader traffic.
         recent = self.frames[lo:ti + 1]
-        history = torch.zeros((hl, *recent.shape[1:]), dtype=recent.dtype)
-        history[hl - recent.shape[0]:] = recent
+        k = recent.shape[0]
+        history = torch.empty((hl, *recent.shape[1:]), dtype=recent.dtype)
+        history[hl - k:] = recent
+        if k < hl:
+            # pad with the OLDEST REAL frame, not zeros: pad positions are masked from
+            # attention, but every frame still passes the encoder, whose projector has a
+            # BatchNorm -- zero frames would corrupt the batch statistics for the real
+            # frames (train_lewam_unified's collate_pad documents this exact failure)
+            history[:hl - k] = recent[0]
         history_pad = torch.ones(hl, dtype=torch.bool)
-        history_pad[hl - recent.shape[0]:] = False
+        history_pad[hl - k:] = False
 
         target = torch.zeros((self.num_actions, self.raw_adim), dtype=torch.float32)
         target_valid = torch.zeros(self.num_actions, dtype=torch.float32)
