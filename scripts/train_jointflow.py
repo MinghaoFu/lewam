@@ -252,6 +252,38 @@ class JointFlowDataset(RawContextDataset):
         return history_frames, history_pad, target, target_valid, state_frames, state_valid
 
 
+class JointFlowBatchedDataset(JointFlowDataset):
+    """JointFlowDataset (raw cache, TC path) with ONE vectorized __getitem__ per BATCH of
+    indices — same batched-fetch pattern as JointFlowGRBatchedDataset, same sampling
+    semantics as the scalar path (asserted by the tc_batched_equivalence unit test)."""
+
+    def __getitem__(self, idx_list):
+        idx = self.indices[torch.as_tensor(idx_list, dtype=torch.long)]
+        p = self.t_gidx[idx].long()
+        e0 = self.ep_base[idx].long()
+        ttl = self.frames_to_terminal[idx].long()
+        B, hl, n, fs = idx.numel(), self.history_len, self.n_tokens, self.frameskip
+
+        raw_pos = p[:, None] + (torch.arange(hl) - (hl - 1))[None, :]
+        context = self.frames[torch.maximum(raw_pos, e0[:, None])]      # repeat-edge pad
+        ctx_pad = raw_pos < e0[:, None]
+
+        steps = torch.arange(n)
+        valid = steps[None, :] < torch.minimum(ttl, torch.tensor(n))[:, None]
+        safe = torch.clamp(p[:, None] + steps[None, :], max=self.a_frame.shape[0] - 1)
+        target = self.a_frame[safe].float() * valid[..., None].float()
+        target_valid = valid.float()
+
+        if self.num_states:
+            q = torch.arange(1, self.num_states + 1)
+            state_frames = self.frames[p[:, None] + torch.minimum(q[None, :] * fs, ttl[:, None])]
+            state_valid = (q[None, :] * fs <= ttl[:, None]).float()
+        else:
+            state_frames = torch.zeros((B, 0, *self.frames.shape[1:]), dtype=self.frames.dtype)
+            state_valid = torch.zeros(B, 0)
+        return context, ctx_pad, target, target_valid, state_frames, state_valid
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
@@ -300,20 +332,18 @@ def main():
                                            args.policy_history_len, args.num_actions_pred,
                                            args.num_states_pred, args.frameskip, args.H_max)
         else:
-            ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
-                                  args.policy_history_len, args.num_actions_pred, args.frameskip,
-                                  args.num_states_pred)
+            ds = JointFlowBatchedDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal,
+                                         idx, args.policy_history_len, args.num_actions_pred,
+                                         args.frameskip, args.num_states_pred)
         n = max(args.batch_size, int(idx.numel()))
         if args.steps_per_epoch:
             n = min(n, args.steps_per_epoch * args.batch_size)
+        # batched fetch: BatchSampler + batch_size=None -> one vectorized __getitem__ per
+        # batch (already collated), so the loader cost is per-batch, not per-item
         sampler = RandomSampler(ds, replacement=True, num_samples=n)
-        if args.fs_strided:
-            # batched fetch: BatchSampler + batch_size=None -> one vectorized __getitem__
-            # per batch (already collated), so the loader cost is per-batch, not per-item
-            la = {k: v for k, v in loader_args.items() if k != "batch_size"}
-            return DataLoader(ds, sampler=BatchSampler(sampler, args.batch_size, drop_last=False),
-                              batch_size=None, **la)
-        return DataLoader(ds, sampler=sampler, **loader_args)
+        la = {k: v for k, v in loader_args.items() if k != "batch_size"}
+        return DataLoader(ds, sampler=BatchSampler(sampler, args.batch_size, drop_last=False),
+                          batch_size=None, **la)
     train_loader, val_loader = make_loader(train_idx), make_loader(val_idx)
 
     cfg = dict(fs=args.frameskip, action_raw_dim=raw_adim, img_size=args.img_size,
