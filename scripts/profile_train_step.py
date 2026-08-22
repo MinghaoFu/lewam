@@ -15,9 +15,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler
+from torch.utils.data import DataLoader, RandomSampler
 
-from train_jointflow import JointFlowGRBatchedDataset
+from train_jointflow import JointFlowGRDataset
 from train_lewam_unified import _IMG_MEAN, _IMG_STD
 from lewam.models.jointflow import build_model
 
@@ -26,6 +26,8 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache_dir", required=True, help="u8 cache dir for pusht")
     ap.add_argument("--stem", default="pusht_expert_train")
+    ap.add_argument("--encoder_backbone", default="resnet18dp")
+    ap.add_argument("--encoder_size", default="tiny")
     ap.add_argument("--z_dim", type=int, default=192)
     ap.add_argument("--n_heads", type=int, default=3)
     ap.add_argument("--proj_hidden", type=int, default=384)
@@ -54,15 +56,14 @@ def main():
     idx = torch.nonzero(ok).flatten()
     print(f"[profile] rows={n_keep} usable_anchors={idx.numel()}", flush=True)
 
-    ds = JointFlowGRBatchedDataset(frames, a_block, t_gidx, maxh, ep_base, idx,
-                                   2, 10, 1, 5, h_max)
-    sampler = RandomSampler(ds, replacement=True, num_samples=10 ** 9)
-    loader = DataLoader(ds, sampler=BatchSampler(sampler, args.batch_size, drop_last=False),
-                        batch_size=None, num_workers=args.num_workers, pin_memory=True,
-                        prefetch_factor=4, persistent_workers=True)
+    ds = JointFlowGRDataset(frames, a_block, t_gidx, maxh, ep_base, idx,
+                            2, 10, 1, 5, h_max)
+    loader = DataLoader(ds, sampler=RandomSampler(ds, replacement=True, num_samples=10 ** 9),
+                        batch_size=args.batch_size, num_workers=args.num_workers,
+                        pin_memory=True, prefetch_factor=4, persistent_workers=True)
 
-    cfg = dict(fs=5, action_raw_dim=2, img_size=224, encoder_size="tiny",
-               encoder_backbone="resnet18dp", encoder_ckpt=None, z_dim=args.z_dim,
+    cfg = dict(fs=5, action_raw_dim=2, img_size=224, encoder_size=args.encoder_size,
+               encoder_backbone=args.encoder_backbone, encoder_ckpt=None, z_dim=args.z_dim,
                proj_hidden=args.proj_hidden, d_model=args.z_dim, n_heads=args.n_heads,
                depth=8, dropout=0.1, n_flow_steps=8, num_actions_pred=10, num_states_pred=1,
                policy_history_len=2, actions_attend_states=True, split_tau=False,
