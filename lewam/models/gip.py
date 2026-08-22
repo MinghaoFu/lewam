@@ -517,6 +517,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
         return JointFlowPlanPolicy(
             plan_mode=str(ge.get("plan_mode", "best_of_k")),
             plan_k=int(ge.get("plan_k", 32)),
+            plan_rollout=int(ge.get("plan_rollout", 1)),
             cem_iters=int(ge.get("cem_iters", 3)),
             cem_elites=int(ge.get("cem_elites", 6)),
             cem_std=float(ge.get("cem_std", 0.5)), **shared)
@@ -1296,12 +1297,25 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     def __init__(self, model, cfg, *args, **kwargs):
         self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
         self.plan_k = int(kwargs.pop("plan_k", 32))
+        # plan_rollout H > 1: autoregressive imagination -- each unroll denoises the joint
+        # chunk, keeps the FIRST frameskip action block, slides the imagined z (at +1 obs
+        # step) into the latent history, H times. Cost scores the FINAL imagined state
+        # against the goal; the winner's full H*frameskip raw actions execute, then replan.
+        self.plan_rollout = int(kwargs.pop("plan_rollout", 1))
         self.cem_iters = int(kwargs.pop("cem_iters", 3))
         self.cem_elites = int(kwargs.pop("cem_elites", 6))
         self.cem_std = float(kwargs.pop("cem_std", 0.5))
         super().__init__(model, cfg, *args, **kwargs)
         assert self.plan_mode in ("best_of_k", "cem"), self.plan_mode
         assert self.model.num_states > 0, "planning needs imagined state tokens"
+        if self.plan_rollout > 1:
+            assert self.plan_mode == "best_of_k", "rollout planning implements best_of_k only"
+            assert not getattr(model, "goal_conditioning", False), \
+                "rollout planning is for goal-blind checkpoints (no per-step h_norm countdown)"
+            # the plan is H*fs raw actions; execute all of it by default, then replan
+            self.num_actions = self.plan_rollout * self.action_block
+            if self.exec_actions == 0:
+                self.exec_actions = self.num_actions
         self.type = f"jointflow_plan_{self.plan_mode}"
         if getattr(model, "goal_conditioning", False):
             # GR checkpoints train on anchor-spaced history -> encode only at replans
@@ -1349,12 +1363,28 @@ class JointFlowPlanPolicy(JointFlowPolicy):
 
     def _best_of_k(self, history, history_pad, z_goal, h_norm=None):
         R, K = history.shape[0], self.plan_k
-        action, z_imag = self.model.sample(history.repeat_interleave(K, 0),
-                                           history_pad.repeat_interleave(K, 0),
-                                           **self._cond_args(z_goal, h_norm, K))
-        cost = self._final_cost(z_imag, z_goal.repeat_interleave(K, 0)).view(R, K)
+        h = history.repeat_interleave(K, 0)
+        p = history_pad.repeat_interleave(K, 0)
+        goal_rep = z_goal.repeat_interleave(K, 0)
+        if self.plan_rollout <= 1:
+            action, z_imag = self.model.sample(h, p, **self._cond_args(z_goal, h_norm, K))
+            cost = self._final_cost(z_imag, goal_rep).view(R, K)
+            pick = cost.argmin(1)
+            return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
+        # autoregressive imagination: H unrolls of the joint denoiser; keep the first
+        # frameskip block per unroll, feed the imagined z (slot at +1 obs step) back as history
+        fs = self.action_block
+        plan_parts = []
+        for _ in range(self.plan_rollout):
+            action, z_imag = self.model.sample(h, p)
+            plan_parts.append(action[:, :fs])
+            z_next = z_imag[:, :1]
+            h = torch.cat([h[:, 1:], z_next], dim=1)
+            p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+        cost = ((z_next.squeeze(1) - goal_rep) ** 2).mean(-1).view(R, K)
+        plan = torch.cat(plan_parts, dim=1).view(R, K, self.plan_rollout * fs, -1)
         pick = cost.argmin(1)
-        return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
+        return plan[torch.arange(R, device=plan.device), pick]
 
     def _cem(self, history, history_pad, z_goal, h_norm, replan):
         R, P = history.shape[0], self.plan_k
