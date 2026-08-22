@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 from train_crossattn import load_cache, RawContextDataset
 from train_lewam_unified import durable_sync, _IMG_MEAN, _IMG_STD
@@ -68,13 +68,13 @@ def parse_args():
     # goal reaching
     ap.add_argument("--goal_conditioning", action="store_true",
                     help="goal + horizon condition the action readout (GCHeadMSE); requires "
-                         "--gr_cache")
+                         "--fs_strided")
     ap.add_argument("--H_max", type=int, default=50,
                     help="horizon cap in obs-steps; h_norm = min(h, H_max)/H_max")
     ap.add_argument("--p_drop_goal", type=float, default=0.0,
                     help="per-row goal dropout to the learned null goal (0 = every sample "
                          "keeps its goal)")
-    ap.add_argument("--gr_cache", action="store_true",
+    ap.add_argument("--fs_strided", action="store_true",
                     help="load the fs-strided (old GR) cache and sample goals at anchor offsets")
     # anti-collapse
     ap.add_argument("--w_reg", type=float, default=0.0,
@@ -126,7 +126,7 @@ class JointFlowGRDataset(torch.utils.data.Dataset):
         self.frameskip = frameskip
         self.h_max = h_max
         self.raw_adim = a_block.shape[1] // frameskip
-        assert num_actions % frameskip == 0, "num_actions must be whole anchor blocks on gr_cache"
+        assert num_actions % frameskip == 0, "num_actions must be whole anchor blocks on the fs-strided cache"
 
     def __len__(self):
         return self.indices.numel()
@@ -178,6 +178,51 @@ class JointFlowGRDataset(torch.utils.data.Dataset):
             goal_frame, h_norm
 
 
+class JointFlowGRBatchedDataset(JointFlowGRDataset):
+    """JointFlowGRDataset with ONE vectorized __getitem__ per BATCH of indices — use with
+    DataLoader(batch_size=None, sampler=BatchSampler(...)). Removes the per-item Python and
+    default_collate cost that bounds the per-decision-point loader (~415k calls/epoch on
+    pusht). Sampling semantics are identical to the scalar path (asserted by the
+    gr_batched_equivalence unit test); returns the already-collated batch tuple."""
+
+    def __getitem__(self, idx_list):
+        idx = self.indices[torch.as_tensor(idx_list, dtype=torch.long)]
+        ti = self.t_gidx[idx].long()
+        mh = self.maxh[idx].long()
+        e0 = self.ep_base[idx].long()
+        B, hl, fs = idx.numel(), self.history_len, self.frameskip
+        n_blocks = self.num_actions // fs
+
+        # history via a clamped index matrix: clamping to the episode base repeats the
+        # oldest real frame (the repeat-edge pad); the pad mask marks the clamped slots
+        raw_pos = ti[:, None] + (torch.arange(hl) - (hl - 1))[None, :]
+        history = self.frames[torch.maximum(raw_pos, e0[:, None])]      # (B, hl, C, H, W)
+        history_pad = raw_pos < e0[:, None]
+
+        blocks = torch.arange(n_blocks)
+        b_valid = blocks[None, :] < mh[:, None]                          # (B, n_blocks)
+        safe_idx = torch.clamp(idx[:, None] + blocks[None, :], max=self.a_block.shape[0] - 1)
+        tgt = self.a_block[safe_idx].float().view(B, n_blocks, fs, self.raw_adim)
+        target = (tgt * b_valid[:, :, None, None].float()).view(B, self.num_actions,
+                                                                self.raw_adim)
+        target_valid = b_valid[:, :, None].expand(B, n_blocks, fs) \
+            .reshape(B, self.num_actions).float()
+
+        if self.num_states:
+            q = torch.arange(1, self.num_states + 1)
+            state_frames = self.frames[ti[:, None] + torch.minimum(q[None, :], mh[:, None])]
+            state_valid = (q[None, :] <= mh[:, None]).float()
+        else:
+            state_frames = torch.zeros((B, 0, *self.frames.shape[1:]), dtype=self.frames.dtype)
+            state_valid = torch.zeros(B, 0)
+
+        h = torch.minimum(torch.randint(1, self.h_max + 1, (B,)), mh)
+        goal_frames = self.frames[ti + h]
+        h_norm = (h.float() / self.h_max)
+        return history, history_pad, target, target_valid, state_frames, state_valid, \
+            goal_frames, h_norm
+
+
 class JointFlowDataset(RawContextDataset):
     """RawContextDataset plus the block-boundary state-target frames: for q in 1..num_states the
     frame at p + q*frameskip, clamped to the terminal, valid while the boundary is inside the
@@ -223,8 +268,8 @@ def main():
     run_dir = Path(args.run_dir) if args.run_dir else Path(f"runs/{args.run_name}_{tag}" if tag else args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    assert not (args.goal_conditioning and not args.gr_cache), "--goal_conditioning needs --gr_cache"
-    if args.gr_cache:
+    assert not (args.goal_conditioning and not args.fs_strided), "--goal_conditioning needs --fs_strided"
+    if args.fs_strided:
         frames, a_block, t_gidx, maxh, ep_base, action_stats = load_cache_obs(args)
         raw_adim = a_block.shape[1] // args.frameskip
         n_starts = t_gidx.shape[0]
@@ -237,11 +282,11 @@ def main():
     print(f"[jointflow] frames={tuple(frames.shape)} starts={n_starts} raw_dim={raw_adim} "
           f"layout=(a{args.num_actions_pred},s{args.num_states_pred},fs{args.frameskip}) "
           f"actions_attend_states={bool(args.actions_attend_states)} split_tau={args.split_tau} "
-          f"gr={args.gr_cache} goal_cond={args.goal_conditioning}", flush=True)
+          f"fs_strided={args.fs_strided} goal_cond={args.goal_conditioning}", flush=True)
 
     gen = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=gen)
-    perm = perm[tail[perm] >= (1 if args.gr_cache else args.frameskip)]
+    perm = perm[tail[perm] >= (1 if args.fs_strided else args.frameskip)]
     n_val = int(round((1 - args.train_split) * perm.numel()))
     val_idx, train_idx = perm[:n_val], perm[n_val:]
 
@@ -250,10 +295,10 @@ def main():
         loader_args.update(prefetch_factor=args.prefetch_factor, persistent_workers=True)
 
     def make_loader(idx):
-        if args.gr_cache:
-            ds = JointFlowGRDataset(frames, a_block, t_gidx, maxh, ep_base, idx,
-                                    args.policy_history_len, args.num_actions_pred,
-                                    args.num_states_pred, args.frameskip, args.H_max)
+        if args.fs_strided:
+            ds = JointFlowGRBatchedDataset(frames, a_block, t_gidx, maxh, ep_base, idx,
+                                           args.policy_history_len, args.num_actions_pred,
+                                           args.num_states_pred, args.frameskip, args.H_max)
         else:
             ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
                                   args.policy_history_len, args.num_actions_pred, args.frameskip,
@@ -261,7 +306,14 @@ def main():
         n = max(args.batch_size, int(idx.numel()))
         if args.steps_per_epoch:
             n = min(n, args.steps_per_epoch * args.batch_size)
-        return DataLoader(ds, sampler=RandomSampler(ds, replacement=True, num_samples=n), **loader_args)
+        sampler = RandomSampler(ds, replacement=True, num_samples=n)
+        if args.fs_strided:
+            # batched fetch: BatchSampler + batch_size=None -> one vectorized __getitem__
+            # per batch (already collated), so the loader cost is per-batch, not per-item
+            la = {k: v for k, v in loader_args.items() if k != "batch_size"}
+            return DataLoader(ds, sampler=BatchSampler(sampler, args.batch_size, drop_last=False),
+                              batch_size=None, **la)
+        return DataLoader(ds, sampler=sampler, **loader_args)
     train_loader, val_loader = make_loader(train_idx), make_loader(val_idx)
 
     cfg = dict(fs=args.frameskip, action_raw_dim=raw_adim, img_size=args.img_size,
@@ -311,7 +363,7 @@ def main():
     n_states = args.num_states_pred
 
     def run_batch(batch, train=True):
-        if args.gr_cache:
+        if args.fs_strided:
             (history_frames, history_pad, action_target, action_valid, state_frames,
              state_valid, goal_frames, h_norm) = batch
             goal_frames = goal_frames.to(device, non_blocking=True)
