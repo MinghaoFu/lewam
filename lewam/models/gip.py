@@ -1310,9 +1310,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         assert self.model.num_states > 0, "planning needs imagined state tokens"
         if self.plan_rollout > 1:
             assert self.plan_mode == "best_of_k", "rollout planning implements best_of_k only"
-            assert not getattr(model, "goal_conditioning", False), \
-                "rollout planning is for goal-blind checkpoints (no per-step h_norm countdown)"
-            # the plan is H*fs raw actions; execute all of it by default, then replan
+            # the plan is H*fs raw actions; execute all of it by default, then replan.
+            # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
             self.num_actions = self.plan_rollout * self.action_block
             if self.exec_actions == 0:
                 self.exec_actions = self.num_actions
@@ -1341,13 +1340,14 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         goal = info_dict["goal"][replan]
         g_obs = goal[:, -1] if goal.ndim == 5 else goal
         z_goal = self._enc(g_obs.to(device).float())
-        h_norm = None
+        h_norm = steps_t = None
         if getattr(self.model, "goal_conditioning", False):
             steps = np.maximum(self._steps_left[replan], 1.0)
             h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                   device=device, dtype=torch.float32)
+            steps_t = torch.tensor(steps, device=device, dtype=torch.float32)
         if self.plan_mode == "best_of_k":
-            plan = self._best_of_k(history, history_pad, z_goal, h_norm)
+            plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
         else:
             plan = self._cem(history, history_pad, z_goal, h_norm, replan)
         if self._prev_plan is not None:
@@ -1361,7 +1361,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         return dict(z_goal=z_goal.repeat_interleave(repeat, 0),
                     h_norm=h_norm.repeat_interleave(repeat, 0))
 
-    def _best_of_k(self, history, history_pad, z_goal, h_norm=None):
+    def _best_of_k(self, history, history_pad, z_goal, h_norm=None, steps=None):
         R, K = history.shape[0], self.plan_k
         h = history.repeat_interleave(K, 0)
         p = history_pad.repeat_interleave(K, 0)
@@ -1372,11 +1372,20 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             pick = cost.argmin(1)
             return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
         # autoregressive imagination: H unrolls of the joint denoiser; keep the first
-        # frameskip block per unroll, feed the imagined z (slot at +1 obs step) back as history
+        # frameskip block per unroll, feed the imagined z (slot at +1 obs step) back as
+        # history. GR checkpoints condition every unroll on the goal, with h_norm counting
+        # down one obs step per imagined step.
         fs = self.action_block
+        gc = getattr(self.model, "goal_conditioning", False)
+        steps_rep = steps.repeat_interleave(K, 0) if gc else None
         plan_parts = []
-        for _ in range(self.plan_rollout):
-            action, z_imag = self.model.sample(h, p)
+        for k in range(self.plan_rollout):
+            if gc:
+                hk = ((steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max))
+                      / float(self.H_max))
+                action, z_imag = self.model.sample(h, p, z_goal=goal_rep, h_norm=hk)
+            else:
+                action, z_imag = self.model.sample(h, p)
             plan_parts.append(action[:, :fs])
             z_next = z_imag[:, :1]
             h = torch.cat([h[:, 1:], z_next], dim=1)
