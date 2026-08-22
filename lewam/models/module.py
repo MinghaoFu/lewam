@@ -540,12 +540,11 @@ class VisionEncoder(nn.Module):
         else:
             top = pixels.new_full((N,), (H - s) // 2, dtype=torch.long)
             left = pixels.new_full((N,), (W - s) // 2, dtype=torch.long)
-        span = torch.arange(s, device=pixels.device)
-        rows = (top[:, None] + span)[:, None, :, None]              # (N,1,s,1)
-        cols = (left[:, None] + span)[:, None, None, :]             # (N,1,1,s)
-        b = torch.arange(N, device=pixels.device)[:, None, None, None]
-        c = torch.arange(C, device=pixels.device)[None, :, None, None]
-        return pixels[b, c, rows, cols]                            # (N,C,s,s)
+        # unfold views + N-sized indices: the earlier broadcast-gather materialized four
+        # (N,C,s,s)-shaped int64 index tensors (~2GB/batch at N=512) and dominated the
+        # training epoch (measured: epoch time invariant to trunk width, 368s vs 364s)
+        windows = pixels.unfold(2, s, 1).unfold(3, s, 1)            # (N,C,H-s+1,W-s+1,s,s) view
+        return windows[torch.arange(N, device=pixels.device), :, top, left]  # (N,C,s,s)
 
     def forward(self, pixels):
         """pixels: (N, 3, H, W)"""
