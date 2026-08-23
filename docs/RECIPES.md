@@ -109,6 +109,13 @@ pixel-scale bug).
 artifact = noprop snap_ep120), crop 202. Runs die at the 3 h util wall → checkpoint-resume
 chain; sync copies MUST be atomic (cp→mv) and seed verification MUST use
 `torch.load(..., weights_only=False)` (torch ≥2.6) with dill importable.
+**`training.checkpoint_every` MUST be < epochs-per-link (v6c sets 2).** v5/v6 hardcoded 20
+while links die at ~15–17 epochs: any cell whose resumed epoch counter restarts low never
+reaches the next %20 event, so `latest.ckpt` re-freezes at the seed and the chain loops at
+~+1 net epoch per 3 h link (cube and transport did exactly this, 2026-08-24; drawer escaped
+because its counter stayed cumulative and crossed ep 100/120 — which also means drawer's
+synced latest.ckpt IS the exact ep-120 budget artifact, epochs 121–124 were never saved).
+v6b adds epoch-snapshot sync (epoch=*.ckpt) so budget artifacts survive the wall.
 
 ## Eval invariants
 
