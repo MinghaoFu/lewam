@@ -91,8 +91,10 @@ pixel-scale bug).
   between. Verdict: (a) the success restriction is the dominant factor — the owner-best
   recipe lands ~75, not ~100, so cube-TC is simply harder than old full-episode cube;
   (b) the encoder axis is real on cube: +23.4 ViT over resnet18sp under an otherwise
-  identical recipe (opposite sign to toolhang, where r18sp helps); jointflow's
-  resnet18dp is partially implicated in its 66. Val action loss inverted the SR order
+  identical recipe; jointflow's resnet18dp is partially implicated in its 66. Toolhang
+  gives NO usable unified encoder signal on the board (full-traj) protocol: noh_t100 vs
+  r18sp_t100 = 4.0 vs 8.0 there (s42 only, floor) — the ViT-ahead numbers (47.3 vs 33.3,
+  3 seeds) are SEGMENT-protocol only. Label the protocol when citing that era. Val action loss inverted the SR order
   (ResNet best_val 0.080 < ViT 0.096) — never compare val loss across encoders.
   Wall (H100): ViT 213-217 s/ep, ResNet 266-269 s/ep; jointflow cube 75 ep = 481.6 s/ep
   — the 3.2x total gap decomposes as ~2.2x per-anchor compute (trunk size + window
