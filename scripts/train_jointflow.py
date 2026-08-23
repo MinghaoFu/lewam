@@ -4,10 +4,16 @@ import json
 import math
 import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np
 import torch
+
+torch.backends.cudnn.benchmark = True  # fixed 224x224 input, let cuDNN pick the conv algo
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler
 
@@ -39,6 +45,10 @@ def parse_args():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--fp32", action="store_true",
+                    help="disable the bf16 autocast the reference trainers use (train+val "
+                         "forward, backward in fp32) -- the jointflow campaign pre-2026-08-23 "
+                         "ran fp32; see docs/RECIPES.md")
     # model
     ap.add_argument("--encoder_backbone", default="resnet18dp")
     ap.add_argument("--encoder_size", default="tiny")
@@ -309,6 +319,13 @@ def main():
     mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)
     sigreg = SIGReg().to(device)
     n_states = args.num_states_pred
+    # bf16 autocast around the forward (train AND val), backward in fp32 -- exactly the
+    # reference trainers' setup (train_lewam_gc.py:372, train_lewam_unified.py:1106)
+    use_amp = (device == "cuda") and not args.fp32
+    amp_ctx = (lambda: torch.autocast(device_type="cuda", dtype=torch.bfloat16)) if use_amp \
+        else nullcontext
+    print(f"[jointflow] runtime: amp={'bf16' if use_amp else 'fp32'} "
+          f"cudnn.benchmark={torch.backends.cudnn.benchmark}", flush=True)
 
     def run_batch(batch, train=True):
         if args.fs_strided:
@@ -380,7 +397,8 @@ def main():
         model.train()
         train_stats, train_n = {}, 0.0
         for batch in train_loader:
-            loss, loss_terms, n = run_batch(batch)
+            with amp_ctx():
+                loss, loss_terms, n = run_batch(batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -399,7 +417,8 @@ def main():
         val_stats, val_n = {}, 0.0
         with torch.no_grad():
             for batch in val_loader:
-                loss, loss_terms, n = run_batch(batch, train=False)
+                with amp_ctx():
+                    loss, loss_terms, n = run_batch(batch, train=False)
                 accumulate(val_stats, loss_terms, n); val_n += n
         val_act = val_stats.get("act", 0.0) / max(val_n, 1)   # best-checkpoint metric = val action loss
         print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(train_stats,train_n)}]  "
