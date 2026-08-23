@@ -85,9 +85,18 @@ pixel-scale bug).
   flow_H 2` with `p_terminal_goal 1.0 + ablate_horizon` (with that pair, H_max is fully
   inert: terminal goals skip the U[1,H_max] draw and noh zeroes h_norm; without noh,
   H_max still saturates the countdown at min(dist, H_max)/H_max).
-- Diagnostic launched 2026-08-23 (`uni_cube_tc_vit`/`uni_cube_tc_res`, 50 ep warmup 5,
-  raw anchors on the success-restricted cube aux, MSE + rollout_k 2): ViT-vs-ResNet
-  encoder control for the jointflow cube-66 anomaly.
+- Diagnostic RESULT 2026-08-24 (`uni_cube_tc_vit`/`uni_cube_tc_res`, 50 ep warmup 5,
+  raw anchors on the success-restricted cube aux, MSE + rollout_k 2, eval 3 seeds x 50):
+  **ViT {70,76,78} = 74.7 · resnet18sp {48,58,48} = 51.3**; jointflow board 66.0 sits
+  between. Verdict: (a) the success restriction is the dominant factor — the owner-best
+  recipe lands ~75, not ~100, so cube-TC is simply harder than old full-episode cube;
+  (b) the encoder axis is real on cube: +23.4 ViT over resnet18sp under an otherwise
+  identical recipe (opposite sign to toolhang, where r18sp helps); jointflow's
+  resnet18dp is partially implicated in its 66. Val action loss inverted the SR order
+  (ResNet best_val 0.080 < ViT 0.096) — never compare val loss across encoders.
+  Wall (H100): ViT 213-217 s/ep, ResNet 266-269 s/ep; jointflow cube 75 ep = 481.6 s/ep
+  — the 3.2x total gap decomposes as ~2.2x per-anchor compute (trunk size + window
+  amortization) x 1.5x epochs, no residual.
 
 ## Recipe: DP-T baseline (budget-matched; toolhang board 71.0)
 
