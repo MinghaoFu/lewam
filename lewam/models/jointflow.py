@@ -126,9 +126,11 @@ class JointFlow(nn.Module):
                  z_goal=None, h_norm=None, goal_keep=None):
         """Rectified flow forward pass"""
         B = noisy_action.shape[0]
-        x = noisy_action.new_zeros(B, self.is_state.numel(), self.dim)
-
-        x[:, self.action_slots] = self.action_in(noisy_action)
+        # buffer dtype follows the projections: under bf16 autocast the Linear outputs are
+        # bf16 while noisy_action stays fp32, and index-put requires matching dtypes
+        a_proj = self.action_in(noisy_action)
+        x = a_proj.new_zeros(B, self.is_state.numel(), self.dim)
+        x[:, self.action_slots] = a_proj
         if self.num_states:
             x[:, self.state_slots] = self.state_in(noisy_state)
 
