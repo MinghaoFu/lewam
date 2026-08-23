@@ -72,6 +72,23 @@ conditioning; anchor-spaced history (matches eval adapter). Pixel scale: cache u
 normalize on GPU (`was_uint8` branch) — the dataset must NEVER float frames (the ep-48
 pixel-scale bug).
 
+### Historical unified receipts (config dumps, HDFS `ckpts/`)
+
+- `lewam_unified_final/ckpts_live/cube_uni_final_p00` (2026-07-24) — the old cube ~100
+  run: scratch ViT-tiny CLS z 192, ctx 5, agg_residual, MSE head, teacher forcing only,
+  random goals (p00), full episodes. Its dump predates the `rollout_k`/`encoder_backbone`/
+  `head_type`/`anchor_rate` flags.
+- `.../pusht_uni_roll2` (+`_s1`/`_nogoal`/`_ng_acons`, 2026-07-30) — scratch ViT + MSE +
+  `rollout_k 2, w_rollout 1.0`, w_idm 0: the "roll2" element of the owner's best-config
+  trio.
+- Every wf8-era TC arm (`wf8_uni/*/rawchunk_*`, `matched_*`) ran `resnet18sp + flow
+  flow_H 2` with `p_terminal_goal 1.0 + ablate_horizon` (with that pair, H_max is fully
+  inert: terminal goals skip the U[1,H_max] draw and noh zeroes h_norm; without noh,
+  H_max still saturates the countdown at min(dist, H_max)/H_max).
+- Diagnostic launched 2026-08-23 (`uni_cube_tc_vit`/`uni_cube_tc_res`, 50 ep warmup 5,
+  raw anchors on the success-restricted cube aux, MSE + rollout_k 2): ViT-vs-ResNet
+  encoder control for the jointflow cube-66 anomaly.
+
 ## Recipe: DP-T baseline (budget-matched; toolhang board 71.0)
 
 `wf8_dp_cell_v5` entry — convert wf8 h5 → robomimic hdf5 (`--no_proprio`,
