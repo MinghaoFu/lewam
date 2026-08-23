@@ -162,9 +162,11 @@ class JointFlow(nn.Module):
         tau_state = torch.rand(B, device=action_target.device) if self.split_tau else tau_action
 
         noise_action = torch.randn_like(action_target)
-        noisy_action = torch.lerp(noise_action, action_target, tau_action[:, None, None])
+        noisy_action = torch.lerp(noise_action, action_target,
+                                  tau_action[:, None, None].to(action_target.dtype))
         noise_state = torch.randn_like(state_target)
-        noisy_state = torch.lerp(noise_state, state_target, tau_state[:, None, None])
+        noisy_state = torch.lerp(noise_state, state_target,
+                                 tau_state[:, None, None].to(state_target.dtype))
 
         v_action, v_state = self.velocity(noisy_action, noisy_state, memory, history_pad,
                                           tau_action, tau_state, z_goal, h_norm, goal_keep)
@@ -208,7 +210,7 @@ class JointFlow(nn.Module):
         state = noise_state
         for i in range(self.n_flow_steps):
             tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
-            action = torch.lerp(noise_action, action_plan, tau[:, None, None])
+            action = torch.lerp(noise_action, action_plan, tau[:, None, None].to(action_plan.dtype))
             _, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
                                        z_goal, h_norm)
             state = state + v_state / self.n_flow_steps
