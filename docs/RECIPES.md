@@ -26,10 +26,13 @@ with torch.autocast(device_type="cuda", dtype=torch.bfloat16):   # train AND val
 ```
 
 `train_jointflow.py` / `train_crossattn.py` historically ran fp32 eager with neither —
-that is a DEVIATION from the references, discovered 2026-08-23, and is ~2.5–3× slower on
-the measured conv/GN-dominated profile (93–98% GPU util, loader ≤1%). All jointflow-
-campaign numbers to date are fp32-trained (internally consistent). Adding autocast to the
-jointflow trainer requires an owner-approved validation arm before it becomes default.
+a deviation from the references discovered 2026-08-23. VALIDATED SAME DAY: a bf16 rerun of
+the pusht GR anchor scored {60,70,66}=65.3 vs fp32's {58,74,66}=66.0 (within noise), with
+matched final loss and a cleaner val curve. bf16 + cudnn.benchmark is now the jointflow
+default (`--fp32` restores the old behavior). Note the speedup is ~10%, not 2.5–3×: the
+fp32 path already ran TF32 tensor-core convs on H100; bf16 buys bandwidth, not FLOPs.
+Numbers before 2026-08-23 are fp32-trained; from the bf16 default onward, new trainings
+are bf16 — both regimes are SR-equivalent per the validation arm.
 
 ## Recipe: lewam_gc (per-cell GR baseline; pusht board 82.7)
 
