@@ -509,7 +509,8 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             H_max=int(ge.get("horizon_H_max", 50)),
             process=process, transform=transform,
             pixel_scale=str(ge.get("pixel_scale", "norm")),
-            exec_actions=int(ge.get("exec_actions", 0)))
+            exec_actions=int(ge.get("exec_actions", 0)),
+            flow_seed=int(cfg.seed))
         if mode == "jointflow_policy":
             return JointFlowPolicy(**shared)
         if mode == "jointflow_gc":
@@ -1076,6 +1077,10 @@ class JointFlowPolicy(LeWAMSplitPolicy):
 
     def __init__(self, model, cfg, *args, **kwargs):
         self.exec_actions = int(kwargs.pop("exec_actions", 0))
+        # flow-noise generator seeded from the eval seed (the flow-head seeding rule):
+        # every model.sample / inpaint-noise draw goes through _gen(), never the global RNG
+        self._flow_seed = int(kwargs.pop("flow_seed", 0))
+        self._flow_gen = None
         # pixel_scale=raw255: the checkpoint trained on raw 0-255 floats (uint8 cache whose
         # frames the GR dataset floated before run_batch's dtype check could normalize), so
         # the eval transform's ImageNet normalization must be reverted before encode.
@@ -1166,8 +1171,16 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         self._lat_buf[i].clear()
         self._steps_left[i] = _h0_at(self.horizon0, i)
 
+    def _gen(self, device):
+        dev = torch.device(device)
+        if self._flow_gen is None or self._flow_gen.device != dev:
+            self._flow_gen = torch.Generator(device=dev)
+            self._flow_gen.manual_seed(self._flow_seed)
+        return self._flow_gen
+
     def _propose(self, info_dict, replan, history, history_pad):
-        action_chunk, _imagined = self.model.sample(history, history_pad)
+        action_chunk, _imagined = self.model.sample(history, history_pad,
+                                                    generator=self._gen(history.device))
         return action_chunk
 
 
@@ -1284,7 +1297,8 @@ class JointFlowGCPolicy(JointFlowPolicy):
             h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                   device=device, dtype=torch.float32)
         action_chunk, _imagined = self.model.sample(history, history_pad,
-                                                    z_goal=z_goal, h_norm=h_norm)
+                                                    z_goal=z_goal, h_norm=h_norm,
+                                                    generator=self._gen(history.device))
         return action_chunk
 
 
@@ -1372,7 +1386,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         p = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0)
         if self.plan_rollout <= 1:
-            action, z_imag = self.model.sample(h, p, **self._cond_args(z_goal, h_norm, K))
+            action, z_imag = self.model.sample(h, p, generator=self._gen(h.device),
+                                               **self._cond_args(z_goal, h_norm, K))
             cost = self._final_cost(z_imag, goal_rep).view(R, K)
             pick = cost.argmin(1)
             return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
@@ -1388,9 +1403,10 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             if gc:
                 hk = ((steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max))
                       / float(self.H_max))
-                action, z_imag = self.model.sample(h, p, z_goal=goal_rep, h_norm=hk)
+                action, z_imag = self.model.sample(h, p, z_goal=goal_rep, h_norm=hk,
+                                                   generator=self._gen(h.device))
             else:
-                action, z_imag = self.model.sample(h, p)
+                action, z_imag = self.model.sample(h, p, generator=self._gen(h.device))
             plan_parts.append(action[:, :fs])
             z_next = z_imag[:, :1]
             h = torch.cat([h[:, 1:], z_next], dim=1)
@@ -1406,16 +1422,18 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         device = history.device
         take = self._take()
 
-        mean, _ = self.model.sample(history, history_pad, **self._cond_args(z_goal, h_norm, 1))
+        mean, _ = self.model.sample(history, history_pad, generator=self._gen(history.device),
+                                    **self._cond_args(z_goal, h_norm, 1))
         for row, i in enumerate(replan):
             prev = self._prev_plan[i] if self._prev_plan is not None else None
             if prev is not None:
                 mean[row] = torch.cat([prev[take:], prev[-1:].expand(take, adim)])
         std = torch.full_like(mean, self.cem_std)
 
-        noise_action = torch.randn(R, 1, A, adim, device=device) \
+        noise_action = torch.randn(R, 1, A, adim, device=device, generator=self._gen(device)) \
             .expand(R, P, A, adim).reshape(R * P, A, adim)
-        noise_state = torch.randn(R, 1, self.model.num_states, self.model.z_dim, device=device) \
+        noise_state = torch.randn(R, 1, self.model.num_states, self.model.z_dim, device=device,
+                                  generator=self._gen(device)) \
             .expand(R, P, self.model.num_states, self.model.z_dim) \
             .reshape(R * P, self.model.num_states, self.model.z_dim)
         hist = history.repeat_interleave(P, 0)
@@ -1426,7 +1444,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         best_plan = mean.clone()
         best_cost = torch.full((R,), float("inf"), device=device)
         for _ in range(self.cem_iters):
-            cand = mean[:, None] + std[:, None] * torch.randn(R, P, A, adim, device=device)
+            cand = mean[:, None] + std[:, None] * torch.randn(R, P, A, adim, device=device,
+                                                              generator=self._gen(device))
             cand[:, 0] = mean
             z_imag = self.model.sample_inpaint(hist, pad, cand.reshape(R * P, A, adim),
                                                noise_action, noise_state,
