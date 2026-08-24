@@ -55,6 +55,18 @@ scripts/
 - Legacy derived config fields (e.g. `action_dim` = fs*raw) are derived at load
   (load_jointflow_model), never stored — keep that convention.
 
+## Policy-class merge (owner question 2026-08-24)
+
+`JointFlowGCPolicy` is not structurally necessary: the checkpoint config already records
+`goal_conditioning`/`goal_terminal`, so one `JointFlowPolicy` could branch on them in
+`_propose` (encode goal + pick h source when conditioned, skip otherwise) — collapsing
+modes `jointflow_policy`/`jointflow_gc` into one that trusts the ckpt. Deferred to this
+refactor rather than done mid-campaign because the mode names are wired into every eval
+entry/config/board record and the eval spine is under active measurement; folding also
+removes today's silent-mis-eval hazard (a GC ckpt run under mode=jointflow_policy).
+The training-side half is already done (2026-08-24: both datasets return one 8-tuple,
+run_batch consumes the goal iff `--goal_conditioning`).
+
 ## Keep / don't touch
 
 - Eval protocol machinery (full-traj pick-list, sharding, budget) — results depend on it byte-wise.
