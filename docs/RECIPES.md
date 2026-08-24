@@ -57,6 +57,9 @@ default (`--fp32` restores the old behavior). Note the speedup is ~10%, not 2.5â
 fp32 path already ran TF32 tensor-core convs on H100; bf16 buys bandwidth, not FLOPs.
 Numbers before 2026-08-23 are fp32-trained; from the bf16 default onward, new trainings
 are bf16 â€” both regimes are SR-equivalent per the validation arm.
+**bf16 CAUTION for TC cells (2026-08-25): 2/2 fitting bf16 TC arms NaN'd mid-training
+(cube goal-cond ep 45, toolhang ViT-small ep 33) while their fp32 reruns and all bf16
+pusht-GR arms run clean. Until diagnosed, TC-cell trainings pass `--fp32`.**
 
 ## Recipe: lewam_gc (per-cell GR baseline; pusht board 82.7)
 
