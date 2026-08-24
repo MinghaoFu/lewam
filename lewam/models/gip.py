@@ -1262,8 +1262,10 @@ class JointFlowGCPolicy(JointFlowPolicy):
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "jointflow_gc"
         assert getattr(model, "goal_conditioning", False), "checkpoint lacks goal conditioning"
-        # fs-strided training cache -> history anchors are one replan (= fs steps) apart
-        self._append_every_step = False
+        # goal_terminal ckpts train on the RAW cache (consecutive-frame history, h_norm==0
+        # constant); fs-strided GR ckpts use anchor-spaced history + the horizon countdown
+        self._goal_terminal = bool(cfg.get("goal_terminal", False))
+        self._append_every_step = self._goal_terminal
 
     def _propose(self, info_dict, replan, history, history_pad):
         assert "goal" in info_dict, "jointflow_gc eval needs info_dict['goal'] (goal-reaching)"
@@ -1275,9 +1277,12 @@ class JointFlowGCPolicy(JointFlowPolicy):
             # identity when only one env is replanning (late-episode tail) -- acceptable
             # for the diagnostic since most replans carry the full batch
             z_goal = torch.roll(z_goal, 1, dims=0)
-        steps = np.maximum(self._steps_left[replan], 1.0)
-        h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
-                              device=device, dtype=torch.float32)
+        if self._goal_terminal:
+            h_norm = torch.zeros(len(replan), device=device, dtype=torch.float32)
+        else:
+            steps = np.maximum(self._steps_left[replan], 1.0)
+            h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
+                                  device=device, dtype=torch.float32)
         action_chunk, _imagined = self.model.sample(history, history_pad,
                                                     z_goal=z_goal, h_norm=h_norm)
         return action_chunk
