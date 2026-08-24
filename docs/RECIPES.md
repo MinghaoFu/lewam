@@ -43,6 +43,14 @@ beside each checkpoint.
   anchor 65.0** (+9.0 at n=150, marginally past the ~8-pt noise line; single training
   seed). Latent spread held (zstd 0.86 vs 0.02 collapsed); best jf pusht to date.
   Supports the SIGReg-matters-more-at-low-action-dim hypothesis.
+- **PUSHT PLANNING LADDER (noreg ckpt, 2026-08-25): best-of-K exec5 73.3 · k=1 exec5
+  72.0 · reactive 66.0 · warm-CEM (std 0.2, 3 iters, 6/32 elites) 15.3 · cold-CEM
+  (unified-era) 2-8.** Dynamics probe (probe_jf_dynamics.py, n=200, K=15): noreg
+  imagination is action-causal (true-action top-1 0.77, sensitivity 1.14) with THIN
+  margins (cost cv 0.069); sig04's is near action-blind (0.26/0.26) — SIGReg trades
+  world-model causality for policy SR. CEM fails because it executes a refit MEAN of a
+  multimodal flow policy and its goal-cost is progress-dominated; best-of-K executes a
+  real sample. NO planning on TC cells unless the owner explicitly asks.
 - **GR** (goal-reaching, goal+horizon-conditioned policy): pusht, tworoom, pointmaze,
   reacher. Eval: goal at `goal_offset_steps` (pusht 25 raw), budget from config,
   horizon countdown `min(steps_left, H_max)/H_max` in obs-steps, replan = 1 action block.
