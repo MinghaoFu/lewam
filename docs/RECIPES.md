@@ -77,7 +77,9 @@ Board: toolhang 89.0/91.3 · transport 86.7 · drawer 68.0 · cube (success-rest
 
 TC recipe plus `--fs_strided --goal_conditioning --num_actions_pred 10 --num_states_pred 1
 --policy_history_len 2 --H_max 50 --p_drop_goal 0 --epochs 50 --warmup_epochs 5
---batch_size 128 --lr 1e-4`, u8 fs-strided cache RAM-preloaded. GCHeadMSE readout-only
+--batch_size 128 --lr 1.5e-4` (1.5e-4 verified from the gr2 config dumps 2026-08-24 — an
+earlier revision of this doc said 1e-4, which was the slim-192 arm's lr, not the anchor's),
+u8 fs-strided cache RAM-preloaded. GCHeadMSE readout-only
 conditioning; anchor-spaced history (matches eval adapter). Pixel scale: cache uint8 →
 normalize on GPU (`was_uint8` branch) — the dataset must NEVER float frames (the ep-48
 pixel-scale bug).
