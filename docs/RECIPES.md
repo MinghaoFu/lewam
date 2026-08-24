@@ -7,10 +7,20 @@ beside each checkpoint.
 
 ## Cell → protocol map (authoritative, owner-stated 2026-08-22)
 
-- **TC** (task completion, reactive/goal-blind policy, full-traj eval): toolhang, cube,
-  drawer, transport. Eval: `+gip_eval.full_traj=true` (start = episode frame 0, goal =
-  terminal frame, per-episode budget 2× length) for toolhang-class evals; cube/drawer/
-  transport TC evals use their `configs/eval/<cell>.yaml` budgets. Success = env criterion.
+- **TC** (task completion): toolhang, cube, drawer, transport. **DEFAULT (owner
+  2026-08-24): goal-image conditioning ON, horizon OFF** — goal-blind reactive is an
+  appendix ablation for cells that permit it (toolhang). Eval: `+gip_eval.full_traj=true`
+  (start = episode frame 0, goal = terminal frame, per-episode budget 2× length) for
+  toolhang-class evals; drawer/transport use their `configs/eval/<cell>.yaml` budgets.
+  Success = env criterion.
+  **CUBE EVAL WAS BROKEN (audit 2026-08-24): `configs/eval/cube.yaml` samples starts
+  uniformly over ALL rows (gip.sample_eval_episodes default mode) with the env target set
+  from `goal_privileged_block_0_pos` at start+25.** On full cube (69% post-success tail)
+  ~69% of starts are trivial (target ≈ current resting position, terminate_at_goal) —
+  jf's 66 ≈ the tail fraction, and its 19/50 failure videos ≈ the pre-success starts.
+  Every cube SR measured this way (jf 66, uni-ViT 74.7, uni-r18sp 51.3) is protocol-
+  confounded. The correct cube TC eval is full_traj (start 0, target = terminal-frame
+  block placement, per-episode budget); all cube rows need re-measuring under it.
 - **GR** (goal-reaching, goal+horizon-conditioned policy): pusht, tworoom, pointmaze,
   reacher. Eval: goal at `goal_offset_steps` (pusht 25 raw), budget from config,
   horizon countdown `min(steps_left, H_max)/H_max` in obs-steps, replan = 1 action block.
