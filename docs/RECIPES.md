@@ -20,7 +20,21 @@ beside each checkpoint.
   jf's 66 ≈ the tail fraction, and its 19/50 failure videos ≈ the pre-success starts.
   Every cube SR measured this way (jf 66, uni-ViT 74.7, uni-r18sp 51.3) is protocol-
   confounded. The correct cube TC eval is full_traj (start 0, target = terminal-frame
-  block placement, per-episode budget); all cube rows need re-measuring under it.
+  block placement, per-episode budget).
+  **HONEST CUBE BOARD (full_traj, 3×50, 2026-08-24): uni-ViT (goal-cond) {38,48,34} =
+  40.0 · jf (goal-blind) {18,22,26} = 22.0 · uni-r18sp (goal-cond) {14,18,8} = 13.3.**
+  Ordering matches the broken protocol minus ~35-44 pts of tail inflation; goal
+  conditioning ≈ doubles honest cube; the ViT-over-ResNet gap survives (+26.7). jf
+  goal-cond arm (--goal_conditioning --goal_terminal, 75 ep) launched to fill the 4th row.
+- **TWOROOM CANARY (jointflow GR recipe, H_max 25, 50 ep s42, 2026-08-24): {96,100,100}
+  = 98.7** — the flow model is near-perfect on the easiest 2D-action GR cell, so the
+  pusht gap is pusht-specific, NOT a generic low-action-dim failure. Flow action loss
+  sat flat at ~1.20 all run while SR ≈ 100: the loss floor is irreducible conditional
+  action entropy — never compare it across datasets or read it as policy quality.
+- **PUSHT SIGReg (anchor + w_reg 0.04, s42, 2026-08-24): {70,82,70} = 74.0 vs noreg
+  anchor 65.0** (+9.0 at n=150, marginally past the ~8-pt noise line; single training
+  seed). Latent spread held (zstd 0.86 vs 0.02 collapsed); best jf pusht to date.
+  Supports the SIGReg-matters-more-at-low-action-dim hypothesis.
 - **GR** (goal-reaching, goal+horizon-conditioned policy): pusht, tworoom, pointmaze,
   reacher. Eval: goal at `goal_offset_steps` (pusht 25 raw), budget from config,
   horizon countdown `min(steps_left, H_max)/H_max` in obs-steps, replan = 1 action block.
