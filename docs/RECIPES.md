@@ -26,6 +26,14 @@ beside each checkpoint.
   Ordering matches the broken protocol minus ~35-44 pts of tail inflation; goal
   conditioning ≈ doubles honest cube; the ViT-over-ResNet gap survives (+26.7). jf
   goal-cond arm (--goal_conditioning --goal_terminal, 75 ep) launched to fill the 4th row.
+  **CROSS-EVAL (2026-08-25): the OLD full-data unified (wf8_uni8/cube/res_base, the
+  e2e-96 arm) scores 96.7 {96,98,96} under the NEW full-traj protocol on train episodes,
+  and the new restricted-trained vit scores 40.0 on the old eval_tc split — protocol and
+  split are BOTH irrelevant; the ~57-pt gap is training. The honest-protocol cube
+  ceiling is ≥96, held by FULL-data training. The success-restriction cuts the settling
+  segment (success key = grazing first-touch, 0.033 from target; final frame = settled,
+  0.004) plus 69% of data; owner direction: consider restriction at success+K frames
+  (~+10) or full-data TC training for the next cube round.**
 - **TWOROOM CANARY (jointflow GR recipe, H_max 25, 50 ep s42, 2026-08-24): {96,100,100}
   = 98.7** — the flow model is near-perfect on the easiest 2D-action GR cell, so the
   pusht gap is pusht-specific, NOT a generic low-action-dim failure. Flow action loss
