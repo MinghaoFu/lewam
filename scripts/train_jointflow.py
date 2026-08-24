@@ -82,10 +82,10 @@ def parse_args():
     ap.add_argument("--H_max", type=int, default=50,
                     help="horizon cap in obs-steps; h_norm = min(h, H_max)/H_max")
     ap.add_argument("--goal_terminal", action="store_true",
-                    help="TC goal mode on the raw path: goal = the episode's terminal frame "
-                         "(the success frame on a success-patched aux), h_norm fixed at 0 "
-                         "(no horizon signal). Requires --goal_conditioning; excludes "
-                         "--fs_strided.")
+                    help="marks the raw-path TC goal convention (goal = terminal/success frame, "
+                         "h fixed at 0 -- the raw dataset always supplies both; this flag gates "
+                         "the goal_conditioning-without-fs_strided combination and is recorded "
+                         "in the config for the eval adapter). Requires --goal_conditioning.")
     ap.add_argument("--p_drop_goal", type=float, default=0.0,
                     help="per-row goal dropout to the learned null goal (0 = every sample "
                          "keeps its goal)")
@@ -199,14 +199,13 @@ class JointFlowDataset(RawContextDataset):
     episode. The inherited goal/next_frame outputs are dropped."""
 
     def __init__(self, frames, a_frame, t_gidx, ep_base, frames_to_terminal, indices,
-                 history_len, n_tokens, frameskip, num_states, goal_terminal=False):
+                 history_len, n_tokens, frameskip, num_states):
         super().__init__(frames, a_frame, t_gidx, ep_base, frames_to_terminal, indices,
                          history_len, n_tokens, frameskip)
         self.num_states = num_states
-        self.goal_terminal = goal_terminal
 
     def __getitem__(self, i):
-        history_frames, history_pad, target, target_valid, _goal, _next_frame, _dyn_valid = \
+        history_frames, history_pad, target, target_valid, goal_frame, _next_frame, _dyn_valid = \
             super().__getitem__(i)
         idx = int(self.indices[i])
         p = int(self.t_gidx[idx])
@@ -220,14 +219,11 @@ class JointFlowDataset(RawContextDataset):
         else:
             state_frames = torch.zeros((0, *self.frames.shape[1:]), dtype=self.frames.dtype)
             state_valid = torch.zeros(0)
-        if self.goal_terminal:
-            # TC goal mode: the goal is the episode's terminal frame (== the success frame on
-            # a success-patched aux); horizon carries no signal and is fixed at 0.
-            goal_frame = self.frames[p + ttl]
-            h_norm = torch.tensor(0.0, dtype=torch.float32)
-            return history_frames, history_pad, target, target_valid, state_frames, state_valid, \
-                goal_frame, h_norm
-        return history_frames, history_pad, target, target_valid, state_frames, state_valid
+        # goal_frame is the parent's terminal frame (== the success frame on a success-patched
+        # aux); run_batch consumes it only under --goal_conditioning. Horizon carries no
+        # signal on this path, so h_norm is the constant 0.
+        return history_frames, history_pad, target, target_valid, state_frames, state_valid, \
+            goal_frame, torch.tensor(0.0, dtype=torch.float32)
 
 
 def main():
@@ -285,7 +281,7 @@ def main():
         else:
             ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
                                   args.policy_history_len, args.num_actions_pred, args.frameskip,
-                                  args.num_states_pred, goal_terminal=args.goal_terminal)
+                                  args.num_states_pred)
         n = max(args.batch_size, int(idx.numel()))
         if args.steps_per_epoch:
             n = min(n, args.steps_per_epoch * args.batch_size)
@@ -346,13 +342,14 @@ def main():
           f"cudnn.benchmark={torch.backends.cudnn.benchmark}", flush=True)
 
     def run_batch(batch, train=True):
-        if args.fs_strided or args.goal_terminal:
-            (history_frames, history_pad, action_target, action_valid, state_frames,
-             state_valid, goal_frames, h_norm) = batch
+        # both datasets return the same 8-tuple; the goal/h are consumed only under
+        # --goal_conditioning (fs_strided: offset goal + countdown h; raw: terminal goal + h=0)
+        (history_frames, history_pad, action_target, action_valid, state_frames,
+         state_valid, goal_frames, h_norm) = batch
+        if args.goal_conditioning:
             goal_frames = goal_frames.to(device, non_blocking=True)
             h_norm = h_norm.to(device, non_blocking=True)
         else:
-            history_frames, history_pad, action_target, action_valid, state_frames, state_valid = batch
             goal_frames = h_norm = None
         history_frames = history_frames.to(device, non_blocking=True)
         history_pad = history_pad.to(device, non_blocking=True)
