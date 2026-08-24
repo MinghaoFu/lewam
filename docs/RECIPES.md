@@ -170,6 +170,12 @@ v6b adds epoch-snapshot sync (epoch=*.ckpt) so budget artifacts survive the wall
   PyPI tops out at 0.3.0 = mujoco_py era) + the robosuite/mujoco pip block; drawer/
   transport use the dexmg env with repo-asset env metas and per-cell thresholds
   (transport eef 0.10 on purpose); cube's dataset symlink lives under `datasets/ogbench/`.
+- **Flow-noise seeding (restored 2026-08-25, commit after 3b1649e):** jf adapters now draw
+  ALL flow/sampling noise from a per-eval generator seeded by `cfg.seed` (the flow-head
+  rule; the old unified CEM had it, the jf adapters missed it). Every jf SR measured
+  before this fix used unseeded flow noise — statistically valid, but same-seed reruns
+  jitter (observed ±4-6/seed, e.g. reactive s42 66.0 vs 62.0); marginal gaps (<~10)
+  from that era carry that extra uncertainty.
 - Model selection: pooled average across seeds; best-checkpoint = min val action loss.
 - n=50 episodes per eval seed; eval seeds {42, 0, 1}; SR gaps < ~8 pts at n=150 are
   within noise — run controls before claiming gains.
