@@ -57,7 +57,8 @@ beside each checkpoint.
   action-caused 1.14 (cost SNR ~0.1); fixing the noise (inpaint scoring) restores the
   ranking signal (0.77 top-1) yet SR stays in-band — pusht is POLICY-limited, not
   selection-limited. sig04's imagination is near action-blind (top1 .26): SIGReg trades
-  dynamics causality for SR.** Dynamics probe (probe_jf_dynamics.py, n=200, K=15): noreg
+  dynamics causality for SR. sig04 planning (owner-requested despite the probe): inpaint
+  67.3 / joint 70.7 vs reactive 74.0 — null there too; selection is null on BOTH ckpts.** Dynamics probe (probe_jf_dynamics.py, n=200, K=15): noreg
   imagination is action-causal (true-action top-1 0.77, sensitivity 1.14) with THIN
   margins (cost cv 0.069); sig04's is near action-blind (0.26/0.26) — SIGReg trades
   world-model causality for policy SR. CEM fails because it executes a refit MEAN of a
