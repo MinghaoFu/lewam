@@ -178,16 +178,19 @@ class JointFlow(nn.Module):
         loss_state = self._masked_mse(v_state, state_target - noise_state, state_valid)
         return loss_action, loss_state
 
-    @torch.no_grad()
-    def sample(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None):
-        """Joint Euler ODE on tied schedule.
-        Returns the action chunks (z-scored raw space) and next-state latents."""
+    def _sample_impl(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None,
+                     noise_action=None, noise_state=None):
+        """Grad-capable joint Euler ODE (steer-MPC differentiates it w.r.t. z_goal).
+        Explicit noise tensors override the generator draws, making iterates of a
+        test-time optimization comparable under one fixed noise realization."""
         B = z_history.shape[0]
         memory = self._memory(z_history)
-        action = torch.randn(B, self.num_actions, self.action_raw_dim, device=z_history.device,
-                             generator=generator)
-        state = torch.randn(B, self.num_states, self.z_dim, device=z_history.device,
-                            generator=generator)
+        action = noise_action if noise_action is not None else \
+            torch.randn(B, self.num_actions, self.action_raw_dim, device=z_history.device,
+                        generator=generator)
+        state = noise_state if noise_state is not None else \
+            torch.randn(B, self.num_states, self.z_dim, device=z_history.device,
+                        generator=generator)
         for i in range(self.n_flow_steps):
             tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
             v_action, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
@@ -197,12 +200,15 @@ class JointFlow(nn.Module):
         return action, state
 
     @torch.no_grad()
-    def sample_inpaint(self, z_history, history_pad, action_plan, noise_action=None,
-                       noise_state=None, z_goal=None, h_norm=None):
-        """Euler ODE over the state slots only; action slots are clamped to the plan's
-        flow path a_tau = (1-tau)*noise + tau*plan at every step. Passing the same
-        noise tensors across calls makes candidate plans comparable within a replan.
-        Returns the next-state latents imagined under the plan."""
+    def sample(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None):
+        """Joint Euler ODE on tied schedule.
+        Returns the action chunks (z-scored raw space) and next-state latents."""
+        return self._sample_impl(z_history, history_pad, generator, z_goal, h_norm)
+
+    def _inpaint_impl(self, z_history, history_pad, action_plan, noise_action=None,
+                      noise_state=None, z_goal=None, h_norm=None):
+        """Grad-capable body of sample_inpaint (steer-MPC scores tilted-goal plans through
+        it under the TRUE goal, with gradient flowing back through action_plan)."""
         B = z_history.shape[0]
         memory = self._memory(z_history)
         if noise_action is None:
@@ -217,6 +223,16 @@ class JointFlow(nn.Module):
                                        z_goal, h_norm)
             state = state + v_state / self.n_flow_steps
         return state
+
+    @torch.no_grad()
+    def sample_inpaint(self, z_history, history_pad, action_plan, noise_action=None,
+                       noise_state=None, z_goal=None, h_norm=None):
+        """Euler ODE over the state slots only; action slots are clamped to the plan's
+        flow path a_tau = (1-tau)*noise + tau*plan at every step. Passing the same
+        noise tensors across calls makes candidate plans comparable within a replan.
+        Returns the next-state latents imagined under the plan."""
+        return self._inpaint_impl(z_history, history_pad, action_plan, noise_action,
+                                  noise_state, z_goal, h_norm)
 
 
 def build_model(cfg):

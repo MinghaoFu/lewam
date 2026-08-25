@@ -78,6 +78,10 @@ beside each checkpoint.
   world-model causality for policy SR. CEM fails because it executes a refit MEAN of a
   multimodal flow policy and its goal-cost is progress-dominated; best-of-K executes a
   real sample. NO planning on TC cells unless the owner explicitly asks.
+- **TWOROOM PLANNING (2026-08-26): BoK-32 inpaint exec5 on the canary ckpt
+  (gr_tworoom_s42) = 96.0/100.0/100.0 → 98.7**, identical to the reactive band
+  (96/100/100, pre-seeding-fix canary eval). Planning neither helps nor hurts at the
+  ceiling; the warm-CEM collapse remains pusht-specific until shown otherwise.
 - **GR** (goal-reaching, goal+horizon-conditioned policy): pusht, tworoom, pointmaze,
   reacher. Eval: goal at `goal_offset_steps` (pusht 25 raw), budget from config,
   horizon countdown `min(steps_left, H_max)/H_max` in obs-steps, replan = 1 action block.

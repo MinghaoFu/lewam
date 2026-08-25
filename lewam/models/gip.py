@@ -522,7 +522,11 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             plan_rollout=int(ge.get("plan_rollout", 1)),
             cem_iters=int(ge.get("cem_iters", 3)),
             cem_elites=int(ge.get("cem_elites", 6)),
-            cem_std=float(ge.get("cem_std", 0.5)), **shared)
+            cem_std=float(ge.get("cem_std", 0.5)),
+            pm_steps=int(ge.get("pm_steps", 20)),
+            pm_lr=float(ge.get("pm_lr", 0.02)),
+            pm_rho=float(ge.get("pm_rho", 0.3)),
+            pm_random=bool(ge.get("pm_random", False)), **shared)
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
@@ -1312,11 +1316,23 @@ class JointFlowPlanPolicy(JointFlowPolicy):
       plan_mode=cem: iterative refit of a candidate mean, warm-started from the previous
         replan's plan shifted by the executed prefix. Candidates are evaluated with
         sample_inpaint under noise fixed per replan, so their costs are comparable.
+      plan_mode=steer: the prompt-MPC port to flow. A per-replan bias delta in z_dim is
+        added to the goal latent fed to the SAMPLER; every candidate is the policy's own
+        flow sample under one fixed noise, so the search stays on the behavioral manifold.
+        The cost re-imagines each candidate's actions via sample_inpaint under the TRUE
+        goal (closing the exploitation channel jointflow's goal-conditioned state branch
+        would otherwise open), and iterate 0 (delta=0, the pure policy sample) stays in
+        the candidate set. ||delta|| is capped at pm_rho*||z_goal||.
     """
 
     def __init__(self, model, cfg, *args, **kwargs):
         self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
         self.plan_k = int(kwargs.pop("plan_k", 32))
+        self.pm_steps = int(kwargs.pop("pm_steps", 20))
+        self.pm_lr = float(kwargs.pop("pm_lr", 0.02))
+        self.pm_rho = float(kwargs.pop("pm_rho", 0.3))
+        # search-verification control: equal-norm random direction instead of the gradient
+        self.pm_random = bool(kwargs.pop("pm_random", False))
         # plan_score=inpaint: re-imagine each sampled candidate's outcome via sample_inpaint
         # under SHARED noise (per replan row), so candidate costs differ only through the
         # actions -- removes the joint sampler's state-noise from the ranking (the measured
@@ -1332,8 +1348,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.cem_elites = int(kwargs.pop("cem_elites", 6))
         self.cem_std = float(kwargs.pop("cem_std", 0.5))
         super().__init__(model, cfg, *args, **kwargs)
-        assert self.plan_mode in ("best_of_k", "cem"), self.plan_mode
+        assert self.plan_mode in ("best_of_k", "cem", "steer"), self.plan_mode
         assert self.model.num_states > 0, "planning needs imagined state tokens"
+        if self.plan_mode == "steer":
+            assert getattr(model, "goal_conditioning", False), \
+                "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
         if self.plan_rollout > 1:
             assert self.plan_mode == "best_of_k", "rollout planning implements best_of_k only"
             # the plan is H*fs raw actions; execute all of it by default, then replan.
@@ -1374,6 +1393,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             steps_t = torch.tensor(steps, device=device, dtype=torch.float32)
         if self.plan_mode == "best_of_k":
             plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
+        elif self.plan_mode == "steer":
+            plan = self._steer(history, history_pad, z_goal, h_norm)
         else:
             plan = self._cem(history, history_pad, z_goal, h_norm, replan)
         if self._prev_plan is not None:
@@ -1434,6 +1455,58 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         plan = torch.cat(plan_parts, dim=1).view(R, K, self.plan_rollout * fs, -1)
         pick = cost.argmin(1)
         return plan[torch.arange(R, device=plan.device), pick]
+
+    def _steer(self, history, history_pad, z_goal, h_norm):
+        """Prompt-MPC on flow: Adam on a z_dim goal bias delta through the frozen sampler.
+        One fixed noise realization per replan (sampler noise AND scoring noise), so the
+        map delta -> cost is deterministic and the gradient is not noise-dominated; all
+        draws come from the eval-seeded generator. Actions always come from the sampler
+        under z_goal+delta (on-manifold); the cost re-imagines them via inpaint under the
+        TRUE z_goal. Iterate 0 is delta=0; the best-cost iterate's plan executes."""
+        R = history.shape[0]
+        A, adim = self.model.num_actions, self.model.action_raw_dim
+        S, D = self.model.num_states, self.model.z_dim
+        device = history.device
+        gen = self._gen(device)
+        noise_a = torch.randn(R, A, adim, device=device, generator=gen)
+        noise_s = torch.randn(R, S, D, device=device, generator=gen)
+        in_noise_a = torch.randn(R, A, adim, device=device, generator=gen)
+        in_noise_s = torch.randn(R, S, D, device=device, generator=gen)
+        gnorm = z_goal.norm(dim=-1, keepdim=True)
+        with torch.enable_grad():
+            delta = torch.zeros(R, D, device=device, requires_grad=True)
+            opt = torch.optim.Adam([delta], lr=self.pm_lr)
+            best_plan = best_cost = None
+            for k in range(self.pm_steps + 1):
+                action, _ = self.model._sample_impl(history, history_pad,
+                                                    z_goal=z_goal + delta, h_norm=h_norm,
+                                                    noise_action=noise_a, noise_state=noise_s)
+                z_imag = self.model._inpaint_impl(history, history_pad, action,
+                                                  in_noise_a, in_noise_s,
+                                                  z_goal=z_goal, h_norm=h_norm)
+                cost = self._final_cost(z_imag, z_goal)
+                c = cost.detach()
+                if best_cost is None:
+                    best_cost, best_plan = c.clone(), action.detach().clone()
+                else:
+                    better = c < best_cost
+                    best_plan[better] = action.detach()[better]
+                    best_cost = torch.where(better, c, best_cost)
+                if k == self.pm_steps:
+                    break
+                grad = torch.autograd.grad(cost.mean(), delta)[0]
+                if self.pm_random:
+                    r = torch.randn(R, D, device=device, generator=gen)
+                    grad = r * (grad.norm(dim=-1, keepdim=True)
+                                / r.norm(dim=-1, keepdim=True).clamp_min(1e-9))
+                opt.zero_grad(set_to_none=True)
+                delta.grad = grad
+                opt.step()
+                with torch.no_grad():
+                    scale = (self.pm_rho * gnorm
+                             / delta.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp(max=1.0)
+                    delta.mul_(scale)
+        return best_plan
 
     def _cem(self, history, history_pad, z_goal, h_norm, replan):
         R, P = history.shape[0], self.plan_k
