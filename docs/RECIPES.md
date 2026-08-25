@@ -78,6 +78,14 @@ beside each checkpoint.
   world-model causality for policy SR. CEM fails because it executes a refit MEAN of a
   multimodal flow policy and its goal-cost is progress-dominated; best-of-K executes a
   real sample. NO planning on TC cells unless the owner explicitly asks.
+- **STEER-MPC ON FLOW NULL ON PUSHT (2026-08-26, 74a4fb1): plan_mode=steer (prompt-MPC
+  port: delta on z_goal into the sampler, fixed per-replan noise, inpaint scoring under
+  the TRUE goal, delta=0 floor, pm_steps 20 / lr 0.02 / rho 0.3) = {56,74,68} → 66.0;
+  pm_random equal-norm control = {62,76,70} → 69.3; reactive 67.2 / BoK-inpaint 70.7.**
+  Gradient ≈ random ≈ reactive: the z-space search is floor-safe (no CEM-style
+  collapse — on-manifold actions + true-goal scoring held) but harvests nothing;
+  consistent with pusht being policy-limited. The unified-era steer gains (+2-5 on
+  TC cells) do not transfer. All flow noise eval-seeded; ckpt gr2_a10s1_s42.
 - **TWOROOM PLANNING (2026-08-26): BoK-32 inpaint exec5 on the canary ckpt
   (gr_tworoom_s42) = 96.0/100.0/100.0 → 98.7**, identical to the reactive band
   (96/100/100, pre-seeding-fix canary eval). Planning neither helps nor hurts at the
