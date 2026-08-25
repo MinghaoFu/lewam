@@ -193,6 +193,11 @@ pixel-scale bug).
 
 ## Recipe: DP-T baseline (budget-matched; toolhang board 71.0)
 
+**DP eval board (dp_ev_cell, protocol-identical to the jf rows, 3 eval seeds × 50):
+toolhang 71.0 · drawer 52.7 (ep-120) · transport {84,86,84} = 84.7 (ep-120 snapshot;
+jf goal-blind {84,92,84} = 86.7 — jf +2.0, both goal-blind so the row is fair).
+Cube DP eval declined by owner (DP not goal-conditioned, honest protocol is GC).**
+
 `wf8_dp_cell_v5` entry — convert wf8 h5 → robomimic hdf5 (`--no_proprio`,
 `--env_args_json` placeholder; cube adds `--truncate_at_success success`), train
 `train_diffusion_transformer_hybrid_workspace` with the cell's `*_ours_image_noprop.yaml`
