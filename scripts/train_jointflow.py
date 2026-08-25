@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 torch.backends.cudnn.benchmark = True  # fixed 224x224 input, let cuDNN pick the conv algo
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler
 
@@ -94,6 +95,10 @@ def parse_args():
     # anti-collapse
     ap.add_argument("--w_reg", type=float, default=0.0,
                     help="SIGReg anti-collapse weight on the encoder latent")
+    ap.add_argument("--w_idm", type=float, default=0.0,
+                    help="IDM aux weight (idm05 mechanism): MLP recovers the first action "
+                         "block from the online (z_t, z_{t+fs}); shapes the encoder toward "
+                         "action-aware latents. 0 = off.")
     ap.add_argument("--state_ema_target", action="store_true",
                     help="state flow targets from a momentum copy of the encoder, layernormed and "
                          "stop-gradded")
@@ -305,7 +310,15 @@ def main():
     print(f"[jointflow] params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
           f"state_target={'ema' if args.state_ema_target else 'online'}", flush=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    idm_head = None
+    if args.w_idm > 0:
+        # IDM aux (idm05 mechanism): recover the FIRST action block from (z_t, z_{t+fs})
+        # online latents, so the gradient shapes the encoder toward action-aware features.
+        assert args.num_states_pred >= 1, "--w_idm needs a state slot (num_states_pred >= 1)"
+        idm_head = nn.Sequential(nn.Linear(2 * args.z_dim, 512), nn.SiLU(),
+                                 nn.Linear(512, args.frameskip * raw_adim)).to(device)
+    params = list(model.parameters()) + (list(idm_head.parameters()) if idm_head else [])
+    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
 
     def lr_scale(epoch):
         if epoch < args.warmup_epochs:
@@ -328,6 +341,8 @@ def main():
         model.load_state_dict(state["model"]); opt.load_state_dict(state["optimizer"])
         sched.load_state_dict(state["scheduler"]); start_epoch = state["epoch"] + 1
         best_val = state["best_val"]
+        if idm_head is not None and "idm_head" in state:
+            idm_head.load_state_dict(state["idm_head"])
         print(f"[jointflow] resumed at epoch {start_epoch} best_val={best_val:.5f}", flush=True)
 
     mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)
@@ -387,6 +402,12 @@ def main():
                                              z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep)
         loss = loss_action + loss_state
         loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
+        if idm_head is not None:
+            idm_in = torch.cat([z_history[:, -1], z_state_online[:, 0]], dim=-1)
+            loss_idm = F.mse_loss(idm_head(idm_in),
+                                  action_target[:, :args.frameskip].reshape(B, -1))
+            loss = loss + args.w_idm * loss_idm
+            loss_terms["idm"] = loss_idm.item()
         if n_states:
             # collapse telemetry: per-dim std of the online state latents (collapse -> ~0)
             loss_terms["zstd"] = z_state_online.reshape(-1, args.z_dim).std(0).mean().item()
@@ -441,9 +462,11 @@ def main():
               f"{time.time()-t0:.1f}s", flush=True)
 
         torch.save(model.state_dict(), run_dir / "jointflow_latest.pt")
-        torch.save(dict(model=model.state_dict(), optimizer=opt.state_dict(),
-                        scheduler=sched.state_dict(), epoch=epoch, best_val=best_val),
-                   full_path)
+        full_state = dict(model=model.state_dict(), optimizer=opt.state_dict(),
+                          scheduler=sched.state_dict(), epoch=epoch, best_val=best_val)
+        if idm_head is not None:
+            full_state["idm_head"] = idm_head.state_dict()
+        torch.save(full_state, full_path)
         files = [run_dir / "jointflow_config.json", run_dir / "jointflow_latest.pt", full_path]
         if val_act < best_val:
             best_val = val_act
