@@ -26,6 +26,13 @@ beside each checkpoint.
   Ordering matches the broken protocol minus ~35-44 pts of tail inflation; goal
   conditioning ≈ doubles honest cube; the ViT-over-ResNet gap survives (+26.7). jf
   goal-cond arm (--goal_conditioning --goal_terminal, 75 ep) launched to fill the 4th row.
+  **CUBE SOLVED BY GOAL-COND JF (2026-08-25): tc_cube_gcf_s42 (--goal_conditioning
+  --goal_terminal --fp32, 75 ep, success-restricted aux) = {96,96,94} = 95.3 on honest
+  full-traj — vs goal-blind jf 22.0, restricted uni-ViT 40.0, full-data unified 96.7.
+  The goal image is the whole story on cube; the restriction is NOT binding for jf
+  (95.3 ≈ the full-data ceiling), so the restricted-unified 40 is a unified-recipe/
+  budget issue, and success+K extension is unnecessary. Board cube row = jf goal-cond
+  95.3.**
   **CROSS-EVAL (2026-08-25): the OLD full-data unified (wf8_uni8/cube/res_base, the
   e2e-96 arm) scores 96.7 {96,98,96} under the NEW full-traj protocol on train episodes,
   and the new restricted-trained vit scores 40.0 on the old eval_tc split — protocol and
