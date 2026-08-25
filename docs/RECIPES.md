@@ -86,6 +86,11 @@ beside each checkpoint.
   collapse — on-manifold actions + true-goal scoring held) but harvests nothing;
   consistent with pusht being policy-limited. The unified-era steer gains (+2-5 on
   TC cells) do not transfer. All flow noise eval-seeded; ckpt gr2_a10s1_s42.
+  CEILING CELLS (same protocol, one job): tworoom grad {98,98,100}=98.7 / random
+  {100,98,100}=99.3 (band 98.7); pml grad {100,96,100}=98.7 / random 100.0 (band
+  100.0). Verdict across all three GR cells: steer never breaks the policy and never
+  beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
+  safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
 - **TWOROOM PLANNING (2026-08-26): BoK-32 inpaint exec5 on the canary ckpt
   (gr_tworoom_s42) = 96.0/100.0/100.0 → 98.7**, identical to the reactive band
   (96/100/100, pre-seeding-fix canary eval). Planning neither helps nor hurts at the
