@@ -82,10 +82,12 @@ beside each checkpoint.
   (gr_tworoom_s42) = 96.0/100.0/100.0 → 98.7**, identical to the reactive band
   (96/100/100, pre-seeding-fix canary eval). Planning neither helps nor hurts at the
   ceiling; the warm-CEM collapse remains pusht-specific until shown otherwise.
-- **POINTMAZE_LARGE SOLVED (2026-08-26): GR anchor recipe (lr 1.5e-4, bs 128, 50 ep,
-  warmup 5, fs-strided cache built in-entry, H_max 50) = 100/100/100 → 100.0** (3 eval
-  seeds × 50, jointflow_gc, budget 100/offset 50). Final val act 0.870, state 0.009,
-  zstd 0.050. With tworoom 98.7 the pusht band (~67-74) is pusht-specific, not a
+- **POINTMAZE_LARGE SOLVED (2026-08-26): reactive (jointflow_gc) 100/100/100 AND
+  planning (BoK-32 inpaint exec5, the variant of record) 100/100/100 → 100.0** (GR
+  anchor recipe: lr 1.5e-4, bs 128, 50 ep, warmup 5, fs-strided cache built in-entry,
+  H_max 50; 3 eval seeds × 50, budget 100/offset 50). Final val act 0.870, state
+  0.009, zstd 0.050. Headline number = the PLANNING one (owner rule: GR headlines are
+  planning-mode). With tworoom 98.7 the pusht band (~67-74) is pusht-specific, not a
   general 2-D GR gap; reacher is the remaining GR datapoint.
 - **GR** (goal-reaching, goal+horizon-conditioned policy): pusht, tworoom, pointmaze,
   reacher. Eval: goal at `goal_offset_steps` (pusht 25 raw), budget from config,
