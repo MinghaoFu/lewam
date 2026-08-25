@@ -91,7 +91,17 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
-- **TWOROOM PLANNING (2026-08-26): BoK-32 inpaint exec5 on the canary ckpt
+- **PUSHT w_idm ARM (2026-08-26, jf anchor recipe + --w_idm 0.5, 50 ep, 36dd67e):
+  HEADLINE (BoK-32 inpaint plan) {56,76,58} = 63.3; reactive diagnostic {60,76,62} =
+  66.0 — both in the noreg band. BUT the substrate transformed: dyn probe top1 0.82
+  (noreg 0.77, sig04 0.26), sensitivity 1.28, cost_cv 0.275 (noreg 0.069 — 4x wider
+  margins); diversity probe out_div 4.17 (noreg 11.7) at unchanged act_div 0.36.
+  zstd held 0.073 all run (noreg collapses to ~0.03). CONCLUSION: w_idm fixes the
+  world-model half on every probe axis and moves SR zero — on pusht, policy quality
+  and imagination quality are decoupled axes; selection planning neither exploits a
+  good model nor is rescued by one. NOTE: idm05's 87.2 is pusht_uni_idm05 = a UNIFIED
+  arm (z192+SIGReg+IDM+MSE head, 200 ep) — not a jf datapoint; this is the first
+  clean jf+IDM one.**
   (gr_tworoom_s42) = 96.0/100.0/100.0 → 98.7**, identical to the reactive band
   (96/100/100, pre-seeding-fix canary eval). Planning neither helps nor hurts at the
   ceiling; the warm-CEM collapse remains pusht-specific until shown otherwise.
