@@ -50,6 +50,13 @@ beside each checkpoint.
   anchor 65.0** (+9.0 at n=150, marginally past the ~8-pt noise line; single training
   seed). Latent spread held (zstd 0.86 vs 0.02 collapsed); best jf pusht to date.
   Supports the SIGReg-matters-more-at-low-action-dim hypothesis.
+- **TOOLHANG ENCODER LADDER (2026-08-25, board full-traj): resnet18dp 89.0/91.3 ·
+  ViT-small fp32 (ep-100 ckpt) {56,60,76} = 64.0 · ViT-tiny 0.0 {0,0,0} (diverged ep
+  <20 on bf16; per-loss floor).** ViT-small on bf16 diverged at ep 29 (loss explosion
+  then nan); fp32 trained clean — both fp32 reruns cleared their bf16 failure epochs.
+  Encoder verdict across cells: ResNet ≥ ViT everywhere in JOINTFLOW (toolhang 89 vs
+  64, pusht 74 vs 62); scratch-ViT won only inside unified-on-cube. resnet18dp stays
+  jf's default.
 - **PUSHT WIDTH x SIGReg 2x2 (2026-08-25): 384-noreg 65.0 · 384-SIG 74.0 · 192-noreg
   58.0 · 192-SIG {56,78,68} = 67.3.** Additive, no interaction: SIGReg ≈ +9 at either
   width (spectral, width-independent); width ≈ +7 at either regularization (capacity
