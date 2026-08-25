@@ -43,9 +43,21 @@ beside each checkpoint.
   anchor 65.0** (+9.0 at n=150, marginally past the ~8-pt noise line; single training
   seed). Latent spread held (zstd 0.86 vs 0.02 collapsed); best jf pusht to date.
   Supports the SIGReg-matters-more-at-low-action-dim hypothesis.
-- **PUSHT PLANNING LADDER (noreg ckpt, 2026-08-25): best-of-K exec5 73.3 · k=1 exec5
-  72.0 · reactive 66.0 · warm-CEM (std 0.2, 3 iters, 6/32 elites) 15.3 · cold-CEM
-  (unified-era) 2-8.** Dynamics probe (probe_jf_dynamics.py, n=200, K=15): noreg
+- **PUSHT WIDTH x SIGReg 2x2 (2026-08-25): 384-noreg 65.0 · 384-SIG 74.0 · 192-noreg
+  58.0 · 192-SIG {56,78,68} = 67.3.** Additive, no interaction: SIGReg ≈ +9 at either
+  width (spectral, width-independent); width ≈ +7 at either regularization (capacity
+  matters on its own — smaller embeddings never win). ViT-tiny+SIG 62.0 (encoder swap
+  loses -12 vs ResNet+SIG at matched losses). Single train seeds; slim rows carry the
+  120-ep/lr-1e-4 slim budget.
+- **PUSHT PLANNING LADDER (noreg ckpt, 2026-08-25, final): seeded same-pod controls put
+  reactive 67.2 (n=250) · k=1 exec5 71.2 (n=250) · joint-scored BoK-32 67.3 · INPAINT-
+  scored BoK-32 (shared-noise ranking) 70.7 — all one band; warm-CEM (std 0.2) 15.3;
+  cold-CEM (unified-era) 2-8. Diversity probe: policy samples are action-diverse
+  (act_div 0.34) but joint-sample imagination noise is 11.7 transitions vs an
+  action-caused 1.14 (cost SNR ~0.1); fixing the noise (inpaint scoring) restores the
+  ranking signal (0.77 top-1) yet SR stays in-band — pusht is POLICY-limited, not
+  selection-limited. sig04's imagination is near action-blind (top1 .26): SIGReg trades
+  dynamics causality for SR.** Dynamics probe (probe_jf_dynamics.py, n=200, K=15): noreg
   imagination is action-causal (true-action top-1 0.77, sensitivity 1.14) with THIN
   margins (cost cv 0.069); sig04's is near action-blind (0.26/0.26) — SIGReg trades
   world-model causality for policy SR. CEM fails because it executes a refit MEAN of a
