@@ -517,6 +517,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             return JointFlowGCPolicy(shuffle_goal=bool(ge.get("shuffle_goal", False)), **shared)
         return JointFlowPlanPolicy(
             plan_mode=str(ge.get("plan_mode", "best_of_k")),
+            plan_score=str(ge.get("plan_score", "joint")),
             plan_k=int(ge.get("plan_k", 32)),
             plan_rollout=int(ge.get("plan_rollout", 1)),
             cem_iters=int(ge.get("cem_iters", 3)),
@@ -1316,6 +1317,12 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     def __init__(self, model, cfg, *args, **kwargs):
         self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
         self.plan_k = int(kwargs.pop("plan_k", 32))
+        # plan_score=inpaint: re-imagine each sampled candidate's outcome via sample_inpaint
+        # under SHARED noise (per replan row), so candidate costs differ only through the
+        # actions -- removes the joint sampler's state-noise from the ranking (the measured
+        # cost SNR of joint scoring is ~0.1: action effect 1.14 vs draw variance 11.7).
+        self.plan_score = str(kwargs.pop("plan_score", "joint"))
+        assert self.plan_score in ("joint", "inpaint"), self.plan_score
         # plan_rollout H > 1: autoregressive imagination -- each unroll denoises the joint
         # chunk, keeps the FIRST frameskip action block, slides the imagined z (at +1 obs
         # step) into the latent history, H times. Cost scores the FINAL imagined state
@@ -1388,6 +1395,18 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_rollout <= 1:
             action, z_imag = self.model.sample(h, p, generator=self._gen(h.device),
                                                **self._cond_args(z_goal, h_norm, K))
+            if self.plan_score == "inpaint":
+                A, adim = self.model.num_actions, self.model.action_raw_dim
+                gen = self._gen(h.device)
+                noise_a = torch.randn(R, 1, A, adim, device=h.device, generator=gen) \
+                    .expand(R, K, A, adim).reshape(R * K, A, adim)
+                noise_s = torch.randn(R, 1, self.model.num_states, self.model.z_dim,
+                                      device=h.device, generator=gen) \
+                    .expand(R, K, self.model.num_states, self.model.z_dim) \
+                    .reshape(R * K, self.model.num_states, self.model.z_dim)
+                z_imag = self.model.sample_inpaint(h, p, action, noise_action=noise_a,
+                                                   noise_state=noise_s,
+                                                   **self._cond_args(z_goal, h_norm, K))
             cost = self._final_cost(z_imag, goal_rep).view(R, K)
             pick = cost.argmin(1)
             return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
