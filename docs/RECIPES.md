@@ -102,7 +102,16 @@ beside each checkpoint.
   3.16 at ep 20): the 10-action chunk does real stabilizing/regularizing work.
   VERDICT: state-target restructuring does not move representation detail, SR, or
   flow geometry. Ladder rung 2 = tau-biased sampling toward tau=1 (the curvature
-  probe's data end); rung 3 = honest-limitation write-up.**
+  probe's data end); rung 3 = honest-limitation write-up.
+  a5s1-fp32 EPILOGUE: val oscillated 1.7-3.2 during training (lr-driven basin
+  hopping) then SNAPPED to train (0.365) as lr annealed — settled ckpt evals plan
+  64.7 / reactive 66.0 (band). Probes: block_pos 0.922 (BEST jf, near unified's
+  .935) and the FIRST bent jf state field (n64 state cos_adj .981, turn ~58deg vs
+  1.0000 machine-straight everywhere else) — the full-chunk-conditioned state token
+  gives the state flow real conditional structure. But angle .50/.57 and vel .55
+  unmoved, SR band. ROUND MORAL: individual representation metrics ARE movable
+  (a5s1 blockpos+state-geometry, idm causality+margins, sig04 spectrum) — angle+vel
+  never reach unified levels and SR never leaves 63-74 regardless.**
 - **PUSHT STATE-FACTOR PROBES (2026-08-26, probe_state_factors.py f6ab7f9, ridge
   n=4000/1000, spec: pos/angle from z_t, vel from [z_{t-5},z_t]): test R²
   agent_pos / block_pos / block_angle / agent_vel(pair) — jf-noreg .973/.890/.545/.568
