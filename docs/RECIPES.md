@@ -91,6 +91,21 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
+- **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
+  cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
+  anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
+  0.69 / imagined next 1.37 (joint) 1.33 (inpaint); cube 0.79 / 0.69 / 1.42 / 1.41.**
+  Imagination moves AWAY from the goal by ~0.63-0.65 while reality moves closer by
+  0.04-0.10; only 7% of imagined samples are "closer" vs 62-66% of real next states.
+  Spread over the 32 candidates: joint std 0.55 (CV 0.39, wide) but the planner's
+  fixed-noise inpaint score std 0.003-0.004 (CV 0.002) — ALL CANDIDATES TIE under the
+  score used for selection. Unroll: imagined cost flat at ~1.40-1.54 for 8 steps
+  (pusht 1.45->1.40; cube 1.47->1.52) while the real expert curve falls 0.70->0.32 on
+  pusht (cube flat ~0.65-0.71, terminal goal already near). The imagined trajectory
+  never approaches the goal; it sits at a fixed offset ~1.4 from it. Owner reading
+  confirmed: high-variance predicted state => every candidate equally bad under
+  cost-to-goal => selection = random pick from the policy band. Plot
+  jobs tmp/cost_probe.png; raw jointflow_tc/cost_raw_jf_ev_{pusht,cube}.npz.
 - **DYNAMICS-INFORMATIVENESS PROBE (2026-08-27, f224e13, owner spec: real-world vs
   predicted next latents during GC eval; 30% executed random chunks). cube gcf / pusht
   noreg, eval seed 42 x 50 eps (cube 3286 transitions, pusht 367):**
