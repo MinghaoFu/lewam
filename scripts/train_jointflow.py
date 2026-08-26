@@ -104,6 +104,9 @@ def parse_args():
                          "stop-gradded")
     ap.add_argument("--state_ema_base", type=float, default=0.998,
                     help="base momentum for the target encoder, linearly annealed to 1.0")
+    ap.add_argument("--state_residual", action="store_true",
+                    help="state flow denoises delta = z[t+q*fs] - z[t] instead of z[t+q*fs]; "
+                         "sample/inpaint add z_t back (incompatible with --state_ema_target)")
     return ap.parse_args()
 
 
@@ -301,14 +304,18 @@ def main():
                num_actions_pred=args.num_actions_pred, num_states_pred=args.num_states_pred,
                policy_history_len=args.policy_history_len,
                actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau,
-               goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond)
+               goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond,
+               state_residual=bool(args.state_residual))
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
     (run_dir / "jointflow_config.json").write_text(json.dumps(dumped, indent=1))
     n_params = sum(p.numel() for p in model.parameters())
+    assert not (args.state_residual and args.state_ema_target), \
+        "--state_residual mixes raw z_t into the target; incompatible with the layernormed ema path"
     print(f"[jointflow] params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
-          f"state_target={'ema' if args.state_ema_target else 'online'}", flush=True)
+          f"state_target={'ema' if args.state_ema_target else 'online'}"
+          f"{' residual' if args.state_residual else ''}", flush=True)
 
     idm_head = None
     if args.w_idm > 0:
@@ -396,6 +403,12 @@ def main():
             state_target = F.layer_norm(z_target_raw, (args.z_dim,)).reshape(B, n_states, args.z_dim)
         else:
             state_target = z_state_online          # the encoder learns from being the target
+        if args.state_residual:
+            # owner design 2026-08-26: the flow denoises the CHANGE delta = z[t+q*fs] - z[t];
+            # sample/inpaint add z_t back, so imagination stays anchored to the current state.
+            # Encoder collapse now forces the flow toward a point mass at delta=0 -- visible
+            # directly as the sampled ||delta|| (legible, unlike z-space collapse).
+            state_target = state_target - z_history[:, -1:]
 
         loss_action, loss_state = model.loss(z_history, history_pad, action_target, action_valid,
                                              state_target, state_valid,

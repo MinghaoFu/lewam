@@ -65,6 +65,9 @@ class JointFlow(nn.Module):
         self.history_len = cfg["policy_history_len"]
         self.actions_attend_states = cfg["actions_attend_states"]
         self.split_tau = cfg["split_tau"]   #RE: prefer indep_schedule or similar
+        # state_residual: the state flow denoises delta = z[t+q*fs] - z[t]; sample paths
+        # add z_t (the newest history anchor) back so callers always receive absolute z.
+        self.state_residual = bool(cfg.get("state_residual", False))
         self.tau_cond = cfg["tau_cond"]
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]   #RE: prefer embed_dim or similar; dim is too vague
@@ -197,6 +200,8 @@ class JointFlow(nn.Module):
                                               z_goal, h_norm)
             action = action + v_action / self.n_flow_steps
             state = state + v_state / self.n_flow_steps
+        if self.state_residual and self.num_states:
+            state = state + z_history[:, -1:]
         return action, state
 
     @torch.no_grad()
@@ -222,6 +227,8 @@ class JointFlow(nn.Module):
             _, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
                                        z_goal, h_norm)
             state = state + v_state / self.n_flow_steps
+        if self.state_residual and self.num_states:
+            state = state + z_history[:, -1:]
         return state
 
     @torch.no_grad()
@@ -240,5 +247,5 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
-                    goal_conditioning=False, tau_cond="summed")
+                    goal_conditioning=False, tau_cond="summed", state_residual=False)
     return JointFlow({**defaults, **cfg})
