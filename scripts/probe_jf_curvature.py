@@ -37,6 +37,8 @@ def parse_args():
     ap.add_argument("--goal_offset_obs", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="/tmp/jf_curv_probe.json")
+    ap.add_argument("--dump_raw", default="", help="npz path prefix: save per-anchor "
+                    "adjacent-cos matrices (n_pairs, B) per ckpt/steps/component")
     return ap.parse_args()
 
 
@@ -59,19 +61,22 @@ def euler_metrics(model, z_hist, pad, kw, noise_a, noise_s, n_steps):
             vs_s.append(v_s)
             action = action + v_a / n_steps
             state = state + v_s / n_steps
-    out = {}
+    out, raw = {}, {}
     for tag, vs, x0, xT in (("action", vs_a, noise_a, action), ("state", vs_s, noise_s, state)):
         adj = torch.stack([_cos(vs[i], vs[i + 1]) for i in range(len(vs) - 1)])  # (n-1, B)
         chord = (xT - x0).flatten(1).norm(dim=1)
         arc = torch.stack([v.flatten(1).norm(dim=1) / n_steps for v in vs]).sum(0)
+        ends = _cos(vs[0], vs[-1])
         out[tag] = dict(
             cos_adj=float(adj.mean()),
             cos_adj_p10=float(adj.mean(0).quantile(0.1)),
-            cos_ends=float(_cos(vs[0], vs[-1]).mean()),
+            cos_ends=float(ends.mean()),
             straightness=float((chord / arc.clamp(min=1e-8)).mean()),
             profile=[round(float(x), 4) for x in adj.mean(1)],
         )
-    return out
+        raw[tag] = dict(adj=adj.cpu().numpy(), ends=ends.cpu().numpy(),
+                        straightness=(chord / arc.clamp(min=1e-8)).cpu().numpy())
+    return out, raw
 
 
 def main():
@@ -133,7 +138,14 @@ def main():
 
         res = {}
         for n_steps in [int(s) for s in args.steps.split(",")]:
-            res[f"n{n_steps}"] = euler_metrics(model, z_hist, pad, kw, noise_a, noise_s, n_steps)
+            res[f"n{n_steps}"], raw = euler_metrics(model, z_hist, pad, kw, noise_a, noise_s,
+                                                    n_steps)
+            if args.dump_raw:
+                np.savez(f"{args.dump_raw}_{name}_n{n_steps}.npz",
+                         adj_action=raw["action"]["adj"], adj_state=raw["state"]["adj"],
+                         ends_action=raw["action"]["ends"], ends_state=raw["state"]["ends"],
+                         straight_action=raw["action"]["straightness"],
+                         straight_state=raw["state"]["straightness"])
             r = res[f"n{n_steps}"]
             print(f"[curv-probe] {name} n{n_steps}: "
                   f"act cos_adj={r['action']['cos_adj']:.4f} ends={r['action']['cos_ends']:.4f} "
