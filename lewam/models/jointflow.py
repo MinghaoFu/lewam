@@ -76,6 +76,16 @@ class JointFlow(nn.Module):
         # the action schedule is only possible with split_tau -- tau_alpha_state applies to
         # the state draw when split, and defaults to tau_alpha.
         self.tau_alpha_state = float(cfg.get("tau_alpha_state", 0) or self.tau_alpha)
+        # state_target_norm (owner 2026-08-27, "noreg but z-score"): the state flow runs in
+        # per-dim standardized latent coordinates. Running mean/std (EMA over training
+        # batches, detached) live in buffers so eval inherits them; the ONLINE target keeps
+        # its gradient -- only the scale changes. Motivation: unit-Gaussian source vs a
+        # ~0.03-scale latent target makes the flow loss a denoising score and the samples a
+        # noise-residual of fixed size (see docs/RECIPES.md cost-to-goal probe).
+        self.state_target_norm = bool(cfg.get("state_target_norm", False))
+        self.register_buffer("state_mu", torch.zeros(self.z_dim))
+        self.register_buffer("state_sd", torch.ones(self.z_dim))
+        self.state_stats_momentum = 0.99
         self.tau_cond = cfg["tau_cond"]
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]   #RE: prefer embed_dim or similar; dim is too vague
@@ -120,6 +130,21 @@ class JointFlow(nn.Module):
 
     def _memory(self, z_history):
         return self.frame_in(z_history) + self.frame_pos
+
+    def _norm_state(self, z):
+        return (z - self.state_mu) / self.state_sd if self.state_target_norm else z
+
+    def _denorm_state(self, z):
+        return z * self.state_sd + self.state_mu if self.state_target_norm else z
+
+    @torch.no_grad()
+    def update_state_stats(self, z):
+        """EMA of per-dim mean/std of the online state targets (fp32, detached)."""
+        z = z.detach().float().reshape(-1, self.z_dim)
+        m, sd = z.mean(0), z.std(0).clamp_min(1e-3)
+        mom = self.state_stats_momentum
+        self.state_mu.mul_(mom).add_(m, alpha=1 - mom)
+        self.state_sd.mul_(mom).add_(sd, alpha=1 - mom)
 
     def _cond(self, tau_action, tau_state):
         emb_action = self.tau_action_in(sinusoid(tau_action, self.dim))
@@ -171,6 +196,10 @@ class JointFlow(nn.Module):
         """
         B = action_target.shape[0]
         memory = self._memory(z_history)
+        if self.state_target_norm and self.num_states:
+            if self.training:
+                self.update_state_stats(state_target)
+            state_target = self._norm_state(state_target)
         tau_action = torch.rand(B, device=action_target.device) ** (1.0 / self.tau_alpha)
         tau_state = (torch.rand(B, device=action_target.device) ** (1.0 / self.tau_alpha_state)
                      if self.split_tau else tau_action)
@@ -209,6 +238,7 @@ class JointFlow(nn.Module):
                                               z_goal, h_norm)
             action = action + v_action / self.n_flow_steps
             state = state + v_state / self.n_flow_steps
+        state = self._denorm_state(state)
         if self.state_residual and self.num_states:
             state = state + z_history[:, -1:]
         return action, state
@@ -236,6 +266,7 @@ class JointFlow(nn.Module):
             _, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
                                        z_goal, h_norm)
             state = state + v_state / self.n_flow_steps
+        state = self._denorm_state(state)
         if self.state_residual and self.num_states:
             state = state + z_history[:, -1:]
         return state
@@ -257,5 +288,5 @@ def build_model(cfg):
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
                     goal_conditioning=False, tau_cond="summed", state_residual=False,
-                    tau_alpha=1.0, tau_alpha_state=0.0)
+                    tau_alpha=1.0, tau_alpha_state=0.0, state_target_norm=False)
     return JointFlow({**defaults, **cfg})
