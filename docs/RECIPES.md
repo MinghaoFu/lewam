@@ -91,6 +91,25 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
+- **DYNAMICS-INFORMATIVENESS PROBE (2026-08-27, f224e13, owner spec: real-world vs
+  predicted next latents during GC eval; 30% executed random chunks). cube gcf / pusht
+  noreg, eval seed 42 x 50 eps (cube 3286 transitions, pusht 367):**
+  var(pred)/var(real) = 4.1 (cube) / 7-8 (pusht) — predictions are OVER-dispersed, not
+  collapsed (sampler noise dominates; matches the straight noise-transport geometry).
+  ||pred-real|| / ||real-prev|| median = 3.6-3.8 cube, 6.7-7.5 pusht on-policy (random
+  chunks 5.1 / 8.1): a single-sample prediction is 4-8x WORSE than predicting "no
+  change". corr(model goal-cost on pred, true cost on real) = 0.25 cube / 0.00 pusht
+  (persistence baseline 0.87 / 0.81); corr of cost CHANGE 0.13-0.18 cube / -0.01..0.12
+  pusht; sign(progress) accuracy 0.52 cube (chance) / 0.31-0.33 pusht (anti — the
+  dispersed prediction sits farther from the goal than z_prev). Displacement direction
+  cos(pred, real): cube on-policy 0.27, random 0.09; pusht 0.14-0.17 / 0.04 — weak
+  directional knowledge on-policy, ~none off-policy. VERDICT: as an absolute predictor
+  the jf state branch is uninformative on pusht and marginal on cube; the counterfactual
+  ranking signal (top-1 .77) exists only under fixed noise. Planning-by-cost on pusht =
+  random selection, measured. Owner framing confirmed: WAM SR rests on the policy; the
+  imagination is not (yet) a usable verifier. Caveat: single-sample predictions; a
+  K-averaged mean would reduce dispersion (the "best case" dynamics) but planning as
+  practiced uses single/fixed-noise samples. Dumps: jointflow_tc/dyn_{cube,pusht}.npz.
 - **LADDER RUNG 2 (2026-08-27): tau-biased sampling + independent schedules.** Owner
   parity check passed (same h5/caches/z-scoring, goal image on EVERY sample with
   h~U[1,H_max] tail-clamped = unified's RANDOM mode, shared eval harness). LDA-1B
