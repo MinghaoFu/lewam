@@ -91,6 +91,24 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
+- **PUSHT STATE-FACTOR PROBES (2026-08-26, probe_state_factors.py f6ab7f9, ridge
+  n=4000/1000, spec: pos/angle from z_t, vel from [z_{t-5},z_t]): test R²
+  agent_pos / block_pos / block_angle / agent_vel(pair) — jf-noreg .973/.890/.545/.568
+  · jf-idm .973/.872/.487/.613 · jf-sig04 .943/.719/.420/.601 · UNIFIED-idm05
+  .985/.935/.711/.748.** Unified beats every jf variant on every factor, biggest on
+  angle+vel (pusht's precision factors). Unified's ctx (aggregator) column ≈ its z1
+  everywhere → the advantage is the per-frame ENCODER, not context. Unified reads vel
+  0.61 from a SINGLE frame (expert position↔velocity correlation channel jf misses).
+  SIGReg DEGRADES metric readout (block_pos .89→.72) while holding best jf SR (74) —
+  its +8 is policy-shaping, not representation. FAILURE VIDEOS (noreg s42, SR 56,
+  22 fails): ~20/22 are last-inch near-misses (block on target, residual
+  rotation/offset over threshold), ~2 escapes, 0 never-engaged — the SR gap is
+  entirely terminal fine alignment, matching the angle-probe deficit. Ruled out for
+  the jf-vs-unified gap: budget (owner receipt), context (flat), SIGReg, IDM.
+  Standing hypothesis: flow-head gradients starve the encoder of metric detail;
+  discriminators = --split_tau arm, flow-on-aggregator hybrid. Owner constraints:
+  ONE recipe for GR+TC, no cell hacks; no pretrained encoders; no MSE-aux (mode-mean
+  risk). Videos: jointflow_gr2/pusht_fail_videos/.
 - **PUSHT w_idm ARM (2026-08-26, jf anchor recipe + --w_idm 0.5, 50 ep, 36dd67e):
   HEADLINE (BoK-32 inpaint plan) {56,76,58} = 63.3; reactive diagnostic {60,76,62} =
   66.0 — both in the noreg band. BUT the substrate transformed: dyn probe top1 0.82
