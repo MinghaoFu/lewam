@@ -91,6 +91,19 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
+- **tau2 CLOSED (2026-08-27): --tau_alpha 2 (tied Beta(2,1)) plan 63.3 / reactive 64.7;
+  probes == noreg (angle .49/.52, vel .57/.05, block_pos .89); state field
+  machine-straight (cos 1.0000). Clean-end tau bias does not touch the state branch.
+  SCALE-MISMATCH DIAGNOSIS (owner Q "how is state loss low but variance high?"): the
+  unit-Gaussian source (||x0||~20) vs the ~0.03-per-dim latent target (||z||~1) makes the
+  flow loss a denoising score (v ~ -x0, x1 invisible at Var~1e-3/dim) and the sampled
+  state = a residual of a few % of ||x0|| ~ 1.2 latent units = the constant "imagined
+  change" the probes measured, on any cell/action. Actions are z-scored so their flow is
+  well-posed — "flow helps actions, hurts dynamics" = unnormalized state target. FIX
+  ARM znorm (--state_target_norm, 0cbe4ad): state flow in standardized latent coords
+  (EMA stats as buffers, online target keeps gradient, de-normalized sampling); differs
+  from the failed EMA arm by keeping online+gradient. Prediction: cost-probe plots move,
+  loss race defused; splits2/tau family null. Launched mf-c408d295.**
 - **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
   cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
   anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
