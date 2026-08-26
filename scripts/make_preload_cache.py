@@ -249,16 +249,27 @@ FRAME_DTYPE = np.uint8 if (raw_mode or args.u8) else np.float16
 # --u8: memmap the final .npy directly under --out (HDFS) so the pod's local disk holds only
 # the .bin; the fp16 fs3 reacher build died at 49 min with .bin+.npy both under /tmp.
 frames_path = f"{args.out}/{tag}.frames.npy" if args.u8 else f"{tmp}/{tag}.frames.npy"
-frames_memmap = np.lib.format.open_memmap(frames_path, mode="w+", dtype=FRAME_DTYPE,
-                               shape=(N, 3, image_size, image_size))
 start_time = time.time()
 chunk_size = 4096
 raw = np.memmap(bin_path, dtype=FRAME_DTYPE, mode="r", shape=(N, 3, image_size, image_size))
-for i in range(0, N, chunk_size):
-    frames_memmap[i:i + chunk_size] = raw[i:i + chunk_size]
-frames_memmap.flush(); del frames_memmap; del raw
+if args.u8:
+    # --u8 writes the .npy straight onto HDFS (fuse): no write-mmap there (Errno 95), so
+    # emit a standard .npy header and stream the local .bin through sequential write().
+    with open(frames_path, "wb") as fh:
+        np.lib.format.write_array_header_1_0(
+            fh, {"descr": np.lib.format.dtype_to_descr(np.dtype(FRAME_DTYPE)),
+                 "fortran_order": False, "shape": (N, 3, image_size, image_size)})
+        for i in range(0, N, chunk_size):
+            fh.write(np.ascontiguousarray(raw[i:i + chunk_size]).tobytes())
+else:
+    frames_memmap = np.lib.format.open_memmap(frames_path, mode="w+", dtype=FRAME_DTYPE,
+                                   shape=(N, 3, image_size, image_size))
+    for i in range(0, N, chunk_size):
+        frames_memmap[i:i + chunk_size] = raw[i:i + chunk_size]
+    frames_memmap.flush(); del frames_memmap
+del raw
 os.remove(bin_path)
-print(f"[cache] finalized npy in {time.time()-start_time:.0f}s", flush=True)
+print(f"[cache] finalized npy {frames_path} in {time.time()-start_time:.0f}s", flush=True)
 A_flat = torch.stack(action_values).numpy() if action_values else np.zeros((0, 1), np.float16)
 if args.terminal_state == "success":
     verify_success_order()
