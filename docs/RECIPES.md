@@ -144,6 +144,10 @@ beside each checkpoint.
   push point yields the needed block rotation). ~2 escapes, 0 never-engaged. A
   POLICY-level limitation (reactive == planning fail identically). Ruled out for
   the jf-vs-unified gap: budget (owner receipt), context (flat), SIGReg, IDM.
+  ViT-CLS+SIG jf (gr_sigvit_s42, 2026-08-27): .919/.714/.493/.604 (vel-single .03) ==
+  ResNet+SIG (sig04 .943/.719/.420/.601) — encoder FAMILY is not the variable; unified's
+  ViT (.985/.935/.711/.748) differs by OBJECTIVE. Same curvature signature (action turn
+  cos .46, state field straight). Global-vs-local cue story does not explain the gap.
   Standing hypothesis: flow-head gradients starve the encoder of metric detail;
   discriminators = --split_tau arm, flow-on-aggregator hybrid. Owner constraints:
   ONE recipe for GR+TC, no cell hacks; no pretrained encoders; no MSE-aux (mode-mean
