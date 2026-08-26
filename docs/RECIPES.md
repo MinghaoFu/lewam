@@ -101,9 +101,12 @@ beside each checkpoint.
   0.61 from a SINGLE frame (expert position↔velocity correlation channel jf misses).
   SIGReg DEGRADES metric readout (block_pos .89→.72) while holding best jf SR (74) —
   its +8 is policy-shaping, not representation. FAILURE VIDEOS (noreg s42, SR 56,
-  22 fails): ~20/22 are last-inch near-misses (block on target, residual
-  rotation/offset over threshold), ~2 escapes, 0 never-engaged — the SR gap is
-  entirely terminal fine alignment, matching the angle-probe deficit. Ruled out for
+  22 fails; OWNER trajectory review overrides the final-frame read): failures begin
+  EARLY — the agent pushes too strong or from the wrong contact point at push onset
+  and the trajectory diverges from expert quickly; the block ends near the target
+  with the angle far off. Mechanism: the model does not learn contact physics (which
+  push point yields the needed block rotation). ~2 escapes, 0 never-engaged. A
+  POLICY-level limitation (reactive == planning fail identically). Ruled out for
   the jf-vs-unified gap: budget (owner receipt), context (flat), SIGReg, IDM.
   Standing hypothesis: flow-head gradients starve the encoder of metric detail;
   discriminators = --split_tau arm, flow-on-aggregator hybrid. Owner constraints:
