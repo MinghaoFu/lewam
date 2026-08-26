@@ -68,6 +68,10 @@ class JointFlow(nn.Module):
         # state_residual: the state flow denoises delta = z[t+q*fs] - z[t]; sample paths
         # add z_t (the newest history anchor) back so callers always receive absolute z.
         self.state_residual = bool(cfg.get("state_residual", False))
+        # tau_alpha: training tau ~ Beta(alpha, 1) via U^(1/alpha) -- alpha>1 upweights the
+        # clean end (tau->1), where the curvature probe put the field's hard region (the
+        # GR00T/LDA-1B heads bias the same way); alpha=1 recovers uniform.
+        self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
         self.tau_cond = cfg["tau_cond"]
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]   #RE: prefer embed_dim or similar; dim is too vague
@@ -163,8 +167,10 @@ class JointFlow(nn.Module):
         """
         B = action_target.shape[0]
         memory = self._memory(z_history)
-        tau_action = torch.rand(B, device=action_target.device)
-        tau_state = torch.rand(B, device=action_target.device) if self.split_tau else tau_action
+        inv_alpha = 1.0 / self.tau_alpha
+        tau_action = torch.rand(B, device=action_target.device) ** inv_alpha
+        tau_state = (torch.rand(B, device=action_target.device) ** inv_alpha
+                     if self.split_tau else tau_action)
 
         noise_action = torch.randn_like(action_target)
         noisy_action = torch.lerp(noise_action, action_target,
@@ -247,5 +253,6 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
-                    goal_conditioning=False, tau_cond="summed", state_residual=False)
+                    goal_conditioning=False, tau_cond="summed", state_residual=False,
+                    tau_alpha=1.0)
     return JointFlow({**defaults, **cfg})

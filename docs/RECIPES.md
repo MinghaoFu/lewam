@@ -91,6 +91,21 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
+- **LADDER RUNG 2 (2026-08-27): tau-biased sampling + independent schedules.** Owner
+  parity check passed (same h5/caches/z-scoring, goal image on EVERY sample with
+  h~U[1,H_max] tail-clamped = unified's RANDOM mode, shared eval harness). LDA-1B
+  homework (lda/model/modules/action_model/UWM_ActionHeader.py, GR00T-style head):
+  SEPARATE independent timesteps per modality, each ~ Beta(a,b) mapped t=(0.999-s)/0.999
+  (biased toward the CLEAN end — same direction our curvature probe picked), BOTH
+  timesteps fed to the trunk via separate embeddings, plain unweighted loss sum, Euler
+  sampler; only policy mode implemented (obs denoised in tandem). Our equivalents:
+  `--tau_alpha 2` (tau ~ Beta(2,1) = U^(1/2), clean-end bias, alpha=1 uniform) and
+  `--split_tau --tau_cond summed` (independent taus; separate tau_action_in/tau_state_in
+  projections summed into the global AdaLN cond = both taus visible to every token).
+  Arms: tau2, split (pusht anchor, plan+gc evals + probes chained). Builder gained
+  `--u8` (direct uint8 strided cache, npy memmapped straight to --out) + `--max_eps`;
+  reacher fs3 rebuilt as fs3c on it (fp16 fs3 build died at 49 min: .bin+.npy on pod
+  /tmp; 250G pod died pre-entry — proven shape is memory 200000).
 - **BEST-BETS ROUND NULL (2026-08-26, jf_gr_arm 75595bc, one variable each on the
   pusht anchor): a10s2 (--num_states_pred 2) plan 64.7 / reactive 69.3, probes ==
   noreg (angle .52, vel .56/.06), state field still straight+non-contracting;

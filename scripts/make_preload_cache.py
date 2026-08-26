@@ -33,6 +33,11 @@ p.add_argument("--success_key", default="success",
                help="per-row bool column read for --terminal_state success")
 p.add_argument("--patch_terminal", action="store_true",
                help="patch terminal metadata in an existing cache")
+p.add_argument("--max_eps", type=int, default=0, help="cap episodes (0 = all); smoke/debug only")
+p.add_argument("--u8", action="store_true",
+               help="store fs-strided frames as raw uint8 (inverse of the ImageNet normalization, "
+                    "the exact convert_cache_u8 semantics) and write the .npy straight to --out: "
+                    "half the bytes, no fp16 intermediate, no second local copy")
 p.add_argument("--anchor_rate", choices=["obs", "raw"], default="obs",
                help="anchor every frameskip-th frame, or every frame in raw mode")
 args = p.parse_args()
@@ -159,10 +164,15 @@ action_normalizer = act_norm.lambd
 act_mean = action_normalizer.mean.squeeze(0).cpu().numpy().tolist()
 act_std = action_normalizer.std.squeeze(0).cpu().numpy().tolist()
 img_t = get_img_preprocessor(source="pixels", target="pixels", img_size=args.img_size)
+_U8_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_U8_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 action_mean = torch.tensor(act_mean, dtype=torch.float32)
 action_std = torch.tensor(act_std, dtype=torch.float32)
 frameskip = args.frameskip
 n_eps = len(base.lengths)
+if args.max_eps > 0:
+    n_eps = min(n_eps, args.max_eps)
+    print(f"[cache] --max_eps: capping to {n_eps} episodes", flush=True)
 print(f"[cache] {stem}: {n_eps} episodes, act_dim={len(act_mean)}", flush=True)
 
 def episode_tensors(ep):
@@ -193,11 +203,15 @@ def episode_tensors(ep):
     actions = (actions - action_mean) / action_std
     actions = actions.reshape(n_observations, frameskip * raw_actions.shape[1]).half()
     n_kept = min(frames.shape[0], n_observations + 1)
+    if args.u8:
+        fr = frames[:n_kept]
+        u8 = torch.clamp(torch.round((fr * _U8_STD + _U8_MEAN) * 255.0), 0, 255).to(torch.uint8)
+        return u8, actions
     return frames[:n_kept].half(), actions
 
 start_time = time.time()
 image_size = args.img_size
-row_bytes = 3 * image_size * image_size * 2
+row_bytes = 3 * image_size * image_size * (1 if (raw_mode or args.u8) else 2)
 bin_path = f"{tmp}/{tag}.frames.bin"
 frames_per_episode = []
 n_valids = []
@@ -231,8 +245,10 @@ with open(bin_path, "wb") as frame_file:
 N = frame_offset
 print(f"[cache] streamed N={N} frames in {time.time()-start_time:.0f}s", flush=True)
 
-FRAME_DTYPE = np.uint8 if raw_mode else np.float16
-frames_path = f"{tmp}/{tag}.frames.npy"
+FRAME_DTYPE = np.uint8 if (raw_mode or args.u8) else np.float16
+# --u8: memmap the final .npy directly under --out (HDFS) so the pod's local disk holds only
+# the .bin; the fp16 fs3 reacher build died at 49 min with .bin+.npy both under /tmp.
+frames_path = f"{args.out}/{tag}.frames.npy" if args.u8 else f"{tmp}/{tag}.frames.npy"
 frames_memmap = np.lib.format.open_memmap(frames_path, mode="w+", dtype=FRAME_DTYPE,
                                shape=(N, 3, image_size, image_size))
 start_time = time.time()

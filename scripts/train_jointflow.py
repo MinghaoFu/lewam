@@ -104,6 +104,9 @@ def parse_args():
                          "stop-gradded")
     ap.add_argument("--state_ema_base", type=float, default=0.998,
                     help="base momentum for the target encoder, linearly annealed to 1.0")
+    ap.add_argument("--tau_alpha", type=float, default=1.0,
+                    help="training tau ~ Beta(alpha,1) (U^(1/alpha)); >1 biases toward the clean "
+                         "end tau=1; 1 = uniform")
     ap.add_argument("--state_residual", action="store_true",
                     help="state flow denoises delta = z[t+q*fs] - z[t] instead of z[t+q*fs]; "
                          "sample/inpaint add z_t back (incompatible with --state_ema_target)")
@@ -305,7 +308,7 @@ def main():
                policy_history_len=args.policy_history_len,
                actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau,
                goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond,
-               state_residual=bool(args.state_residual))
+               state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha))
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
