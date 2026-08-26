@@ -107,6 +107,8 @@ def parse_args():
     ap.add_argument("--tau_alpha", type=float, default=1.0,
                     help="training tau ~ Beta(alpha,1) (U^(1/alpha)); >1 biases toward the clean "
                          "end tau=1; 1 = uniform")
+    ap.add_argument("--tau_alpha_state", type=float, default=0.0,
+                    help="state-branch tau alpha (needs --split_tau); 0 = same as --tau_alpha")
     ap.add_argument("--state_residual", action="store_true",
                     help="state flow denoises delta = z[t+q*fs] - z[t] instead of z[t+q*fs]; "
                          "sample/inpaint add z_t back (incompatible with --state_ema_target)")
@@ -308,12 +310,15 @@ def main():
                policy_history_len=args.policy_history_len,
                actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau,
                goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond,
-               state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha))
+               state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha),
+               tau_alpha_state=float(args.tau_alpha_state))
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
     (run_dir / "jointflow_config.json").write_text(json.dumps(dumped, indent=1))
     n_params = sum(p.numel() for p in model.parameters())
+    assert not (args.tau_alpha_state and not args.split_tau), \
+        "--tau_alpha_state only takes effect with --split_tau (tied tau cannot bias one branch)"
     assert not (args.state_residual and args.state_ema_target), \
         "--state_residual mixes raw z_t into the target; incompatible with the layernormed ema path"
     print(f"[jointflow] params={n_params/1e6:.2f}M  w_reg={args.w_reg} "

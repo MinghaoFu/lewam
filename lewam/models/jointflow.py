@@ -72,6 +72,10 @@ class JointFlow(nn.Module):
         # clean end (tau->1), where the curvature probe put the field's hard region (the
         # GR00T/LDA-1B heads bias the same way); alpha=1 recovers uniform.
         self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
+        # per-branch bias (owner 2026-08-27): oversampling near-clean STATES without touching
+        # the action schedule is only possible with split_tau -- tau_alpha_state applies to
+        # the state draw when split, and defaults to tau_alpha.
+        self.tau_alpha_state = float(cfg.get("tau_alpha_state", 0) or self.tau_alpha)
         self.tau_cond = cfg["tau_cond"]
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]   #RE: prefer embed_dim or similar; dim is too vague
@@ -167,9 +171,8 @@ class JointFlow(nn.Module):
         """
         B = action_target.shape[0]
         memory = self._memory(z_history)
-        inv_alpha = 1.0 / self.tau_alpha
-        tau_action = torch.rand(B, device=action_target.device) ** inv_alpha
-        tau_state = (torch.rand(B, device=action_target.device) ** inv_alpha
+        tau_action = torch.rand(B, device=action_target.device) ** (1.0 / self.tau_alpha)
+        tau_state = (torch.rand(B, device=action_target.device) ** (1.0 / self.tau_alpha_state)
                      if self.split_tau else tau_action)
 
         noise_action = torch.randn_like(action_target)
@@ -254,5 +257,5 @@ def build_model(cfg):
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
                     goal_conditioning=False, tau_cond="summed", state_residual=False,
-                    tau_alpha=1.0)
+                    tau_alpha=1.0, tau_alpha_state=0.0)
     return JointFlow({**defaults, **cfg})
