@@ -91,6 +91,18 @@ beside each checkpoint.
   100.0). Verdict across all three GR cells: steer never breaks the policy and never
   beats it; grad direction ≤ random direction everywhere (within noise). Steer is a
   safe-but-null test-time knob on jf GR — same conclusion family as BoK selection.
+- **BEST-BETS ROUND NULL (2026-08-26, jf_gr_arm 75595bc, one variable each on the
+  pusht anchor): a10s2 (--num_states_pred 2) plan 64.7 / reactive 69.3, probes ==
+  noreg (angle .52, vel .56/.06), state field still straight+non-contracting;
+  resid (--state_residual, delta-target with z_t add-back) best fit ever (val act
+  .332) but plan 68.0 / reactive 66.7, probes == idm-ish (angle .46/.58, vel
+  .62/.12), state field unchanged; a5s1 (--num_actions_pred 5) FAILED both ways —
+  bf16 exploded ep 23 (first-ever pusht bf16 NaN; healthy 0.44 -> blowup in one
+  epoch) and the fp32 rerun trains but does not generalize (train act .46 vs val
+  3.16 at ep 20): the 10-action chunk does real stabilizing/regularizing work.
+  VERDICT: state-target restructuring does not move representation detail, SR, or
+  flow geometry. Ladder rung 2 = tau-biased sampling toward tau=1 (the curvature
+  probe's data end); rung 3 = honest-limitation write-up.**
 - **PUSHT STATE-FACTOR PROBES (2026-08-26, probe_state_factors.py f6ab7f9, ridge
   n=4000/1000, spec: pos/angle from z_t, vel from [z_{t-5},z_t]): test R²
   agent_pos / block_pos / block_angle / agent_vel(pair) — jf-noreg .973/.890/.545/.568
