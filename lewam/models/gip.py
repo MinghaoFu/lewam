@@ -514,7 +514,9 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
         if mode == "jointflow_policy":
             return JointFlowPolicy(**shared)
         if mode == "jointflow_gc":
-            return JointFlowGCPolicy(shuffle_goal=bool(ge.get("shuffle_goal", False)), **shared)
+            return JointFlowGCPolicy(shuffle_goal=bool(ge.get("shuffle_goal", False)),
+                                     dyn_log=bool(ge.get("dyn_log", False)),
+                                     dyn_random_p=float(ge.get("dyn_random_p", 0.0)), **shared)
         return JointFlowPlanPolicy(
             plan_mode=str(ge.get("plan_mode", "best_of_k")),
             plan_score=str(ge.get("plan_score", "joint")),
@@ -1277,6 +1279,15 @@ class JointFlowGCPolicy(JointFlowPolicy):
         # diagnostic: hand each env another env's goal (roll across the replan batch), so SR
         # measures how much of the policy is actually goal-driven vs goal-blind behavior
         self.shuffle_goal = bool(kwargs.pop("shuffle_goal", False))
+        # dynamics-informativeness probe (owner spec 2026-08-27): at every replan log the
+        # model's predicted next latent (joint sample + inpaint under the EXECUTED chunk)
+        # and, at the following replan, the REAL encoded latent that arrived; with
+        # dyn_random_p > 0 a random z-scored chunk replaces the policy's chunk (and is
+        # executed) so pred-vs-real is also measured off-policy. dump_diag writes the npz.
+        self.dyn_log = bool(kwargs.pop("dyn_log", False))
+        self.dyn_random_p = float(kwargs.pop("dyn_random_p", 0.0))
+        self._dyn_prev = None
+        self._dyn_rows = []
         super().__init__(model, cfg, *args, **kwargs)
         self.type = "jointflow_gc"
         assert getattr(model, "goal_conditioning", False), "checkpoint lacks goal conditioning"
@@ -1301,10 +1312,77 @@ class JointFlowGCPolicy(JointFlowPolicy):
             steps = np.maximum(self._steps_left[replan], 1.0)
             h_norm = torch.tensor(np.minimum(steps, self.H_max) / self.H_max,
                                   device=device, dtype=torch.float32)
-        action_chunk, _imagined = self.model.sample(history, history_pad,
-                                                    z_goal=z_goal, h_norm=h_norm,
-                                                    generator=self._gen(history.device))
-        return action_chunk
+        action_chunk, z_imag = self.model.sample(history, history_pad,
+                                                 z_goal=z_goal, h_norm=h_norm,
+                                                 generator=self._gen(history.device))
+        if not self.dyn_log:
+            return action_chunk
+        return self._dyn_log_step(replan, history, history_pad, z_goal, h_norm,
+                                  action_chunk, z_imag)
+
+    def _flush_env(self, i):
+        super()._flush_env(i)
+        if self._dyn_prev is not None:
+            self._dyn_prev[i] = None
+
+    def _dyn_log_step(self, replan, history, history_pad, z_goal, h_norm, action_chunk, z_imag):
+        """Close the previous replan's prediction against the real latent that arrived,
+        then open a new prediction for the chunk about to execute (policy or random)."""
+        device = history.device
+        R = len(replan)
+        assert self._take() == self.action_block, \
+            "dyn_log needs exec == one action block so the +fs prediction meets the next replan"
+        if self._dyn_prev is None:
+            self._dyn_prev = [None] * self.env.num_envs
+        for row, i in enumerate(replan):
+            prev = self._dyn_prev[i]
+            if prev is not None:
+                z_real = history[row, -1].detach().cpu()
+                self._dyn_rows.append(dict(env=i, z_prev=prev["z_prev"], z_real=z_real,
+                                           pred_joint=prev["pred_joint"],
+                                           pred_inpaint=prev["pred_inpaint"],
+                                           z_goal=prev["z_goal"], is_random=prev["is_random"]))
+            self._dyn_prev[i] = None
+        exec_chunk = action_chunk.clone()
+        is_random = torch.zeros(R, dtype=torch.bool)
+        if self.dyn_random_p > 0:
+            gen = self._gen(device)
+            coin = torch.rand(R, device=device, generator=gen) < self.dyn_random_p
+            rnd = torch.randn(action_chunk.shape, device=device, generator=gen)
+            exec_chunk[coin] = rnd[coin]
+            is_random = coin.cpu()
+        gen = self._gen(device)
+        A, adim = self.model.num_actions, self.model.action_raw_dim
+        noise_a = torch.randn(R, A, adim, device=device, generator=gen)
+        noise_s = torch.randn(R, self.model.num_states, self.model.z_dim, device=device,
+                              generator=gen)
+        z_pi = self.model.sample_inpaint(history, history_pad, exec_chunk, noise_a, noise_s,
+                                         z_goal=z_goal, h_norm=h_norm)
+        for row, i in enumerate(replan):
+            self._dyn_prev[i] = dict(
+                z_prev=history[row, -1].detach().cpu(),
+                pred_joint=(z_imag[row, 0].detach().cpu() if not bool(is_random[row])
+                            else torch.full_like(z_imag[row, 0].cpu(), float("nan"))),
+                pred_inpaint=z_pi[row, 0].detach().cpu(),
+                z_goal=z_goal[row].detach().cpu(), is_random=bool(is_random[row]))
+        return exec_chunk
+
+    def dump_diag(self, path):
+        import numpy as np
+        rows = self._dyn_rows
+        if not rows:
+            print("[dyn-log] no closed transitions to dump")
+            return
+        np.savez(path,
+                 env=np.array([r["env"] for r in rows]),
+                 z_prev=torch.stack([r["z_prev"] for r in rows]).numpy(),
+                 z_real=torch.stack([r["z_real"] for r in rows]).numpy(),
+                 pred_joint=torch.stack([r["pred_joint"] for r in rows]).numpy(),
+                 pred_inpaint=torch.stack([r["pred_inpaint"] for r in rows]).numpy(),
+                 z_goal=torch.stack([r["z_goal"] for r in rows]).numpy(),
+                 is_random=np.array([r["is_random"] for r in rows]))
+        print(f"[dyn-log] {len(rows)} transitions "
+              f"({int(sum(r['is_random'] for r in rows))} random) -> {path}")
 
 
 class JointFlowPlanPolicy(JointFlowPolicy):
