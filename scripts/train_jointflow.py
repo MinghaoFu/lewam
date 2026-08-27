@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from train_crossattn import load_cache, RawContextDataset
 from train_lewam_unified import durable_sync, _IMG_MEAN, _IMG_STD
 from lewam.models.jointflow import build_model
+from lewam.models.twinflow import build_model as build_twinflow
 from lewam.models.module import SIGReg
 
 
@@ -64,6 +65,15 @@ def parse_args():
     ap.add_argument("--n_flow_steps", type=int, default=8)
     ap.add_argument("--num_actions_pred", type=int, default=5)
     ap.add_argument("--num_states_pred", type=int, default=1)
+    ap.add_argument("--model", default="jointflow", choices=["jointflow", "twinflow"],
+                    help="jointflow = one flow over [action tokens; state token]; twinflow = the "
+                         "same action flow with no state slot + a separate state flow conditioned "
+                         "on the CLEAN action chunk (lewam.models.twinflow)")
+    ap.add_argument("--state_detach", action="store_true",
+                    help="twinflow: stop-grad the encoder for the state branch (its history memory "
+                         "and target), so the state flow cannot collapse or reshape the encoder")
+    ap.add_argument("--state_depth", type=int, default=0,
+                    help="twinflow: depth of the state trunk (0 = same as --depth)")
     ap.add_argument("--policy_history_len", type=int, default=2,
                     help="raw-consecutive obs frames the model uses as history")
     ap.add_argument("--steps_per_epoch", type=int, default=0,
@@ -316,8 +326,9 @@ def main():
                goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond,
                state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha),
                tau_alpha_state=float(args.tau_alpha_state),
-               state_target_norm=bool(args.state_target_norm))
-    model = build_model(cfg).to(device)
+               state_target_norm=bool(args.state_target_norm), model=args.model,
+               state_detach=bool(args.state_detach), state_depth=int(args.state_depth))
+    model = (build_twinflow if args.model == "twinflow" else build_model)(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
     (run_dir / "jointflow_config.json").write_text(json.dumps(dumped, indent=1))
@@ -328,7 +339,14 @@ def main():
         "--state_target_norm is the online-target normalization; the ema path has its own"
     assert not (args.state_residual and args.state_ema_target), \
         "--state_residual mixes raw z_t into the target; incompatible with the layernormed ema path"
-    print(f"[jointflow] params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
+    if args.model == "twinflow":
+        assert not args.split_tau, "twinflow's branches have independent taus by construction; drop --split_tau"
+        assert not (args.state_target_norm and not args.state_detach), \
+            "twinflow --state_target_norm needs --state_detach (the 1/sd runaway needs a gradient path into the encoder)"
+    else:
+        assert not (args.state_detach or args.state_depth), "--state_detach/--state_depth are twinflow flags"
+    print(f"[jointflow] model={args.model}{' detach' if args.state_detach else ''} "
+          f"params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
           f"state_target={'ema' if args.state_ema_target else 'online'}"
           f"{' residual' if args.state_residual else ''}", flush=True)
 

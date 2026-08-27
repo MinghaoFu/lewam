@@ -350,7 +350,11 @@ def load_jointflow_model(run_name, which="best"):
     if not ckpt.exists():
         ckpt = run_dir / "jointflow_latest.pt"
     assert ckpt.exists(), f"no jointflow_*.pt checkpoint in {run_dir}"
-    model = build_jointflow(cfg)
+    if cfg.get("model", "jointflow") == "twinflow":
+        from lewam.models.twinflow import build_model as build_twinflow
+        model = build_twinflow(cfg)
+    else:
+        model = build_jointflow(cfg)
     model.load_state_dict(torch.load(ckpt, map_location="cpu"), strict=True)
     return model, cfg
 
