@@ -51,6 +51,11 @@ def parse_args():
     ap.add_argument("--n_anchors", type=int, default=200)
     ap.add_argument("--k", type=int, default=32)
     ap.add_argument("--goal_offset_obs", type=int, default=10)
+    ap.add_argument("--horizon_blocks", type=int, default=1,
+                    help=">1 = ROLLOUT mode (owner 2026-08-27): candidates are H-block action "
+                         "SEQUENCES rolled out autoregressively to the goal horizon (goal = the real "
+                         "frame at t + H*fs); scores compare the expert sequence's endpoint against "
+                         "each wrong sequence's endpoint, which is what a planner ranks")
     ap.add_argument("--sigmas", default="0.25,0.5,1,2")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch", type=int, default=64)
@@ -119,6 +124,24 @@ class LeWMAdapter:
         preds = self.m.pred_proj(preds.reshape(N * self.n_hist, -1)).reshape(N, self.n_hist, -1)
         return preds[:, -1]
 
+    @torch.no_grad()
+    def rollout(self, z_hist, hist_blocks_z, seq_z):
+        """LeWM.rollout semantics: latents [h_0..h_{n-1}] each paired with the block starting at
+        that frame; predict the next latent from the last n_hist (latent, block) pairs, append.
+        z_hist (N, n_hist, D); hist_blocks_z (N, n_hist-1, fs, adim) = blocks of the older history
+        frames; seq_z (N, H, fs, adim) = the candidate sequence (block 0 belongs to frame t)."""
+        N, H = seq_z.shape[:2]
+        embs = list(z_hist.unbind(1))
+        blocks = list(hist_blocks_z.unbind(1)) + list(seq_z.unbind(1))     # aligned with embs
+        out = []
+        for k in range(H):
+            lo = len(embs) - self.n_hist
+            e = torch.stack(embs[lo:], 1)
+            b = torch.stack(blocks[lo:lo + self.n_hist], 1)
+            z_next = self.predict(e, b)
+            embs.append(z_next); out.append(z_next)
+        return torch.stack(out, 1)
+
 
 class UnifiedAdapter:
     """LeWAM-unified: context_len frames at fs spacing -> aggregate -> c_t; dynamics(c_t, block)."""
@@ -160,6 +183,18 @@ class UnifiedAdapter:
             return dyn(c, a[:, None, :], None)[:, 0]
         return dyn(c, a, torch.zeros_like(c))
 
+    @torch.no_grad()
+    def rollout(self, z_hist, hist_blocks_z, seq_z):
+        """Autoregressive: aggregate the context window, predict, slide the imagined latent in."""
+        N, H = seq_z.shape[:2]
+        window = z_hist
+        out = []
+        for k in range(H):
+            z_next = self.predict(window, seq_z[:, k:k + 1])
+            window = torch.cat([window[:, 1:], z_next[:, None]], 1)
+            out.append(z_next)
+        return torch.stack(out, 1)
+
 
 class JointFlowAdapter:
     """jointflow / twinflow: history_len frames at fs spacing; the state flow under a clean
@@ -200,6 +235,25 @@ class JointFlowAdapter:
         noise_s = torch.randn(1, self.m.num_states, self.m.z_dim, generator=self.gen).expand(N, -1, -1)
         return self.m.sample_inpaint(z_hist, pad, plan, noise_a, noise_s)[:, 0]
 
+    @torch.no_grad()
+    def rollout(self, z_hist, hist_blocks_z, seq_z):
+        """Autoregressive inpaint: plan for step k = [block_k; block_{k+1} (or block_k again at the
+        end)], imagined latent slides into the history; fixed noise per step shared across candidates."""
+        N, H = seq_z.shape[:2]
+        hist = z_hist
+        pad = torch.zeros(N, hist.shape[1], dtype=torch.bool)
+        out = []
+        for k in range(H):
+            nxt = seq_z[:, k + 1] if k + 1 < H else seq_z[:, k]
+            plan = torch.cat([seq_z[:, k]] + [nxt] * (self.n_chunks - 1), 1)
+            g = torch.Generator().manual_seed(777 + k)
+            noise_a = torch.randn(1, self.m.num_actions, self.m.action_raw_dim, generator=g).expand(N, -1, -1)
+            noise_s = torch.randn(1, self.m.num_states, self.m.z_dim, generator=g).expand(N, -1, -1)
+            z_next = self.m.sample_inpaint(hist, pad, plan, noise_a, noise_s)[:, 0]
+            hist = torch.cat([hist[:, 1:], z_next[:, None]], 1)
+            out.append(z_next)
+        return torch.stack(out, 1)
+
 
 # ----------------------------------------------------------------------------- driver
 def main():
@@ -230,7 +284,8 @@ def main():
     fs = adapters[0].fs
     assert all(a.fs == fs for a in adapters), "all models must share the frameskip"
     max_back = max(-min(a.hist_offsets) for a in adapters) + fs * max(a.n_blocks_needed - 1 for a in adapters)
-    goff = args.goal_offset_obs * fs
+    H = int(args.horizon_blocks)
+    goff = (H if H > 1 else args.goal_offset_obs) * fs         # rollout mode: goal = real endpoint
 
     # anchors: t with room for the deepest history, the real next frame and the goal
     cand = [(e, int(ep_off[e]), int(ep_len[e])) for e in range(len(ep_len))
@@ -243,7 +298,7 @@ def main():
     K = args.k
 
     def block(t0):
-        return A[t0:t0 + fs]                                    # raw (fs, adim)
+        return A[t0:t0 + fs * H].reshape(H, fs, adim) if H > 1 else A[t0:t0 + fs]   # raw
 
     # candidate blocks in RAW space per anchor (shared across models; z-scored per model later)
     types = ["expert", "zero", "neg", "shuf_other", "shuf_ep"] + [f"pert{s:g}" for s in sigmas] + ["uniform"]
@@ -255,12 +310,12 @@ def main():
         raw_cands["neg"].append((-a_star)[None])
         others = rng.choice([j for j in range(len(picks)) if j != i], K, replace=len(picks) - 1 < K)
         raw_cands["shuf_other"].append(np.stack([block(picks[j][3]) for j in others]))
-        ts = rng.integers(lo, lo + L - fs, K)
+        ts = rng.integers(lo, lo + L - fs * H, K)
         raw_cands["shuf_ep"].append(np.stack([block(int(x)) for x in ts]))
         for s in sigmas:
-            eps = rng.standard_normal((K, fs, adim)).astype(np.float32)
-            raw_cands[f"pert{s:g}"].append(a_star[None] + s * eps * astd[None, None])
-        raw_cands["uniform"].append(rng.uniform(amin, amax, (K, fs, adim)).astype(np.float32))
+            eps = rng.standard_normal((K,) + a_star.shape).astype(np.float32)
+            raw_cands[f"pert{s:g}"].append(a_star[None] + s * eps * astd)
+        raw_cands["uniform"].append(rng.uniform(amin, amax, (K,) + a_star.shape).astype(np.float32))
     raw_cands = {ty: np.stack(v) for ty, v in raw_cands.items()}   # (n_anchors, n_c, fs, adim)
 
     results = {}
@@ -274,6 +329,8 @@ def main():
             for o in ad.hist_offsets:
                 rows.add(t + o)
             rows.add(t + fs); rows.add(t + goff)
+            for k in range(H):
+                rows.add(t + fs * (k + 1))
         rows = np.array(sorted(rows))
         z_of = {}
         for s in range(0, len(rows), args.batch):
@@ -283,31 +340,40 @@ def main():
                 z_of[int(rr)] = zz.float()
         cost_goal = {ty: np.zeros((len(picks), raw_cands[ty].shape[1]), np.float32) for ty in types}
         cost_true = {ty: np.zeros_like(cost_goal[ty]) for ty in types}
+        cost_path = {ty: np.zeros_like(cost_goal[ty]) for ty in types}   # rollout mode: mean dist to the real path
         cost_now = np.zeros(len(picks), np.float32)
         cost_real = np.zeros(len(picks), np.float32)
         for i, (e, lo, L, t) in enumerate(picks):
             z_hist = torch.stack([z_of[t + o] for o in ad.hist_offsets])[None]      # (1, H, D)
-            z_goal = z_of[t + goff]; z_true = z_of[t + fs]
+            z_goal = z_of[t + goff]; z_true = z_of[t + goff] if H > 1 else z_of[t + fs]
             cost_now[i] = float((z_hist[0, -1] - z_goal).norm())
             cost_real[i] = float((z_true - z_goal).norm())
             # history action blocks (models that condition on one block per history frame)
-            hist_blocks = [zs(block(t + o)) for o in ad.hist_offsets[:-1]]           # (fs, adim) each
+            hist_blocks = [zs(A[t + o:t + o + fs]) for o in ad.hist_offsets[:-1]]    # (fs, adim) each
             if isinstance(ad, JointFlowAdapter):
-                ad.next_block_z = zs(block(t + fs))[None]
+                ad.next_block_z = zs(A[t + fs:t + 2 * fs])[None]
+            z_path = torch.stack([z_of[t + fs * (k + 1)] for k in range(H)]) if H > 1 else None
             for ty in types:
-                c = torch.from_numpy(raw_cands[ty][i])                              # (n_c, fs, adim) raw
+                c = torch.from_numpy(raw_cands[ty][i])                              # raw candidates
                 cz = zs(c)
                 n_c = cz.shape[0]
-                if ad.n_blocks_needed > 1:
-                    hb = torch.stack(hist_blocks)[None].expand(n_c, -1, -1, -1)      # (n_c, H-1, fs, adim)
-                    blocks = torch.cat([hb, cz[:, None]], 1)
+                if H > 1:
+                    hb = torch.stack(hist_blocks)[None].expand(n_c, -1, -1, -1) if hist_blocks else \
+                        cz.new_zeros(n_c, 0, fs, adim)
+                    zr = ad.rollout(z_hist.expand(n_c, -1, -1), hb, cz)               # (n_c, H, D)
+                    zn = zr[:, -1]
+                    cost_path[ty][i] = (zr - z_path[None]).norm(dim=2).mean(1).numpy()  # mean over k
                 else:
-                    blocks = cz[:, None]
-                zn = ad.predict(z_hist.expand(n_c, -1, -1), blocks)
+                    if ad.n_blocks_needed > 1:
+                        hb = torch.stack(hist_blocks)[None].expand(n_c, -1, -1, -1)  # (n_c, H-1, fs, adim)
+                        blocks = torch.cat([hb, cz[:, None]], 1)
+                    else:
+                        blocks = cz[:, None]
+                    zn = ad.predict(z_hist.expand(n_c, -1, -1), blocks)
                 cost_goal[ty][i] = (zn - z_goal).norm(dim=1).numpy()
                 cost_true[ty][i] = (zn - z_true).norm(dim=1).numpy()
         prog = float(np.mean(cost_now - cost_real))                                  # real one-step progress
-        summ = {"n_anchors": len(picks), "k": K, "cost_now_mean": float(cost_now.mean()),
+        summ = {"n_anchors": len(picks), "k": K, "horizon_blocks": H, "cost_now_mean": float(cost_now.mean()),
                 "cost_real_next_mean": float(cost_real.mean()), "real_progress_mean": prog,
                 "expert_pred_err_mean": float(cost_true["expert"].mean()),
                 "expert_pred_cost_mean": float(cost_goal["expert"].mean()), "types": {}}
@@ -322,14 +388,19 @@ def main():
                 "truth_gap_mean": float(gap_t.mean()), "truth_gap_per_err": float(gap_t.mean() / (ce_t.mean() + 1e-8)),
                 "truth_acc": float((gap_t > 0).mean()),
             }
+            if H > 1:
+                gap_p = cost_path[ty] - cost_path["expert"]
+                summ["types"][ty]["path_acc"] = float((gap_p > 0).mean())
+                summ["types"][ty]["path_gap_mean"] = float(gap_p.mean())
         results[ad.name] = summ
         print(f"[wm-discrim] {ad.name}: now={summ['cost_now_mean']:.3f} real_next={summ['cost_real_next_mean']:.3f} "
               f"progress={prog:.3f} expert_pred_err={summ['expert_pred_err_mean']:.3f} "
               f"expert_pred_cost={summ['expert_pred_cost_mean']:.3f}", flush=True)
         for ty, r in summ["types"].items():
+            extra = f" | path_acc={r['path_acc']:.3f} path_gap={r['path_gap_mean']:+.4f}" if "path_acc" in r else ""
             print(f"[wm-discrim] {ad.name} {ty:>10}: goal_acc={r['goal_acc']:.3f} goal_gap={r['goal_gap_mean']:+.4f} "
                   f"({r['goal_gap_per_progress']:+.2f}x progress) | truth_acc={r['truth_acc']:.3f} "
-                  f"truth_gap={r['truth_gap_mean']:+.4f} ({r['truth_gap_per_err']:+.2f}x err)", flush=True)
+                  f"truth_gap={r['truth_gap_mean']:+.4f} ({r['truth_gap_per_err']:+.2f}x err){extra}", flush=True)
         if args.dump_raw:
             raw_dump[ad.name] = {"cost_goal": cost_goal, "cost_true": cost_true,
                                  "cost_now": cost_now, "cost_real": cost_real}
