@@ -126,6 +126,18 @@ beside each checkpoint.
   straight at n8 (cos 0.9999) but BENT at n64 (ends 0.63, straight 0.988) like a5s1 --
   second bent state field with zero SR consequence: field geometry is not the lever.
   TAU FAMILY CLOSED (tau2, split); splits2 staged but recommended NOT launched.**
+- **REACHER RESOLVED (2026-08-27, mf-baeb6d77 + eval rerun mf-970aadbd): jf + SIGReg 0.04, fp32,
+  otherwise the GC recipe (fs 5, a10s1) = planning {96,96,90} = 94.0 / reactive {92,80,88} =
+  86.7 (3 eval seeds x 50; planning >= reactive on every seed). Same eval: unified lewam_gc
+  98.8, baseline_wam 8-16, so the cell is real and jf is within seed noise of unified. The
+  action loss sat at 1.513 -> 1.503 for 50 epochs: on torque cells the flow loss is the entropy
+  floor of torques given images and says NOTHING about control; the sampled torques' direction
+  is what matters. "Reacher fails" was inferred from that curve because no earlier reacher jf
+  arm reached eval (two bf16 NaNs, fs3 noreg collapse). Eval gotcha: pods ship MuJoCo 3.12.0
+  where dm_control 1.0.43 dies ('MjData' has no 'qM'); pin mujoco==3.10.0 (memory: merlin-ops).
+  CONSEQUENCE: the GR deficit is pusht only (74 sig / 66 noreg vs unified 87); the recipe that
+  survives every GR cell is SIGReg 0.04 + fp32, never yet run on TC -> toolhang-sig is the
+  "one recipe" test.**
 - **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
   cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
   anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
