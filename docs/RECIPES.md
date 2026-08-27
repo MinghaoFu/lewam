@@ -198,6 +198,19 @@ beside each checkpoint.
   objective bites (noreg joint -> SIGReg joint -> SIGReg twin), the worse the toolhang policy,
   matching crossattn_bc 90 -> crossattn_wm 36 in direction. pusht twin (mf-c9fe379b) pending:
   SR + state probe + the action-discrimination test on its clean-action state flow.**
+- **TWIN pusht (mf-c9fe379b, per-token tau, SIGReg 0.04, fp32): planning {58,74,72} = 68.0 /
+  reactive {60,72,64} = 65.3 (sig04 67.3 / 74.0; anchor 70.7 / 66.0); state probe agent_pos .967
+  block_pos .863 angle .584 (sincos .734) vel .609 (anchor .973/.890/.545/.568; unified .985/
+  .935/.711/.748). ONE-STEP ACTION DISCRIMINATION of its clean-action state flow (200 anchors x 32):
+  truth pairwise zero .975 / neg .995 / other-state .989 / other-time .973 / +0.25s .64 / +0.5s .79
+  / +1s .91 / +2s .98 / uniform 1.00; top-1 (closest among 33) other-state .77, other-time .67,
+  +1s .57, +2s .79, uniform .99 (LeWM .93/.74/.80/.96/1.00). Expert prediction error 3.39 vs
+  real progress 0.94. VERDICT: with CLEAN action conditioning the flow state branch learns real
+  action-conditioned dynamics, slightly coarser than the JEPA/MSE heads on fine perturbations;
+  the joint model's chance-level dynamics came from noisy-action conditioning (+ scale), not from
+  the flow objective. But the good dynamics did NOT transfer to the policy: pusht SR unchanged
+  (65 vs sig04 74), readouts barely moved, toolhang hurt (59.3). Representation benefit and
+  dynamics quality are separate axes.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
