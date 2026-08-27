@@ -154,8 +154,19 @@ beside each checkpoint.
   detach, --state_target_norm (safe: the 1/sd runaway needed the encoder path). Same trainer,
   eval adapters and probes (interface = jointflow's); the curvature probe is jointflow-only.
   Devbox smoke: policy branch bitwise == JointFlow(num_states=0); detach leaves zero grad on
-  history/target; inpaint(sampled chunk, shared noise) == sample state. Predictions: detached
-  twin trains reacher without SIGReg/NaN; attached twin behaves like noreg on collapse.
+  history/target; inpaint(sampled chunk, shared noise) == sample state.
+  OWNER CORRECTION (same day): the detach idea repeats the PARKED crossattn experiment. Record
+  (toolhang, resnet18dp, DP-style head, 2026-08-19, one ckpt each): BC-only crossattn_bc 90
+  (88 per-episode budget; 79.3 +/- 5.2 pooled over 6 eval seeds) -> + separate MSE dynamics
+  head, online target + SIGReg (crossattn_wm) = 36 -> EMA target + stop-grad (crossattn_wmema)
+  = 64. Stop-grad/EMA recovered half the damage and stayed ~25 under BC; SIGReg on the online
+  target did not protect the POLICY. That parked separate-head WMs and motivated jointflow
+  (89 without SIGReg; SIGReg costs ~15). Expectation for the twin: a separate dynamics
+  objective on the shared encoder hurts the policy; the twin + SIGReg is that experiment with
+  a flow head. Detach arms WITHDRAWN (flag kept, off by default); single arm staged: twinsig
+  (--model twinflow --w_reg 0.04 --fp32, pusht). Owner default = SIGReg for anti-collapse.
+  toolhang SIGReg (jf-tc-toolhang-sig04, mf-0fceb53b) LAUNCHED on the owner's word; owner
+  expects ~70.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
