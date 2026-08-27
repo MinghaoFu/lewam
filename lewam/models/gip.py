@@ -355,7 +355,12 @@ def load_jointflow_model(run_name, which="best"):
         model = build_twinflow(cfg)
     else:
         model = build_jointflow(cfg)
-    model.load_state_dict(torch.load(ckpt, map_location="cpu"), strict=True)
+    sd = torch.load(ckpt, map_location="cpu")
+    res = model.load_state_dict(sd, strict=False)
+    # state_mu/state_sd (the --state_target_norm running stats) were added on 2026-08-27; older
+    # checkpoints lack them and keep the identity stats they were built with. Nothing else may be missing.
+    assert set(res.missing_keys) <= {"state_mu", "state_sd"} and not res.unexpected_keys, \
+        f"checkpoint/model mismatch: missing={res.missing_keys} unexpected={res.unexpected_keys}"
     return model, cfg
 
 
