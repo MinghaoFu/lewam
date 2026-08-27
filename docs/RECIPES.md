@@ -135,9 +135,30 @@ beside each checkpoint.
   is what matters. "Reacher fails" was inferred from that curve because no earlier reacher jf
   arm reached eval (two bf16 NaNs, fs3 noreg collapse). Eval gotcha: pods ship MuJoCo 3.12.0
   where dm_control 1.0.43 dies ('MjData' has no 'qM'); pin mujoco==3.10.0 (memory: merlin-ops).
-  CONSEQUENCE: the GR deficit is pusht only (74 sig / 66 noreg vs unified 87); the recipe that
-  survives every GR cell is SIGReg 0.04 + fp32, never yet run on TC -> toolhang-sig is the
-  "one recipe" test.**
+  CONSEQUENCE: the GR deficit is pusht only (74 sig / 66 noreg vs unified 87). CORRECTION
+  (owner, same day): SIGReg on toolhang IS measured post-tau-fix -- round-2 a10s2 (SIGReg +
+  per_modality) 72.2 +/- 8.7 vs noreg 89.0, round-1 a10s1 (SIGReg, summed tau) 76.3; the
+  round-2 record already concluded "the unlock is SIGReg removal, not the tau fix" (residual
+  confound: a10s2 layout). So SIGReg costs ~13-17 on toolhang and is NOT the one recipe:
+  noreg wins TC + saturates tworoom/pml, SIGReg is needed for reacher and best on pusht.
+  The staged jf-tc-toolhang-sig04 (a10s1 layout + SIGReg + per_mod, fp32) is the one cell
+  that would close the attribution; low priority.**
+- **TWINFLOW (owner design 2026-08-27; lewam/models/twinflow.py, --model twinflow): the
+  jointflow action flow untouched (a JointFlow with no state slot) + a SEPARATE state flow
+  trunk (same CrossAttnBlock stack, same [a..,z,a..] layout, cross-attn to the frame history)
+  whose action tokens are the CLEAN ground-truth chunk (no noise, no tau) -- a plain conditional
+  dynamics p(z_{t+fs} | history, a); planning scores a candidate by running the state flow on it
+  (what inpainting faked by clamping). Switches: --state_detach (state branch trains on
+  stop-gradded history + target: no gradient path into the encoder, so it cannot collapse or
+  reshape it; the policy's representation is shaped by the action loss alone) and, only under
+  detach, --state_target_norm (safe: the 1/sd runaway needed the encoder path). Same trainer,
+  eval adapters and probes (interface = jointflow's); the curvature probe is jointflow-only.
+  Devbox smoke: policy branch bitwise == JointFlow(num_states=0); detach leaves zero grad on
+  history/target; inpaint(sampled chunk, shared noise) == sample state. Predictions: detached
+  twin trains reacher without SIGReg/NaN; attached twin behaves like noreg on collapse.
+  H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
+  REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
+  random noise levels is not a coherent dynamics model.**
 - **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
   cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
   anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
