@@ -9,6 +9,9 @@ clean chunk, never noised and carrying no tau, so it is a plain conditional dyna
 p(z_{t+fs} | history, a). Scoring a candidate chunk for planning is then just running the state
 flow on it, which sample_inpaint used to fake by clamping.
 
+Conditioning is per-token: only the noisy state slot is modulated by tau_state; the clean
+action tokens get a fixed tau=1 embedding (they carry no noise level of their own).
+
 The two branches share the encoder and nothing else. `state_detach` cuts the state branch's
 gradient into the encoder (its history memory and its target are stop-gradded), so the state
 flow cannot outrun or collapse the encoder and the policy's representation is shaped by the
@@ -56,16 +59,31 @@ class StateFlow(nn.Module):
     def _memory(self, z_history):
         return self.frame_in(z_history) + self.frame_pos
 
-    def velocity(self, actions, noisy_state, memory, memory_pad, tau):
+    def _cond(self, tau):
+        """Per-token AdaLN conditioning: the noisy state slot(s) get tau; the clean action
+        context slots get the fixed tau=1 ("clean") embedding, so their processing never
+        depends on the state's noise level (per-modality, the jfv1 tau-bug lesson)."""
+        cond_state = self.cond(self.tau_in(sinusoid(tau, self.dim)))                 # (B, dim)
+        cond_clean = self.cond(self.tau_in(sinusoid(torch.ones_like(tau), self.dim)))
+        cond = cond_clean.new_zeros(tau.shape[0], self.is_state.numel(), self.dim)
+        cond[:, self.action_slots] = cond_clean.unsqueeze(1)
+        cond[:, self.state_slots] = cond_state.unsqueeze(1)
+        return cond
+
+    def trunk(self, actions, noisy_state, memory, memory_pad, tau):
         B = actions.shape[0]
         a_proj = self.action_in(actions)
         x = a_proj.new_zeros(B, self.is_state.numel(), self.dim)
         x[:, self.action_slots] = a_proj
         x[:, self.state_slots] = self.state_in(noisy_state).to(a_proj.dtype)
         x = x + self.slot_pos + self.modality_emb(self.is_state.long())
-        cond = self.cond(self.tau_in(sinusoid(tau, self.dim)))
+        cond = self._cond(tau)
         for block in self.blocks:
             x = block(x, memory, cond, self.self_mask, memory_pad)
+        return x
+
+    def velocity(self, actions, noisy_state, memory, memory_pad, tau):
+        x = self.trunk(actions, noisy_state, memory, memory_pad, tau)
         return self.state_out(x[:, self.state_slots])
 
     def loss(self, z_history, history_pad, actions, state_target, state_valid, tau_alpha=1.0):
