@@ -45,6 +45,13 @@ def parse_args():
     ap.add_argument("--lr", type=float, default=1e-4,
                     help="one uniform rate for encoder + flow transformer (UWM precedent)")
     ap.add_argument("--weight_decay", type=float, default=1e-4)
+    # per-module learning rates (LeWAM-unified's mechanism: encoder 1e-4 / heads 3e-4 / dynamics
+    # 3e-4). None = --lr, so existing recipes are unchanged. Groups by parameter name: the
+    # encoder ("encoder." / "policy.encoder."), the dynamics trunk ("state_flow.", twinflow) and
+    # everything else (the policy trunk + readout, plus the IDM head).
+    ap.add_argument("--encoder_lr", type=float, default=None)
+    ap.add_argument("--policy_lr", type=float, default=None)
+    ap.add_argument("--dynamics_lr", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--fp32", action="store_true",
@@ -253,6 +260,30 @@ class JointFlowDataset(RawContextDataset):
             goal_frame, torch.tensor(0.0, dtype=torch.float32)
 
 
+def build_param_groups(model, idm_head, args):
+    """AdamW param groups: encoder / dynamics (twinflow state trunk) / policy (+ IDM head)."""
+    enc_lr = args.lr if args.encoder_lr is None else args.encoder_lr
+    pol_lr = args.lr if args.policy_lr is None else args.policy_lr
+    dyn_lr = args.lr if args.dynamics_lr is None else args.dynamics_lr
+    enc, dyn, pol = [], [], []
+    for name, prm in model.named_parameters():
+        if name.startswith("encoder.") or name.startswith("policy.encoder."):
+            enc.append(prm)
+        elif name.startswith("state_flow."):
+            dyn.append(prm)
+        else:
+            pol.append(prm)
+    if idm_head is not None:
+        pol += list(idm_head.parameters())
+    groups = [dict(params=enc, lr=enc_lr, name="encoder", n=sum(p.numel() for p in enc)),
+              dict(params=pol, lr=pol_lr, name="policy", n=sum(p.numel() for p in pol))]
+    if dyn:
+        groups.append(dict(params=dyn, lr=dyn_lr, name="dynamics", n=sum(p.numel() for p in dyn)))
+    assert sum(g["n"] for g in groups) == sum(p.numel() for p in model.parameters()) + \
+        (sum(p.numel() for p in idm_head.parameters()) if idm_head is not None else 0)
+    return groups
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
@@ -358,8 +389,10 @@ def main():
         assert args.num_states_pred >= 1, "--w_idm needs a state slot (num_states_pred >= 1)"
         idm_head = nn.Sequential(nn.Linear(2 * args.z_dim, 512), nn.SiLU(),
                                  nn.Linear(512, args.frameskip * raw_adim)).to(device)
-    params = list(model.parameters()) + (list(idm_head.parameters()) if idm_head else [])
-    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    groups = build_param_groups(model, idm_head, args)
+    opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=args.weight_decay)
+    print("[jointflow] lr groups: " + ", ".join(f"{g['name']} lr={g['lr']:.2e} n={g['n']}" for g in groups),
+          flush=True)
 
     def lr_scale(epoch):
         if epoch < args.warmup_epochs:
