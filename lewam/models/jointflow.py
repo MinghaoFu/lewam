@@ -83,6 +83,13 @@ class JointFlow(nn.Module):
         # ~0.03-scale latent target makes the flow loss a denoising score and the samples a
         # noise-residual of fixed size (see docs/RECIPES.md cost-to-goal probe).
         self.state_target_norm = bool(cfg.get("state_target_norm", False))
+        # state_mse (owner H1, 2026-08-27): the state slot is a plain regression readout that
+        # shares the trunk's attention with the action flow tokens -- a learned query token
+        # (no noise, no lerp, no tau of its own) whose output IS the next-latent prediction,
+        # trained with MSE. It attends to the action tokens at their current noise level, so
+        # it learns action-conditioned dynamics near tau=1 and the marginal near tau=0; the
+        # samplers read it out with one pass at tau=1 over the finished action chunk.
+        self.state_mse = bool(cfg.get("state_mse", False))
         self.register_buffer("state_mu", torch.zeros(self.z_dim))
         self.register_buffer("state_sd", torch.ones(self.z_dim))
         self.state_stats_momentum = 0.99
@@ -106,6 +113,8 @@ class JointFlow(nn.Module):
         self.frame_pos = nn.Parameter(torch.zeros(1, self.history_len, self.dim))
         self.action_in = nn.Linear(self.action_raw_dim, self.dim)
         self.state_in = nn.Linear(self.z_dim, self.dim)
+        if self.state_mse:
+            self.state_query = nn.Parameter(torch.randn(1, max(self.num_states, 1), self.dim) * 0.02)
         self.slot_pos = nn.Parameter(torch.zeros(1, is_state.numel(), self.dim))    #RE: idk, I think self.pos_emb is fine enough
         self.modality_emb = nn.Embedding(2, self.dim)
 
@@ -168,7 +177,8 @@ class JointFlow(nn.Module):
         x = a_proj.new_zeros(B, self.is_state.numel(), self.dim)
         x[:, self.action_slots] = a_proj
         if self.num_states:
-            x[:, self.state_slots] = self.state_in(noisy_state)
+            x[:, self.state_slots] = (self.state_query.expand(B, -1, -1).to(a_proj.dtype)
+                                      if self.state_mse else self.state_in(noisy_state))
 
         x = x + self.slot_pos + self.modality_emb(self.is_state.long())
         cond = self._cond(tau_action, tau_state)
@@ -202,7 +212,7 @@ class JointFlow(nn.Module):
             state_target = self._norm_state(state_target)
         tau_action = torch.rand(B, device=action_target.device) ** (1.0 / self.tau_alpha)
         tau_state = (torch.rand(B, device=action_target.device) ** (1.0 / self.tau_alpha_state)
-                     if self.split_tau else tau_action)
+                     if (self.split_tau and not self.state_mse) else tau_action)
 
         noise_action = torch.randn_like(action_target)
         noisy_action = torch.lerp(noise_action, action_target,
@@ -216,6 +226,9 @@ class JointFlow(nn.Module):
         loss_action = self._masked_mse(v_action, action_target - noise_action, action_valid)
         if self.num_states == 0:
             return loss_action, loss_action.new_zeros(())
+        if self.state_mse:
+            # v_state is the prediction itself (regression readout), not a velocity
+            return loss_action, self._masked_mse(v_state, state_target, state_valid)
         loss_state = self._masked_mse(v_state, state_target - noise_state, state_valid)
         return loss_action, loss_state
 
@@ -237,7 +250,11 @@ class JointFlow(nn.Module):
             v_action, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
                                               z_goal, h_norm)
             action = action + v_action / self.n_flow_steps
-            state = state + v_state / self.n_flow_steps
+            if not self.state_mse:
+                state = state + v_state / self.n_flow_steps
+        if self.state_mse and self.num_states:
+            tau1 = torch.ones(B, device=z_history.device)
+            _, state = self.velocity(action, state, memory, history_pad, tau1, tau1, z_goal, h_norm)
         state = self._denorm_state(state)
         if self.state_residual and self.num_states:
             state = state + z_history[:, -1:]
@@ -260,12 +277,17 @@ class JointFlow(nn.Module):
         if noise_state is None:
             noise_state = torch.randn(B, self.num_states, self.z_dim, device=z_history.device)
         state = noise_state
-        for i in range(self.n_flow_steps):
-            tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
-            action = torch.lerp(noise_action, action_plan, tau[:, None, None].to(action_plan.dtype))
-            _, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
-                                       z_goal, h_norm)
-            state = state + v_state / self.n_flow_steps
+        if self.state_mse:
+            tau1 = torch.ones(B, device=z_history.device)
+            _, state = self.velocity(action_plan, state, memory, history_pad, tau1, tau1,
+                                     z_goal, h_norm)
+        else:
+            for i in range(self.n_flow_steps):
+                tau = torch.full((B,), i / self.n_flow_steps, device=z_history.device)
+                action = torch.lerp(noise_action, action_plan, tau[:, None, None].to(action_plan.dtype))
+                _, v_state = self.velocity(action, state, memory, history_pad, tau, tau,
+                                           z_goal, h_norm)
+                state = state + v_state / self.n_flow_steps
         state = self._denorm_state(state)
         if self.state_residual and self.num_states:
             state = state + z_history[:, -1:]
@@ -288,5 +310,6 @@ def build_model(cfg):
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=5, num_states_pred=1,
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
                     goal_conditioning=False, tau_cond="summed", state_residual=False,
-                    tau_alpha=1.0, tau_alpha_state=0.0, state_target_norm=False)
+                    tau_alpha=1.0, tau_alpha_state=0.0, state_target_norm=False,
+                    state_mse=False)
     return JointFlow({**defaults, **cfg})

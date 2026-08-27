@@ -109,6 +109,12 @@ def parse_args():
                          "end tau=1; 1 = uniform")
     ap.add_argument("--tau_alpha_state", type=float, default=0.0,
                     help="state-branch tau alpha (needs --split_tau); 0 = same as --tau_alpha")
+    ap.add_argument("--state_mse", action="store_true",
+                    help="H1 (owner 2026-08-27): the state slot is a regression readout sharing "
+                         "the trunk's attention with the action flow -- learned query token, MSE "
+                         "to the next latent, read out at tau=1 over the finished action chunk. "
+                         "Needs collapse control (--w_reg): an MSE online target is fully "
+                         "collapse-reducible.")
     ap.add_argument("--state_target_norm", action="store_true",
                     help="state flow in per-dim standardized latent coords (running EMA stats in "
                          "model buffers; ONLINE target keeps its gradient); sample/inpaint "
@@ -316,7 +322,7 @@ def main():
                goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond,
                state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha),
                tau_alpha_state=float(args.tau_alpha_state),
-               state_target_norm=bool(args.state_target_norm))
+               state_target_norm=bool(args.state_target_norm), state_mse=bool(args.state_mse))
     model = build_model(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
@@ -328,9 +334,14 @@ def main():
         "--state_target_norm is the online-target normalization; the ema path has its own"
     assert not (args.state_residual and args.state_ema_target), \
         "--state_residual mixes raw z_t into the target; incompatible with the layernormed ema path"
+    assert not (args.state_mse and (args.state_target_norm or args.split_tau or args.tau_alpha_state)), \
+        "--state_mse has no state flow: --state_target_norm / --split_tau / --tau_alpha_state do not apply"
+    if args.state_mse and args.num_states_pred and args.w_reg <= 0 and not args.state_ema_target:
+        print("[jointflow] WARN --state_mse with an online target and no --w_reg: expect collapse", flush=True)
     print(f"[jointflow] params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
           f"state_target={'ema' if args.state_ema_target else 'online'}"
-          f"{' residual' if args.state_residual else ''}", flush=True)
+          f"{' residual' if args.state_residual else ''}"
+          f" state_head={'mse' if args.state_mse else 'flow'}", flush=True)
 
     idm_head = None
     if args.w_idm > 0:
