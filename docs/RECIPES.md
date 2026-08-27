@@ -146,6 +146,26 @@ beside each checkpoint.
   vs noreg 89.0 (n=12). No layout confound left: SIGReg costs ~12 on toolhang. Owner called ~70.
   Train curve: act 0.254 / zstd 0.89 at ep 120 (noreg ~0.26 / 0.027) -- the policy loss does
   not see the 12-point gap, same lesson as the crossattn WM arms.**
+- **WORLD-MODEL ACTION DISCRIMINATION (2026-08-27, scripts/probe_wm_discrim.py, owner Q "is JEPA
+  itself the issue?"; pusht, 200 dataset anchors x 32 wrong blocks per type, goal at +10
+  anchors, each model in its own latent; outputs ckpts/wm_discrim/). Two pairwise scores per
+  wrong-action type: TRUTH = P(prediction under the expert's block is closer to the REAL next
+  latent than under the wrong block); GOAL = P(expert block imagined closer to the goal). 0.5 =
+  coin flip. Wrong blocks: zero, -expert, another state's expert block, same-episode other time,
+  expert + {0.25,0.5,1,2}sigma noise (z-scored units), uniform over the action box.
+  TRUTH: LeWM (official hf ckpt) 1.00/1.00/1.00/0.99 | 0.86/0.95/0.99/1.00 | 1.00; unified
+  roll2-nogoal 1.00/1.00/1.00/0.99 | 0.87/0.96/0.99/1.00 | 1.00; unified idm05 0.95/1.00/0.97/
+  0.97 | 0.82/0.92/0.98/1.00 | 1.00; jf noreg anchor 0.53/0.54/0.53/0.56 | 0.52/0.55/0.49/0.53
+  | 0.59 (pred err 1.23 vs real progress 0.023: the noise residual); jf sig04 0.57/0.67/0.62/
+  0.62 | 0.49/0.56/0.53/0.66 | 0.90 (pred err 3.58 vs progress 0.82).
+  GOAL: every model ~0.45-0.6 on perturbed/shuffled blocks (LeWM 0.27 on uniform: a random block
+  is imagined CLOSER to the goal 73% of the time; idm05 0.79).
+  READING: JEPA/MSE latent dynamics know what an action does almost perfectly; latent
+  distance-to-goal is not a progress measure for any of them (why CEM/BoK never beat reactive:
+  the planner's cost, not the dynamics). jointflow's flow state branch is at chance in the joint
+  model; SIGReg scale helps only for gross wrong actions (uniform 0.90). The twin (clean-action
+  state flow) is measured with the same test. Note: the earlier "CEM never beats reactive" was
+  wrong -- goal-free roll2 CEM 93.2 vs reactive 89.2 on-path / 81.2 vs 75.2 off-path (one run).**
 - **TWINFLOW (owner design 2026-08-27; lewam/models/twinflow.py, --model twinflow): the
   jointflow action flow untouched (a JointFlow with no state slot) + a SEPARATE state flow
   trunk (same CrossAttnBlock stack, same [a..,z,a..] layout, cross-attn to the frame history)
