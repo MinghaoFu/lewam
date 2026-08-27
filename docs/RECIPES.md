@@ -117,6 +117,15 @@ beside each checkpoint.
   OPEN TEST of the scale hypothesis WITHOUT training: sig04 already has a well-scaled
   target (zstd 0.86 vs unit noise), so probe_jf_cost on sig04 (+ sigvit) decides whether
   a well-posed state flow makes imagination informative (proposed, not launched).**
+- **split CLOSED (2026-08-27, mf-76b3f6ed, --split_tau --tau_cond summed --fp32): plan
+  {60,72,72} = 68.0 / reactive {62,80,66} = 69.3 vs anchor 70.7 / 66.0 -- in band. Train
+  curve identical to the anchor (act 0.363 at ep 50 vs 0.363); the wild val (1.4-8.3,
+  floor flat at 1.43 for 37 epochs) is a hot-weights artefact shared with anchor s42
+  (val 4.7 at ep 40 -> 0.35 at ep 50 when lr -> 0), not a split symptom. Probes ~ noreg:
+  agent_pos .972, block_pos .929, angle .542 (sincos .712), vel .568. State field
+  straight at n8 (cos 0.9999) but BENT at n64 (ends 0.63, straight 0.988) like a5s1 --
+  second bent state field with zero SR consequence: field geometry is not the lever.
+  TAU FAMILY CLOSED (tau2, split); splits2 staged but recommended NOT launched.**
 - **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
   cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
   anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
