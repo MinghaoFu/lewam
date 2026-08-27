@@ -327,7 +327,8 @@ def main():
                state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha),
                tau_alpha_state=float(args.tau_alpha_state),
                state_target_norm=bool(args.state_target_norm), model=args.model,
-               state_detach=bool(args.state_detach), state_depth=int(args.state_depth))
+               state_detach=bool(args.state_detach), state_depth=int(args.state_depth),
+               state_ctx_actions=int(args.frameskip * args.num_states_pred))
     model = (build_twinflow if args.model == "twinflow" else build_model)(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}

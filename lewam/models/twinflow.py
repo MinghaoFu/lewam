@@ -39,6 +39,9 @@ class StateFlow(nn.Module):
                  n_heads, depth, dropout):
         super().__init__()
         self.z_dim, self.dim, self.num_states = z_dim, dim, num_states
+        # num_actions here = the actions the state token(s) depend on (fs per state); the chunk's
+        # remaining actions never enter this trunk (they cannot affect z_{t+q*fs}).
+        self.num_actions = num_actions
         is_state, times = state_act_layout(num_actions, num_states, fs)
         self.register_buffer("is_state", is_state)
         self.register_buffer("action_slots", (~is_state).nonzero().squeeze(-1))
@@ -83,7 +86,7 @@ class StateFlow(nn.Module):
         return x
 
     def velocity(self, actions, noisy_state, memory, memory_pad, tau):
-        x = self.trunk(actions, noisy_state, memory, memory_pad, tau)
+        x = self.trunk(actions[:, :self.num_actions], noisy_state, memory, memory_pad, tau)
         return self.state_out(x[:, self.state_slots])
 
     def loss(self, z_history, history_pad, actions, state_target, state_valid, tau_alpha=1.0):
@@ -129,7 +132,12 @@ class TwinFlow(nn.Module):
         self.register_buffer("state_sd", torch.ones(self.z_dim))
         self.state_stats_momentum = 0.99
         depth = int(cfg.get("state_depth", 0) or cfg["depth"])
-        self.state_flow = StateFlow(self.z_dim, self.action_raw_dim, self.num_actions, self.num_states,
+        # state_ctx_actions: how many leading chunk actions the state trunk holds. 0 = legacy
+        # (the whole chunk, with actions after the last state token as dead context; the runs
+        # launched at c411c54 have that layout); the trainer sets fs * num_states_pred.
+        ctx_actions = int(cfg.get("state_ctx_actions", 0) or self.num_actions)
+        assert self.fs * self.num_states <= ctx_actions <= self.num_actions, (ctx_actions, self.num_actions)
+        self.state_flow = StateFlow(self.z_dim, self.action_raw_dim, ctx_actions, self.num_states,
                                     self.fs, self.history_len, cfg["d_model"], cfg["n_heads"], depth,
                                     cfg["dropout"])
 
@@ -220,5 +228,5 @@ def build_model(cfg):
                     policy_history_len=2, actions_attend_states=True, split_tau=False,
                     goal_conditioning=False, tau_cond="summed", state_residual=False,
                     tau_alpha=1.0, tau_alpha_state=0.0, state_target_norm=False,
-                    state_detach=False, state_depth=0)
+                    state_detach=False, state_depth=0, state_ctx_actions=0)
     return TwinFlow({**defaults, **cfg})
