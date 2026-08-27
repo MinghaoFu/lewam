@@ -211,6 +211,27 @@ beside each checkpoint.
   the flow objective. But the good dynamics did NOT transfer to the policy: pusht SR unchanged
   (65 vs sig04 74), readouts barely moved, toolhang hurt (59.3). Representation benefit and
   dynamics quality are separate axes.**
+- **ROLLOUT-TO-GOAL DISCRIMINATION (2026-08-28, probe_wm_discrim --horizon_blocks 5 = the GR
+  eval's 25-env-step goal; 200 anchors x 16 wrong SEQUENCES; the expert's sequence rolled out
+  through the model vs a wrong sequence: which ends closer to the goal = the real endpoint).
+  Expert-first rate vs other-state / other-time / +0.5s / +1s / +2s / uniform: LeWM 1.00/.99/.94/
+  .98/1.00/1.00; unified roll2 1.00/.99/.97/.99/1.00/1.00; idm05 .99/.97/.92/.97/.99/1.00;
+  twinflow .985/.96/.78/.90/.97/.99. Endpoint error of the expert rollout vs start distance: LeWM
+  2.1/14.8, unified 2.1/17.3, twin 9.8/22.3. So over the planning horizon latent goal-distance DOES
+  rank the expert trajectory first for every model with real dynamics (the one-step "goal" test
+  was an artifact, withdrawn); the twin drifts more but discriminates. jf noreg/sigreg and the
+  flow-head unified ckpt are queued on the devbox (8-core cgroup: slow).**
+- **MOTFLOW (owner design 2026-08-28; lewam/models/motflow.py, --model motflow, commit see git):
+  Mixture-of-Transformers joint model: separate state/action streams (own QKV/out/FFN/AdaLN), ONE
+  global attention under a fixed mask. Tokens: z_hist, z* (S noisy next states or mse queries),
+  z_g (goal, optional) | a (clean a_1..a_{S*fs}), a* (A noisy). Map: z_hist->z_hist; z*_q ->
+  z_hist, z*_{<=q}, a_{<=q*fs}; z_g -> z_hist, z_g; a_j -> z_hist, a_{<=j}; a*_j -> z_hist, z_g,
+  a*_{<=j}. tau_a/h on a* only, tau_s on z* only; goal enters the policy as a token (no readout
+  injection). --mot_state_head flow|mse. Two-phase sampler (a* Euler, then z* under the sampled
+  block); inpaint = phase 2. What it adds over twinflow: the dynamics loss reaches the ACTION
+  stream's own weights (through the clean tokens) and the shared history processing, not only
+  the encoder. Smoke: mask == table; a* bitwise blind to clean actions/z*; z* blind to a*/goal/h;
+  state loss reaches the action stream; inpaint(sampled) == sample state; mse head; lr groups.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
