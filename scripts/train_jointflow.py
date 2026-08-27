@@ -22,6 +22,7 @@ from train_crossattn import load_cache, RawContextDataset
 from train_lewam_unified import durable_sync, _IMG_MEAN, _IMG_STD
 from lewam.models.jointflow import build_model
 from lewam.models.twinflow import build_model as build_twinflow
+from lewam.models.motflow import build_model as build_motflow
 from lewam.models.module import SIGReg
 
 
@@ -72,10 +73,13 @@ def parse_args():
     ap.add_argument("--n_flow_steps", type=int, default=8)
     ap.add_argument("--num_actions_pred", type=int, default=5)
     ap.add_argument("--num_states_pred", type=int, default=1)
-    ap.add_argument("--model", default="jointflow", choices=["jointflow", "twinflow"],
+    ap.add_argument("--model", default="jointflow", choices=["jointflow", "twinflow", "motflow"],
                     help="jointflow = one flow over [action tokens; state token]; twinflow = the "
                          "same action flow with no state slot + a separate state flow conditioned "
                          "on the CLEAN action chunk (lewam.models.twinflow)")
+    ap.add_argument("--mot_state_head", default="flow", choices=["flow", "mse"],
+                    help="motflow: objective on the next-state tokens (flow = rectified flow on a "
+                         "noisy token; mse = regression from a learned query, clean-action-conditioned)")
     ap.add_argument("--state_detach", action="store_true",
                     help="twinflow: stop-grad the encoder for the state branch (its history memory "
                          "and target), so the state flow cannot collapse or reshape the encoder")
@@ -267,12 +271,15 @@ def build_param_groups(model, idm_head, args):
     dyn_lr = args.lr if args.dynamics_lr is None else args.dynamics_lr
     enc, dyn, pol = [], [], []
     for name, prm in model.named_parameters():
-        if name.startswith("encoder.") or name.startswith("policy.encoder."):
-            enc.append(prm)
+        if hasattr(model, "param_group_of"):
+            g = model.param_group_of(name)
+        elif name.startswith("encoder.") or name.startswith("policy.encoder."):
+            g = "encoder"
         elif name.startswith("state_flow."):
-            dyn.append(prm)
+            g = "dynamics"
         else:
-            pol.append(prm)
+            g = "policy"
+        {"encoder": enc, "dynamics": dyn, "policy": pol}[g].append(prm)
     if idm_head is not None:
         pol += list(idm_head.parameters())
     groups = [dict(params=enc, lr=enc_lr, name="encoder", n=sum(p.numel() for p in enc)),
@@ -359,8 +366,10 @@ def main():
                tau_alpha_state=float(args.tau_alpha_state),
                state_target_norm=bool(args.state_target_norm), model=args.model,
                state_detach=bool(args.state_detach), state_depth=int(args.state_depth),
-               state_ctx_actions=int(args.frameskip * args.num_states_pred))
-    model = (build_twinflow if args.model == "twinflow" else build_model)(cfg).to(device)
+               state_ctx_actions=int(args.frameskip * args.num_states_pred),
+               state_head=args.mot_state_head)
+    builder = {"jointflow": build_model, "twinflow": build_twinflow, "motflow": build_motflow}[args.model]
+    model = builder(cfg).to(device)
     action_mean, action_std = action_stats
     dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
     (run_dir / "jointflow_config.json").write_text(json.dumps(dumped, indent=1))
@@ -375,6 +384,9 @@ def main():
         assert not args.split_tau, "twinflow's branches have independent taus by construction; drop --split_tau"
         assert not (args.state_target_norm and not args.state_detach), \
             "twinflow --state_target_norm needs --state_detach (the 1/sd runaway needs a gradient path into the encoder)"
+    elif args.model == "motflow":
+        assert not (args.split_tau or args.state_target_norm or args.state_ema_target or args.state_detach
+                    or args.state_depth), "motflow: split_tau/state_target_norm/state_ema_target/state_detach/state_depth do not apply"
     else:
         assert not (args.state_detach or args.state_depth), "--state_detach/--state_depth are twinflow flags"
     print(f"[jointflow] model={args.model}{' detach' if args.state_detach else ''} "
