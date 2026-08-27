@@ -100,10 +100,23 @@ beside each checkpoint.
   state = a residual of a few % of ||x0|| ~ 1.2 latent units = the constant "imagined
   change" the probes measured, on any cell/action. Actions are z-scored so their flow is
   well-posed — "flow helps actions, hurts dynamics" = unnormalized state target. FIX
-  ARM znorm (--state_target_norm, 0cbe4ad): state flow in standardized latent coords
-  (EMA stats as buffers, online target keeps gradient, de-normalized sampling); differs
-  from the failed EMA arm by keeping online+gradient. Prediction: cost-probe plots move,
-  loss race defused; splits2/tau family null. Launched mf-c408d295.**
+  ARM znorm (--state_target_norm, 0cbe4ad, mf-c408d295): state flow in standardized latent
+  coords (EMA stats as buffers, online target keeps gradient, de-normalized sampling).
+  RESULT: RUNAWAY COLLAPSE. zstd 0.0084 at ep 1 (anchor 0.067), 0.00015 at ep 2, 0.00046
+  at ep 10; train state loss 0.84 -> 0.08 then rising (sd clamp 1e-3 binds); val state
+  loss 1e2 -> 1e5 (clamped sd blows up the normalized val target); action loss ALSO
+  worse (0.81 vs anchor 0.56 at ep 10): the action branch conditions on z and a dead z
+  hurts it. Mechanism: standardizing the online target makes the state loss scale-free
+  in z, so nothing penalizes the encoder shrinking z, and the gradient into the encoder
+  through (z-mu)/sd carries a 1/sd factor, so shrinking strengthens the pull: positive
+  feedback, finished in two epochs. The raw-scale noreg arm survives only because its
+  state loss is tiny (~0.01) and the collapse pressure fades as z shrinks; the z-score
+  removed that damping. Same lesson as EMA-detach on toolhang, from the other side: an
+  online state target needs SOME collapse control (EMA / SIGReg) once its scale is made
+  to matter. Formal job cannot be killed from CLI: console stop needed.
+  OPEN TEST of the scale hypothesis WITHOUT training: sig04 already has a well-scaled
+  target (zstd 0.86 vs unit noise), so probe_jf_cost on sig04 (+ sigvit) decides whether
+  a well-posed state flow makes imagination informative (proposed, not launched).**
 - **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
   cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
   anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
