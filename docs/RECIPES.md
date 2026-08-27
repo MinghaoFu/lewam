@@ -141,8 +141,11 @@ beside each checkpoint.
   round-2 record already concluded "the unlock is SIGReg removal, not the tau fix" (residual
   confound: a10s2 layout). So SIGReg costs ~13-17 on toolhang and is NOT the one recipe:
   noreg wins TC + saturates tworoom/pml, SIGReg is needed for reacher and best on pusht.
-  The staged jf-tc-toolhang-sig04 (a10s1 layout + SIGReg + per_mod, fp32) is the one cell
-  that would close the attribution; low priority.**
+  CLOSED 2026-08-27 (mf-0fceb53b train + mf-cfaecd12 board shard eval): a10s1 layout + SIGReg
+  0.04 + per_modality tau + fp32, 120 ep = {74, 82, 74} = 76.7 (3 eval seeds x 50, full-traj)
+  vs noreg 89.0 (n=12). No layout confound left: SIGReg costs ~12 on toolhang. Owner called ~70.
+  Train curve: act 0.254 / zstd 0.89 at ep 120 (noreg ~0.26 / 0.027) -- the policy loss does
+  not see the 12-point gap, same lesson as the crossattn WM arms.**
 - **TWINFLOW (owner design 2026-08-27; lewam/models/twinflow.py, --model twinflow): the
   jointflow action flow untouched (a JointFlow with no state slot) + a SEPARATE state flow
   trunk (same CrossAttnBlock stack, same [a..,z,a..] layout, cross-attn to the frame history)
