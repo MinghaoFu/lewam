@@ -280,7 +280,18 @@ beside each checkpoint.
   content. Remaining differences vs unified (roll2-nogoal 89.2): 5-frame aggregated context vs
   2-frame history; one-block MSE point policy vs 10-action flow policy (unified's own flow head
   reached 86.8, so the head alone is not it); ViT-tiny z192 vs resnet18dp (jf sigvit 62 < sig04 74
-  says the ViT is not it); 200-ep bs48 raw-anchor pipeline vs 50-ep bs128 fs-strided cache.**
+  says the ViT is not it); budget is NOT it (roll2-nogoal's 89 was 50 ep; the 200-ep idm05 run
+  overtrained, owner). 
+  MSE-HEAD DYNAMICS (one-step discrimination, 200 anchors x 32): mot-mse-noreg truth .995/1.00/
+  .998/.988 gross, .81/.92/.98/1.00 at 0.25/0.5/1/2 sigma, uniform 1.00; top-1 other-state .95,
+  other-time .70, +1s .69, +2s .94; gap/err 3.5-8.1x; expert pred err 0.265 vs progress 0.127.
+  mot-mse-sig truth 1.00 gross, .885/.96/.99/1.00 fine; top-1 .99/.87/.85/.95; gap/err 7-11x --
+  the best discrimination of any model measured (LeWM top-1 .93/.74/.80/.96). So the MSE state
+  head in the MoT gives JEPA-level dynamics, and mot-mse-NOREG gets it without SIGReg and without
+  collapse (zstd 0.14). MoT-mse-noreg = the first variant with real dynamics AND a TC policy in
+  reach of the board (toolhang 80.7 vs 89.0; pusht 68.7 vs 73 flow / 87 unified). BoK planning
+  with these dynamics still does not beat reactive on pusht (69.3 vs 68.7; 71.3 vs 72.0), as with
+  unified: dynamics quality is not what limits BoK at this horizon/candidate set.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
