@@ -291,7 +291,11 @@ beside each checkpoint.
   collapse (zstd 0.14). MoT-mse-noreg = the first variant with real dynamics AND a TC policy in
   reach of the board (toolhang 80.7 vs 89.0; pusht 68.7 vs 73 flow / 87 unified). BoK planning
   with these dynamics still does not beat reactive on pusht (69.3 vs 68.7; 71.3 vs 72.0), as with
-  unified: dynamics quality is not what limits BoK at this horizon/candidate set.**
+  unified: dynamics quality is not what limits BoK at this horizon/candidate set.
+  ROLLOUT-TO-GOAL (H=5 blocks): mot-mse-noreg expert-first 1.00/.98/.93/.98/1.00/1.00 (other-state/
+  other-time/+0.5s/+1s/+2s/uniform), gap/err 0.9-8x, endpoint error 0.48 vs start 2.96 (16% drift;
+  LeWM 14%); mot-mse-sig 1.00/.99/.97/.99/1.00/1.00, gap/err 2.5-7.3x, 12% drift. Both at the
+  LeWM/unified level over the planning horizon.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
