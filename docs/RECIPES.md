@@ -248,6 +248,11 @@ beside each checkpoint.
   stream's own weights (through the clean tokens) and the shared history processing, not only
   the encoder. Smoke: mask == table; a* bitwise blind to clean actions/z*; z* blind to a*/goal/h;
   state loss reaches the action stream; inpaint(sampled) == sample state; mse head; lr groups.**
+- **MOT GRID (2026-08-28, single lr, fp32, code 697b1ec; toolhang board shard evals, 3 seeds x 50):
+  TOOLHANG mot-flow-noreg {80, 92, 86} = 86.0 (jointflow-noreg 89.0; twinflow 59.3) -- the MoT
+  carries a clean-action state flow WITHOUT the twin's policy loss on TC; train act 0.266 / zstd
+  0.022 at ep 120 (the noreg signature). mot-flow-sig {72, 80, 60} = 70.7 (SIGReg joint 76.7; twin
+  59.3): SIGReg still costs ~15 on toolhang. MSE-head arms and all pusht arms pending.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
