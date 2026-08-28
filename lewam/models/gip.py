@@ -548,6 +548,8 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             grad_clip=float(ge.get("grad_clip", 10.0)),
             grad_tr=float(ge.get("grad_tr", 0.0)),
             grad_action_clip=float(ge.get("grad_action_clip", 3.0)),
+            pm_K=int(ge.get("pm_K", 0)),
+            plan_goal_time=bool(ge.get("plan_goal_time", True)),
             **(policy_kwargs or {}), **shared)
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
@@ -1469,6 +1471,10 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.grad_clip = float(kwargs.pop("grad_clip", 10.0))
         self.grad_tr = float(kwargs.pop("grad_tr", 0.0))                # penalty weight on ||U - U_warm||^2 (0 = off)
         self.grad_action_clip = float(kwargs.pop("grad_action_clip", 3.0))   # |z-scored action| bound (0 = off)
+        self.pm_K = int(kwargs.pop("pm_K", 0))                    # SteerMPC on MoT: noise draws per env (0 = plan_k)
+        # rollout scorers take the cost at each env's GOAL TIME (block H_i = remaining blocks,
+        # capped at plan_rollout) instead of after the last imagined block
+        self.plan_goal_time = bool(kwargs.pop("plan_goal_time", True))
         super().__init__(model, cfg, *args, **kwargs)
         assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok", "grad"), self.plan_mode
         if self.plan_mode == "oracle_bok":
@@ -1491,7 +1497,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_mode == "grad" and not getattr(model, "rollout_only", False):
             raise ValueError("plan_mode=grad is implemented on the MoT (rollout) dynamics only")
         if self.rollout_only:
-            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad"):
+            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad", "steer"):
                 raise ValueError(f"MoT plans by rollout only: plan_mode={self.plan_mode!r} has no rollout form")
             if self.plan_score != "joint":
                 raise ValueError("MoT has no one-block scorer: drop plan_score (planning is the rollout)")
@@ -1505,8 +1511,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             assert getattr(model, "goal_conditioning", False), \
                 "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
         if self.plan_rollout > 1:
-            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad"), "rollout planning: best_of_k / oracle_bok / grad"
-            if self.plan_mode in ("best_of_k", "grad"):
+            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad", "steer"), \
+                "rollout planning: best_of_k / oracle_bok / grad / steer"
+            if self.plan_mode in ("best_of_k", "grad", "steer"):
                 # the plan is H*fs raw actions; execute all of it by default, then replan.
                 # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
                 self.num_actions = self.plan_rollout * self.action_block
@@ -1554,7 +1561,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         elif self.plan_mode == "grad":
             plan = self._grad_plan(history, history_pad, z_goal, steps_t)
         elif self.plan_mode == "steer":
-            plan = self._steer(history, history_pad, z_goal, h_norm)
+            plan = (self._steer_rollout(history, history_pad, z_goal, steps_t) if self.rollout_only
+                    else self._steer(history, history_pad, z_goal, h_norm))
         else:
             plan = self._cem(history, history_pad, z_goal, h_norm, replan)
         if self._prev_plan is not None:
@@ -1562,13 +1570,30 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 self._prev_plan[i] = plan[row]
         return plan
 
+    def _goal_idx(self, steps, n_rows_per_env=1):
+        """Per-row index of the imagined block at the goal time: clamp(round(steps_left), 1, H) - 1,
+        or the last block when plan_goal_time is off / steps unknown."""
+        H = self.plan_rollout
+        if not self.plan_goal_time or steps is None:
+            return None
+        idx = (steps.round().clamp(min=1.0, max=float(H)).long() - 1)
+        return idx.repeat_interleave(n_rows_per_env, 0) if n_rows_per_env > 1 else idx
+
+    @staticmethod
+    def _at(zs, idx):
+        """zs (B, H, D) -> (B, D) at per-row block idx (None = last)."""
+        if idx is None:
+            return zs[:, -1]
+        return zs[torch.arange(zs.shape[0], device=zs.device), idx]
+
     def _imagine(self, h, p, goal_rep, steps_rep, given=None):
         """Autoregressive imagination over plan_rollout blocks for B = R*K rows (K candidates per
         replan row). Block k's actions come from given[:, k] (B, fs, adim) while k < given.shape[1]
         (imagined state via sample_inpaint under noise shared across a row's candidates), else
         from a fresh policy sample (its first fs actions). The imagined z (+1 block) slides into
         the history each unroll; GR checkpoints see h_norm counting down one block per unroll.
-        Returns (blocks (B, plan_rollout, fs, adim), z_final (B, D))."""
+        Returns (blocks (B, plan_rollout, fs, adim), z_final (B, D)) where z_final is the
+        imagined latent at each row's goal time (plan_goal_time) or after the last block."""
         fs, K = self.action_block, self.plan_k
         R = h.shape[0] // K
         A, adim = self.model.num_actions, self.model.action_raw_dim
@@ -1577,7 +1602,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         gen = self._gen(h.device)
         n_given = 0 if given is None else given.shape[1]
         n_rep = (A + fs - 1) // fs
-        blocks, z_next = [], None
+        blocks, zs, z_next = [], [], None
         for k in range(self.plan_rollout):
             cond = dict()
             if gc:
@@ -1600,9 +1625,10 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 blk = action[:, :fs]
             blocks.append(blk)
             z_next = z_imag[:, :1]
+            zs.append(z_next.squeeze(1))
             h = torch.cat([h[:, 1:], z_next], dim=1)
             p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
-        return torch.stack(blocks, 1), z_next.squeeze(1)
+        return torch.stack(blocks, 1), self._at(torch.stack(zs, 1), self._goal_idx(steps_rep))
 
     def _oracle_bok(self, history, history_pad, z_goal, h_norm, replan, steps=None):
         """Expert sequence vs K-1 wrong sequences, scored by the dynamics: one block ahead by
@@ -1676,21 +1702,98 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                   "  ".join(f"r{k}{'*' if od else ''}={h}/{n}" for (k, od), (h, n) in tab), flush=True)
         return cz.view(R, K, A, adim)[torch.arange(R, device=device), pick]
 
+    def _steer_rollout(self, history, history_pad, z_goal, steps):
+        """SteerMPC on MoT: Adam on a z_dim bias delta added to the goal latent fed to the POLICY,
+        through the frozen flow sampler and the dynamics rollout (plan_rollout blocks). K noise
+        realizations per env share one delta; the noise is fixed per replan, so delta -> cost is
+        deterministic. The state stream never sees the goal (MoT mask), so the dynamics and the
+        cost (vs the TRUE goal) are goal-blind; only behaviour selection is steered. Iterate 0
+        (delta=0) is the pure roll planner and stays in the set; the best-cost (candidate,
+        iterate) plan is returned. ||delta|| is capped at pm_rho*||z_goal||."""
+        assert getattr(self.model, "goal_conditioning", False), "steer needs a goal-conditioned policy"
+        R, fs, H = history.shape[0], self.action_block, self.plan_rollout
+        K = self.pm_K if self.pm_K > 0 else self.plan_k
+        A, adim = self.model.num_actions, self.model.action_raw_dim
+        S, D = self.model.num_states, self.model.z_dim
+        device = history.device
+        gen = self._gen(device)
+        steps_t = steps if steps is not None else torch.full((R,), float(H), device=device)
+        h0 = history.repeat_interleave(K, 0); p0 = history_pad.repeat_interleave(K, 0)
+        goal_rep = z_goal.repeat_interleave(K, 0); steps_rep = steps_t.repeat_interleave(K, 0)
+        noise_a = [torch.randn(R * K, A, adim, device=device, generator=gen) for _ in range(H)]
+        noise_s = [torch.randn(R * K, S, D, device=device, generator=gen) for _ in range(H)]
+        gnorm = z_goal.norm(dim=-1, keepdim=True)
+        rows = torch.arange(R, device=device)
+
+        gidx = self._goal_idx(steps_rep)
+
+        def rollout(delta):
+            zg = goal_rep + delta.repeat_interleave(K, 0)
+            h, p, zs, blocks = h0, p0, [], []
+            for k in range(H):
+                hk = (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
+                action, z_imag = self.model._sample_impl(h, p, z_goal=zg, h_norm=hk,
+                                                         noise_action=noise_a[k], noise_state=noise_s[k])
+                blocks.append(action[:, :fs])
+                zs.append(z_imag[:, 0])
+                h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
+                p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+            z = self._at(torch.stack(zs, 1), gidx)                          # latent at the goal time
+            cost = ((z - goal_rep) ** 2).mean(-1).view(R, K)              # vs the TRUE goal
+            return torch.stack(blocks, 1).view(R, K, H, fs, adim), cost
+
+        with torch.enable_grad():
+            delta = torch.zeros(R, D, device=device, requires_grad=True)
+            opt = torch.optim.Adam([delta], lr=self.pm_lr)
+            best_plan = best_cost = c0 = None
+            for it in range(self.pm_steps + 1):
+                blocks, cost = rollout(delta)
+                c, pick = cost.detach().min(1)                                # best candidate per env
+                cand = blocks.detach()[rows, pick]                            # (R, H, fs, adim)
+                if best_cost is None:
+                    best_cost, best_plan, c0 = c.clone(), cand.clone(), c.clone()
+                else:
+                    better = c < best_cost
+                    best_plan[better] = cand[better]
+                    best_cost = torch.where(better, c, best_cost)
+                if it == self.pm_steps:
+                    break
+                grad = torch.autograd.grad(cost.mean(), delta)[0]
+                if self.pm_random:
+                    r = torch.randn(R, D, device=device, generator=gen)
+                    grad = r * (grad.norm(dim=-1, keepdim=True) / r.norm(dim=-1, keepdim=True).clamp_min(1e-9))
+                opt.zero_grad(set_to_none=True)
+                delta.grad = grad
+                opt.step()
+                with torch.no_grad():
+                    scale = (self.pm_rho * gnorm / delta.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp(max=1.0)
+                    delta.mul_(scale)
+        st = self.__dict__.setdefault("_steer_stats", dict(n=0, improved=0, c0=0.0, cb=0.0, dn=0.0))
+        st["n"] += R; st["improved"] += int((best_cost < c0).sum())
+        st["c0"] += float(c0.sum()); st["cb"] += float(best_cost.sum())
+        st["dn"] += float((delta.detach().norm(dim=-1) / gnorm.squeeze(-1).clamp_min(1e-9)).sum())
+        if st["n"] % 50 < R:
+            print(f"[steer] {st['improved']}/{st['n']} replans improved on iterate 0 (best of {K}); mean cost "
+                  f"{st['c0'] / st['n']:.4f} -> {st['cb'] / st['n']:.4f}; mean ||delta||/||z_goal|| "
+                  f"{st['dn'] / st['n']:.3f} (steps {self.pm_steps}, lr {self.pm_lr}, rho {self.pm_rho})", flush=True)
+        return best_plan.reshape(R, H * fs, adim)
+
     def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U):
         """Differentiable terminal cost (R,) of the z-scored plan U (R, H, fs, adim) through the
         MoT's imagine_step; the graph flows through U only (history and goal are constants)."""
         h, p = history, history_pad
         gc = getattr(self.model, "goal_conditioning", False)
-        z = None
+        zs = []
         for k in range(U.shape[1]):
             cond = dict()
             if gc:
                 hk = (steps - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 cond = dict(z_goal=z_goal, h_norm=hk)
             z_imag = self.model.imagine_step(h, p, U[:, k], **cond)
-            z = z_imag[:, 0]
+            zs.append(z_imag[:, 0])
             h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
             p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+        z = self._at(torch.stack(zs, 1), self._goal_idx(steps))
         return ((z - z_goal) ** 2).mean(-1)
 
     def _grad_plan(self, history, history_pad, z_goal, steps):

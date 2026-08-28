@@ -357,6 +357,20 @@ beside each checkpoint.
   imperfect verifier over arbitrary sequences, and the planner works because the policy proposes
   on-manifold candidates (BoK-roll5 86.7) -- cold search over random sequences would not (the
   owner's "you can't cold-CEM our dynamics"). LeWM's own oracle was not run (owner: MoT-MSE only).**
+- **ORACLE DIAGNOSTIC (2026-08-29, devbox CPU, mot_nm, uniform rivals, K=32, eval seed 42; pick
+  rate by replan index, "*" = on-demo, i.e. every earlier pick was the expert so candidate 0 IS
+  the expert for the current state): r0* 47/50 = 94% -> r1* 36/47 = 77% -> r2* 26/36 = 72% ->
+  r3* 12/25 = 48% -> r4* 1/9 = 11%; off-demo replans 2-20%; SR 30.0 (H100 run: 32.0). So the
+  aggregate 29-50% mixed on- and off-demo replans (the retracted ".95^31" reading was wrong):
+  on the demo state the MoT dynamics picks the expert 94% among 32 at the first replan,
+  consistent with the offline pairwise 1.00. The decay over replans is the FIXED-HORIZON
+  artifact: the candidate is always 25 actions and the cost is taken 25 imagined steps out
+  while the goal is 20/15/10/5 steps away, so the demo's continuation PAST the goal leads
+  away from it (LeWM's exec5 collapse to 30.0 is the same artifact). FIX (code, next
+  commit): every rollout scorer takes the cost at the env's GOAL TIME -- the imagined block
+  at H_i = clamp(round(steps_left), 1, plan_rollout) -- instead of after the last block
+  (plan_goal_time, default on). BoK-roll5's 86.7 was measured with the last-block cost; the
+  goal-time cost is re-measured in the planning job.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
