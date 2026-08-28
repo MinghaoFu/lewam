@@ -153,7 +153,7 @@ beside each checkpoint.
   latent than under the wrong block); GOAL = P(expert block imagined closer to the goal). 0.5 =
   coin flip. Wrong blocks: zero, -expert, another state's expert block, same-episode other time,
   expert + {0.25,0.5,1,2}sigma noise (z-scored units), uniform over the action box.
-  TRUTH: LeWM (official hf ckpt) 1.00/1.00/1.00/0.99 | 0.86/0.95/0.99/1.00 | 1.00; unified
+  TRUTH: LeWM-repro (see LEWM CKPT NOTE) 1.00/1.00/1.00/0.99 | 0.86/0.95/0.99/1.00 | 1.00; unified
   roll2-nogoal 1.00/1.00/1.00/0.99 | 0.87/0.96/0.99/1.00 | 1.00; unified idm05 0.95/1.00/0.97/
   0.97 | 0.82/0.92/0.98/1.00 | 1.00; jf noreg anchor 0.53/0.54/0.53/0.56 | 0.52/0.55/0.49/0.53
   | 0.59 (pred err 1.23 vs real progress 0.023: the noise residual); jf sig04 0.57/0.67/0.62/
@@ -296,11 +296,19 @@ beside each checkpoint.
   other-time/+0.5s/+1s/+2s/uniform), gap/err 0.9-8x, endpoint error 0.48 vs start 2.96 (16% drift;
   LeWM 14%); mot-mse-sig 1.00/.99/.97/.99/1.00/1.00, gap/err 2.5-7.3x, 12% drift. Both at the
   LeWM/unified level over the planning horizon.**
-  LEWM READOUT PROBE (2026-08-29, official pusht LeWM encoder+projector, same ridge n=4000/1000):
-  agent_pos .931 block_pos .962 angle .755 (sincos .916) vel .513 -- i.e. LeWM's linear content
-  sits BETWEEN the MoT-MSE arms and unified (mot-mse-noreg .973/.980/.734/.586; unified .985/.935/
-  .711/.748) at SR ~93 (LeWM board) vs 69 (MoT). Second refutation of the readout hypothesis from
-  the other side: a 93-SR model carries no more linear block/angle information than our 69-SR one.
+  LEWM READOUT PROBE (2026-08-29, LeWM-repro encoder+projector, same ridge n=4000/1000):
+  agent_pos .931 block_pos .962 angle .755 (sincos .916) vel .513 -- between the MoT-MSE arms and
+  unified (mot-mse-noreg .973/.980/.734/.586; unified .985/.935/.711/.748) at SR 84.0 (measured,
+  below) vs 69 (MoT): a model 15 SR better carries no more linear block/angle information.
+  LEWM CKPT NOTE (owner caught 2026-08-29): every "LeWM" probe above (discrimination, rollout,
+  readout) used ckpts/hf_official/pusht_lewm_base = OUR from-scratch LeWM repro
+  (pusht_ours_lewm_weights.pt, L40S June; EXPERIMENTS.md "same-box CEM run-dir"), NOT the authors'
+  release. Weights differ from code/lewm_main_eval/hf_release_native/pusht (the HF release,
+  identical architecture) in all 303 tensors. MEASURED pusht SR on OUR eval (CEM, 3 seeds x 50):
+  authors' release 94/90/82 = 88.7 (lewm_full_repro/A2, 2026-07-30); our repro 84/88/80 = 84.0
+  (lewm_repro, 2026-07-03); our epoch-100 retrains 74-88 per seed, ~81 (B_ours/B_ours2). The "93"
+  quoted on 2026-08-29 was never measured here (the paper's CEM number in EXPERIMENTS.md is 82.5);
+  use 88.7 (release) / 84.0 (repro) for LeWM on pusht.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
