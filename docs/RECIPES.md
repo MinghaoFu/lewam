@@ -337,6 +337,26 @@ beside each checkpoint.
   any prefix, so every candidate ends near the goal. Neither is a verifier; round 2 (mf-c5ba118c,
   staged) scores full 25-action candidate sequences through the dynamics alone, with the authors'
   LeWM release under the same test + its own CEM SR, and BoK-roll5 on the flow-head arms.**
+- **ROUND 2 (2026-08-29, job mf-c5ba118c, code 15659d0; pusht, 3 eval seeds x 50, K=32).
+  FLOW-HEAD ARMS UNDER THE ROLLOUT PLANNER: mot-flow-noreg (mot_nf) BoK-roll5 {66,78,74} = 72.7
+  (reactive 73.3, inpaint 64.7); mot-flow-sig (mot_sf) {74,84,72} = 76.7 (reactive 72.7, inpaint
+  71.3). The planning gain is the MSE head's: +13-17 for mse-noreg/mse-sig vs -1/+4 for the flow
+  heads -- the flow state head (a denoiser at the noreg scale, coarser under SIGReg) does not carry
+  the rollout. RECIPE: MoT + MSE state head + rollout planning; SIGReg optional (84.7 vs 86.7).
+  LEWM RELEASE, OUR EVAL, FRESH: its own protocol (CEM 300x30, 5-block plan executed whole)
+  {94,88,82} = 88.0 (2026-07-30 A2: 94/90/82 = 88.7 -- reproduced); replanning every block with
+  the same fixed 5-block horizon (receding 1) {26,30,34} = 30.0 -- LeWM's plans are only good when
+  executed whole (fixed-horizon replanning aims at the goal 25 steps out at every replan; the
+  goal-conditioned MoT policy is time-aware through h_norm and does not suffer this).
+  FULL-HORIZON ORACLE, MoT-MSE (expert's next 25 raw actions vs 31 wrong 25-action sequences, all
+  5 blocks imagined by the dynamics alone, cost at the goal time, execute the first block):
+  mot_nm uniform-box {32,38,26} = 32.0 with the expert picked 29-50% of replans, other-demo
+  {18,18,10} = 15.3 (19-23%); mot_sm uniform 22.7 (26-34%), other-demo 14.7 (20-25%); chance 3%.
+  Consistent with the offline rollout probe (expert-first PAIRWISE .93-1.00): 31 independent
+  wrong candidates at ~.95 pairwise give ~.95^31 = 20% top-1. So the MoT dynamics is a real but
+  imperfect verifier over arbitrary sequences, and the planner works because the policy proposes
+  on-manifold candidates (BoK-roll5 86.7) -- cold search over random sequences would not (the
+  owner's "you can't cold-CEM our dynamics"). LeWM's own oracle was not run (owner: MoT-MSE only).**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
