@@ -219,8 +219,17 @@ beside each checkpoint.
   twinflow .985/.96/.78/.90/.97/.99. Endpoint error of the expert rollout vs start distance: LeWM
   2.1/14.8, unified 2.1/17.3, twin 9.8/22.3. So over the planning horizon latent goal-distance DOES
   rank the expert trajectory first for every model with real dynamics (the one-step "goal" test
-  was an artifact, withdrawn); the twin drifts more but discriminates. jf noreg/sigreg and the
-  flow-head unified ckpt are queued on the devbox (8-core cgroup: slow).**
+  was an artifact, withdrawn); the twin drifts more but discriminates.
+  Completed 2026-08-28: unified flow-head (pusht_uni_flowH5_full) one-step truth .99/.98/.83/
+  .93/.98/.99/1.00, rollout expert-first 1.00/.98/.92/.97/.99/1.00 -- the flow policy head leaves
+  the MSE dynamics intact. jointflow-noreg rollout: expert-first .95/.90/.69/.80/.91/.99 BUT
+  hair-thin: endpoint error 0.56 vs start distance 0.53 (the rollout barely leaves z_t) and gaps
+  of 0.01-0.5x that error; jointflow-sigreg .83/.79/.56/.64/.76/.93 with gaps 0.01-0.85x its 8.9
+  error. Gap/error for the wrong-sequence types (how far a wrong plan lands vs the expert plan's
+  own error): LeWM 2.9-6.6x, unified 2.1-8.7x, flow-head unified 0.6-3.5x, twin 0.3-2.1x, jf
+  sigreg 0.01-0.85x, jf noreg 0.01-0.5x. Pairwise accuracy alone overstates the joint models:
+  their preference is correctly signed but negligible in magnitude, which is what a planner
+  scoring near-expert candidates actually meets (BoK score std 0.003).**
 - **MOTFLOW (owner design 2026-08-28; lewam/models/motflow.py, --model motflow, commit see git):
   Mixture-of-Transformers joint model: separate state/action streams (own QKV/out/FFN/AdaLN), ONE
   global attention under a fixed mask. Tokens: z_hist, z* (S noisy next states or mse queries),
