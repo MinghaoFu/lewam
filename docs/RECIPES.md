@@ -296,6 +296,11 @@ beside each checkpoint.
   other-time/+0.5s/+1s/+2s/uniform), gap/err 0.9-8x, endpoint error 0.48 vs start 2.96 (16% drift;
   LeWM 14%); mot-mse-sig 1.00/.99/.97/.99/1.00/1.00, gap/err 2.5-7.3x, 12% drift. Both at the
   LeWM/unified level over the planning horizon.**
+  LEWM READOUT PROBE (2026-08-29, official pusht LeWM encoder+projector, same ridge n=4000/1000):
+  agent_pos .931 block_pos .962 angle .755 (sincos .916) vel .513 -- i.e. LeWM's linear content
+  sits BETWEEN the MoT-MSE arms and unified (mot-mse-noreg .973/.980/.734/.586; unified .985/.935/
+  .711/.748) at SR ~93 (LeWM board) vs 69 (MoT). Second refutation of the readout hypothesis from
+  the other side: a 93-SR model carries no more linear block/angle information than our 69-SR one.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
