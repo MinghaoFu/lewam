@@ -549,6 +549,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             grad_tr=float(ge.get("grad_tr", 0.0)),
             grad_action_clip=float(ge.get("grad_action_clip", 3.0)),
             pm_K=int(ge.get("pm_K", 0)),
+            pm_chunk=int(ge.get("pm_chunk", 8)),
             plan_goal_time=bool(ge.get("plan_goal_time", True)),
             **(policy_kwargs or {}), **shared)
 
@@ -1472,6 +1473,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.grad_tr = float(kwargs.pop("grad_tr", 0.0))                # penalty weight on ||U - U_warm||^2 (0 = off)
         self.grad_action_clip = float(kwargs.pop("grad_action_clip", 3.0))   # |z-scored action| bound (0 = off)
         self.pm_K = int(kwargs.pop("pm_K", 0))                    # SteerMPC on MoT: noise draws per env (0 = plan_k)
+        self.pm_chunk = int(kwargs.pop("pm_chunk", 8))            # SteerMPC on MoT: envs per optimization batch (memory)
         # rollout scorers take the cost at each env's GOAL TIME (block H_i = remaining blocks,
         # capped at plan_rollout) instead of after the last imagined block
         self.plan_goal_time = bool(kwargs.pop("plan_goal_time", True))
@@ -1703,6 +1705,17 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         return cz.view(R, K, A, adim)[torch.arange(R, device=device), pick]
 
     def _steer_rollout(self, history, history_pad, z_goal, steps):
+        """SteerMPC on MoT over all replanning envs, optimized pm_chunk envs at a time (each env's
+        delta is independent; the chunking only bounds the autograd graph)."""
+        R = history.shape[0]
+        plans = []
+        for lo in range(0, R, max(1, self.pm_chunk)):
+            hi = min(R, lo + max(1, self.pm_chunk))
+            plans.append(self._steer_rollout_chunk(history[lo:hi], history_pad[lo:hi], z_goal[lo:hi],
+                                                   None if steps is None else steps[lo:hi]))
+        return torch.cat(plans, 0)
+
+    def _steer_rollout_chunk(self, history, history_pad, z_goal, steps):
         """SteerMPC on MoT: Adam on a z_dim bias delta added to the goal latent fed to the POLICY,
         through the frozen flow sampler and the dynamics rollout (plan_rollout blocks). K noise
         realizations per env share one delta; the noise is fixed per replan, so delta -> cost is
