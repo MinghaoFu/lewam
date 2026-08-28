@@ -286,14 +286,18 @@ class MoTFlow(nn.Module):
     def sample(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None):
         return self._sample_impl(z_history, history_pad, generator, z_goal, h_norm)
 
-    @torch.no_grad()
-    def predict_state(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
-        """The MoT's one dynamics primitive: the state token(s) one block ahead of the history,
-        from the CLEAN actions of that block (the first n_clean of `actions`). Planning is the
-        autoregressive rollout over this step (gip.JointFlowPlanPolicy._imagine); there is no
-        one-block "inpaint" scorer for MoT."""
+    def imagine_step(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
+        """The MoT's one dynamics primitive, gradients enabled: the state token(s) one block ahead
+        of the history from the CLEAN actions of that block (the first n_clean of `actions`).
+        Differentiable in `actions` (gradient planning) and in the history latents."""
         return self._state_phase(z_history, history_pad, actions[:, :self.n_clean], noise_state,
                                  None, z_goal, h_norm)
+
+    @torch.no_grad()
+    def predict_state(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
+        """imagine_step without gradients. Planning is the autoregressive rollout over this step
+        (gip.JointFlowPlanPolicy._imagine); there is no one-block "inpaint" scorer for MoT."""
+        return self.imagine_step(z_history, history_pad, actions, noise_state, z_goal, h_norm)
 
     @torch.no_grad()
     def sample_inpaint(self, z_history, history_pad, action_plan, noise_action=None,

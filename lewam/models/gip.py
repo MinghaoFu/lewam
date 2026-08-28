@@ -543,6 +543,11 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             pm_rho=float(ge.get("pm_rho", 0.3)),
             pm_random=bool(ge.get("pm_random", False)),
             oracle_cands=str(ge.get("oracle_cands", "uniform")),
+            grad_steps=int(ge.get("grad_steps", 50)),
+            grad_lr=float(ge.get("grad_lr", 0.05)),
+            grad_clip=float(ge.get("grad_clip", 10.0)),
+            grad_tr=float(ge.get("grad_tr", 0.0)),
+            grad_action_clip=float(ge.get("grad_action_clip", 3.0)),
             **(policy_kwargs or {}), **shared)
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
@@ -1457,8 +1462,15 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         # world model as verifier recovers the demo's success when the expert IS in the set.
         self.oracle_cands = str(kwargs.pop("oracle_cands", "uniform"))
         self.expert_actions = kwargs.pop("expert_actions", None)   # per env: (T, adim) raw, from the start step
+        # plan_mode=grad (MoT only): Adam on the z-scored H-block plan through the differentiable
+        # rollout, warm-started from the best of plan_k policy rollouts; warm start = floor.
+        self.grad_steps = int(kwargs.pop("grad_steps", 50))
+        self.grad_lr = float(kwargs.pop("grad_lr", 0.05))
+        self.grad_clip = float(kwargs.pop("grad_clip", 10.0))
+        self.grad_tr = float(kwargs.pop("grad_tr", 0.0))                # penalty weight on ||U - U_warm||^2 (0 = off)
+        self.grad_action_clip = float(kwargs.pop("grad_action_clip", 3.0))   # |z-scored action| bound (0 = off)
         super().__init__(model, cfg, *args, **kwargs)
-        assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok"), self.plan_mode
+        assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok", "grad"), self.plan_mode
         if self.plan_mode == "oracle_bok":
             assert self.expert_actions is not None, "oracle_bok needs the demo actions (eval_gip passes them)"
             assert self.oracle_cands in ("uniform", "shuffle"), self.oracle_cands
@@ -1467,14 +1479,19 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             self._raw_done = None
             self._oracle_rng = np.random.default_rng(self._flow_seed + 101)
             self._oracle_hits, self._oracle_n = 0, 0
+            self._oracle_idx = None                # per env: replans so far in the episode
+            self._oracle_ondemo = None             # per env: every pick so far was the expert
+            self._oracle_tab = {}                  # (replan_idx, ondemo) -> [hits, n]
         assert self.model.num_states > 0, "planning needs imagined state tokens"
         # MoT (model.rollout_only): the dynamics is a one-block step, so planning IS the
         # autoregressive rollout to the goal time -- plan_rollout defaults to the goal horizon in
         # blocks, one block executes per replan, and the joint model's one-block scorers
         # (plan_score=inpaint, cem, steer) are refused (owner 2026-08-29).
         self.rollout_only = bool(getattr(model, "rollout_only", False))
+        if self.plan_mode == "grad" and not getattr(model, "rollout_only", False):
+            raise ValueError("plan_mode=grad is implemented on the MoT (rollout) dynamics only")
         if self.rollout_only:
-            if self.plan_mode not in ("best_of_k", "oracle_bok"):
+            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad"):
                 raise ValueError(f"MoT plans by rollout only: plan_mode={self.plan_mode!r} has no rollout form")
             if self.plan_score != "joint":
                 raise ValueError("MoT has no one-block scorer: drop plan_score (planning is the rollout)")
@@ -1488,8 +1505,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             assert getattr(model, "goal_conditioning", False), \
                 "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
         if self.plan_rollout > 1:
-            assert self.plan_mode in ("best_of_k", "oracle_bok"), "rollout planning: best_of_k / oracle_bok"
-            if self.plan_mode == "best_of_k":
+            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad"), "rollout planning: best_of_k / oracle_bok / grad"
+            if self.plan_mode in ("best_of_k", "grad"):
                 # the plan is H*fs raw actions; execute all of it by default, then replan.
                 # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
                 self.num_actions = self.plan_rollout * self.action_block
@@ -1511,6 +1528,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             self._prev_plan[i] = None
         if getattr(self, "_raw_done", None) is not None:
             self._raw_done[i] = 0
+            if self._oracle_idx is not None:
+                self._oracle_idx[i] = 0; self._oracle_ondemo[i] = True
 
     @staticmethod
     def _final_cost(z_imag, z_goal):
@@ -1532,6 +1551,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
         elif self.plan_mode == "oracle_bok":
             plan = self._oracle_bok(history, history_pad, z_goal, h_norm, replan, steps=steps_t)
+        elif self.plan_mode == "grad":
+            plan = self._grad_plan(history, history_pad, z_goal, steps_t)
         elif self.plan_mode == "steer":
             plan = self._steer(history, history_pad, z_goal, h_norm)
         else:
@@ -1594,6 +1615,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         A = self.plan_rollout * self.action_block if self.plan_rollout > 1 else self.model.num_actions
         if self._raw_done is None:
             self._raw_done = np.zeros(len(self.expert_actions), dtype=int)
+            self._oracle_idx = np.zeros(len(self.expert_actions), dtype=int)
+            self._oracle_ondemo = np.ones(len(self.expert_actions), dtype=bool)
         amean = self._amean.cpu().numpy(); astd = self._astd.cpu().numpy()
         cands = np.zeros((R, K, A, adim), np.float32)
         for row, i in enumerate(replan):
@@ -1634,14 +1657,94 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         pick = cost.argmin(1)
         self._oracle_hits += int((pick == 0).sum()); self._oracle_n += R
         take = self._take()
-        for i in replan:
+        pick_np = pick.cpu().numpy()
+        for row, i in enumerate(replan):
+            key = (int(self._oracle_idx[i]), bool(self._oracle_ondemo[i]))
+            cell = self._oracle_tab.setdefault(key, [0, 0])
+            cell[0] += int(pick_np[row] == 0); cell[1] += 1
+            self._oracle_idx[i] += 1
+            if pick_np[row] != 0:
+                self._oracle_ondemo[i] = False
             self._raw_done[i] += take
         if self._oracle_n % 50 < R:
             print(f"[oracle] expert picked {self._oracle_hits}/{self._oracle_n} = "
                   f"{100.0 * self._oracle_hits / max(1, self._oracle_n):.1f}% of replans "
                   f"(cands={self.oracle_cands}, K={K}, score="
                   f"{'rollout%d' % self.plan_rollout if self.plan_rollout > 1 else 'inpaint'})", flush=True)
+            tab = sorted(self._oracle_tab.items())
+            print("[oracle] by replan index (on-demo = every earlier pick was the expert): " +
+                  "  ".join(f"r{k}{'*' if od else ''}={h}/{n}" for (k, od), (h, n) in tab), flush=True)
         return cz.view(R, K, A, adim)[torch.arange(R, device=device), pick]
+
+    def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U):
+        """Differentiable terminal cost (R,) of the z-scored plan U (R, H, fs, adim) through the
+        MoT's imagine_step; the graph flows through U only (history and goal are constants)."""
+        h, p = history, history_pad
+        gc = getattr(self.model, "goal_conditioning", False)
+        z = None
+        for k in range(U.shape[1]):
+            cond = dict()
+            if gc:
+                hk = (steps - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
+                cond = dict(z_goal=z_goal, h_norm=hk)
+            z_imag = self.model.imagine_step(h, p, U[:, k], **cond)
+            z = z_imag[:, 0]
+            h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
+            p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+        return ((z - z_goal) ** 2).mean(-1)
+
+    def _grad_plan(self, history, history_pad, z_goal, steps):
+        """Gradient planning on the MoT dynamics: warm start = the best of plan_k policy rollouts
+        (the roll planner), then grad_steps of Adam on the z-scored H-block plan against the
+        differentiable terminal cost; the warm start is a floor and the best iterate by model
+        cost is returned (its first block executes)."""
+        R, K, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
+        device = history.device
+        steps_t = steps if steps is not None else torch.full((R,), float(H), device=device)
+        with torch.no_grad():
+            h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
+            goal_rep = z_goal.repeat_interleave(K, 0)
+            blocks, z_final = self._imagine(h, p, goal_rep, steps_t.repeat_interleave(K, 0))
+            cost0 = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
+            pick = cost0.argmin(1)
+            rows = torch.arange(R, device=device)
+            U0 = blocks.view(R, K, H, fs, -1)[rows, pick].detach()          # (R, H, fs, adim)
+            c_warm = cost0[rows, pick].detach()
+        if self.grad_steps <= 0:
+            return U0.reshape(R, H * fs, -1)
+        best_U, best_c = U0.clone(), c_warm.clone()
+        U = U0.clone().requires_grad_(True)
+        opt = torch.optim.Adam([U], lr=self.grad_lr)
+        with torch.enable_grad():
+            for it in range(self.grad_steps + 1):
+                c = self._rollout_cost_grad(history, history_pad, z_goal, steps_t, U)
+                with torch.no_grad():
+                    better = c < best_c
+                    best_c = torch.where(better, c.detach(), best_c)
+                    best_U[better] = U.detach()[better]
+                if it == self.grad_steps:
+                    break
+                loss = c.sum()
+                if self.grad_tr > 0:
+                    loss = loss + self.grad_tr * ((U - U0) ** 2).sum()
+                opt.zero_grad()
+                loss.backward()
+                if self.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_([U], self.grad_clip)
+                opt.step()
+                if self.grad_action_clip > 0:
+                    with torch.no_grad():
+                        U.clamp_(-self.grad_action_clip, self.grad_action_clip)
+        # diagnostics: how often and by how much the refinement beats the policy's best rollout
+        st = self.__dict__.setdefault("_grad_stats", dict(n=0, improved=0, c_warm=0.0, c_best=0.0, du=0.0))
+        st["n"] += R; st["improved"] += int((best_c < c_warm).sum())
+        st["c_warm"] += float(c_warm.sum()); st["c_best"] += float(best_c.sum())
+        st["du"] += float((best_U - U0).flatten(1).norm(dim=1).sum())
+        if st["n"] % 50 < R:
+            print(f"[grad] {st['improved']}/{st['n']} replans improved on the warm start; mean cost "
+                  f"{st['c_warm'] / st['n']:.4f} -> {st['c_best'] / st['n']:.4f}; mean ||U-U0|| "
+                  f"{st['du'] / st['n']:.3f} (steps {self.grad_steps}, lr {self.grad_lr}, tr {self.grad_tr})", flush=True)
+        return best_U.detach().reshape(R, H * fs, -1)
 
     def _cond_args(self, z_goal, h_norm, repeat):
         if not getattr(self.model, "goal_conditioning", False):
