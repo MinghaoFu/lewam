@@ -270,7 +270,17 @@ beside each checkpoint.
   top-1 other-state .71 (twin .77, LeWM .93). So real dynamics need the well-scaled (SIGReg)
   latent, and SIGReg is what costs the TC policy: the trade-off is now measured consistently across
   joint, twin and MoT. Open knob: w_reg was never tuned (0.04; raw SIGReg 4-20 x 0.04 ~ act loss).
-  pusht MSE arms pending.**
+  PUSHT MSE-HEAD ARMS: mot-mse-noreg planning {58,78,72} = 69.3 / reactive {66,76,64} = 68.7,
+  readouts agent_pos .973 block_pos .980 angle .734 (sincos .882) vel .586 -- block readouts ABOVE
+  unified's (.935/.711); mot-mse-sig 71.3 / {66,80,70} = 72.0, readouts .973/.945/.729/.649 (=
+  unified's). Neither collapsed (zstd 0.14 / 0.99). PUSHT GRID (plan / react): flow-noreg 64.7/73.3,
+  flow-sig 71.3/72.7, mse-noreg 69.3/68.7, mse-sig 71.3/72.0 -- one band, 69-73, vs unified 87-89.
+  READOUT HYPOTHESIS REFUTED: two MoT arms carry unified-level (or better) linear block/angle
+  information and still score in the jointflow band, so the pusht gap is not the encoder's linear
+  content. Remaining differences vs unified (roll2-nogoal 89.2): 5-frame aggregated context vs
+  2-frame history; one-block MSE point policy vs 10-action flow policy (unified's own flow head
+  reached 86.8, so the head alone is not it); ViT-tiny z192 vs resnet18dp (jf sigvit 62 < sig04 74
+  says the ViT is not it); 200-ep bs48 raw-anchor pipeline vs 50-ep bs128 fs-strided cache.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
