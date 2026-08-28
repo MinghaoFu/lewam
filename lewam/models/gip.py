@@ -1461,12 +1461,13 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             assert getattr(model, "goal_conditioning", False), \
                 "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
         if self.plan_rollout > 1:
-            assert self.plan_mode == "best_of_k", "rollout planning implements best_of_k only"
-            # the plan is H*fs raw actions; execute all of it by default, then replan.
-            # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
-            self.num_actions = self.plan_rollout * self.action_block
-            if self.exec_actions == 0:
-                self.exec_actions = self.num_actions
+            assert self.plan_mode in ("best_of_k", "oracle_bok"), "rollout planning: best_of_k / oracle_bok"
+            if self.plan_mode == "best_of_k":
+                # the plan is H*fs raw actions; execute all of it by default, then replan.
+                # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
+                self.num_actions = self.plan_rollout * self.action_block
+                if self.exec_actions == 0:
+                    self.exec_actions = self.num_actions
         self.type = f"jointflow_plan_{self.plan_mode}"
         if getattr(model, "goal_conditioning", False):
             # GR checkpoints train on anchor-spaced history -> encode only at replans
@@ -1503,7 +1504,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_mode == "best_of_k":
             plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
         elif self.plan_mode == "oracle_bok":
-            plan = self._oracle_bok(history, history_pad, z_goal, h_norm, replan)
+            plan = self._oracle_bok(history, history_pad, z_goal, h_norm, replan, steps=steps_t)
         elif self.plan_mode == "steer":
             plan = self._steer(history, history_pad, z_goal, h_norm)
         else:
@@ -1513,8 +1514,49 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 self._prev_plan[i] = plan[row]
         return plan
 
-    def _oracle_bok(self, history, history_pad, z_goal, h_norm, replan):
-        """Expert chunk vs K-1 wrong chunks, scored by the dynamics (inpaint, shared noise)."""
+    def _imagine(self, h, p, goal_rep, steps_rep, given=None):
+        """Autoregressive imagination over plan_rollout blocks for B = R*K rows (K candidates per
+        replan row). Block k's actions come from given[:, k] (B, fs, adim) while k < given.shape[1]
+        (imagined state via sample_inpaint under noise shared across a row's candidates), else
+        from a fresh policy sample (its first fs actions). The imagined z (+1 block) slides into
+        the history each unroll; GR checkpoints see h_norm counting down one block per unroll.
+        Returns (blocks (B, plan_rollout, fs, adim), z_final (B, D))."""
+        fs, K = self.action_block, self.plan_k
+        R = h.shape[0] // K
+        A, adim = self.model.num_actions, self.model.action_raw_dim
+        S, D = self.model.num_states, self.model.z_dim
+        gc = getattr(self.model, "goal_conditioning", False)
+        gen = self._gen(h.device)
+        n_given = 0 if given is None else given.shape[1]
+        n_rep = (A + fs - 1) // fs
+        blocks, z_next = [], None
+        for k in range(self.plan_rollout):
+            cond = dict()
+            if gc:
+                hk = (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
+                cond = dict(z_goal=goal_rep, h_norm=hk)
+            if k < n_given:
+                blk = given[:, k]
+                nxt = given[:, k + 1] if k + 1 < n_given else blk
+                plan = torch.cat([blk] + [nxt] * (n_rep - 1), 1)[:, :A]
+                noise_a = torch.randn(R, 1, A, adim, device=h.device, generator=gen) \
+                    .expand(R, K, A, adim).reshape(R * K, A, adim)
+                noise_s = torch.randn(R, 1, S, D, device=h.device, generator=gen) \
+                    .expand(R, K, S, D).reshape(R * K, S, D)
+                z_imag = self.model.sample_inpaint(h, p, plan, noise_action=noise_a, noise_state=noise_s, **cond)
+            else:
+                action, z_imag = self.model.sample(h, p, generator=gen, **cond)
+                blk = action[:, :fs]
+            blocks.append(blk)
+            z_next = z_imag[:, :1]
+            h = torch.cat([h[:, 1:], z_next], dim=1)
+            p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+        return torch.stack(blocks, 1), z_next.squeeze(1)
+
+    def _oracle_bok(self, history, history_pad, z_goal, h_norm, replan, steps=None):
+        """Expert chunk vs K-1 wrong chunks, scored by the dynamics: one block ahead by inpaint
+        (plan_rollout 1, shared noise) or by rollout to the goal time (plan_rollout H: the
+        candidate's blocks are imagined first, the policy continues in imagination)."""
         device = history.device
         R, K = history.shape[0], self.plan_k
         A, adim = self.model.num_actions, self.model.action_raw_dim
@@ -1547,9 +1589,16 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         noise_a = torch.randn(R, 1, A, adim, device=device, generator=gen).expand(R, K, A, adim).reshape(R * K, A, adim)
         S, D = self.model.num_states, self.model.z_dim
         noise_s = torch.randn(R, 1, S, D, device=device, generator=gen).expand(R, K, S, D).reshape(R * K, S, D)
-        z_imag = self.model.sample_inpaint(h, p, cz, noise_action=noise_a, noise_state=noise_s,
-                                           **self._cond_args(z_goal, h_norm, K))
-        cost = self._final_cost(z_imag, goal_rep).view(R, K)
+        if self.plan_rollout > 1:
+            fs = self.action_block
+            assert A % fs == 0, (A, fs)
+            steps_rep = steps.repeat_interleave(K, 0) if steps is not None else None
+            _, z_final = self._imagine(h, p, goal_rep, steps_rep, given=cz.view(R * K, A // fs, fs, adim))
+            cost = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
+        else:
+            z_imag = self.model.sample_inpaint(h, p, cz, noise_action=noise_a, noise_state=noise_s,
+                                               **self._cond_args(z_goal, h_norm, K))
+            cost = self._final_cost(z_imag, goal_rep).view(R, K)
         pick = cost.argmin(1)
         self._oracle_hits += int((pick == 0).sum()); self._oracle_n += R
         take = self._take()
@@ -1558,7 +1607,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self._oracle_n % 50 < R:
             print(f"[oracle] expert picked {self._oracle_hits}/{self._oracle_n} = "
                   f"{100.0 * self._oracle_hits / max(1, self._oracle_n):.1f}% of replans "
-                  f"(cands={self.oracle_cands}, K={K})", flush=True)
+                  f"(cands={self.oracle_cands}, K={K}, score="
+                  f"{'rollout%d' % self.plan_rollout if self.plan_rollout > 1 else 'inpaint'})", flush=True)
         return cz.view(R, K, A, adim)[torch.arange(R, device=device), pick]
 
     def _cond_args(self, z_goal, h_norm, repeat):
@@ -1590,28 +1640,15 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             cost = self._final_cost(z_imag, goal_rep).view(R, K)
             pick = cost.argmin(1)
             return action.view(R, K, *action.shape[1:])[torch.arange(R, device=action.device), pick]
-        # autoregressive imagination: H unrolls of the joint denoiser; keep the first
-        # frameskip block per unroll, feed the imagined z (slot at +1 obs step) back as
-        # history. GR checkpoints condition every unroll on the goal, with h_norm counting
-        # down one obs step per imagined step.
+        # autoregressive imagination (owner's MoT planner): policy proposes, the first block
+        # goes through the dynamics, the imagined z slides into the history, plan_rollout
+        # times to the goal time; cost on the final imagined z (see _imagine).
         fs = self.action_block
         gc = getattr(self.model, "goal_conditioning", False)
         steps_rep = steps.repeat_interleave(K, 0) if gc else None
-        plan_parts = []
-        for k in range(self.plan_rollout):
-            if gc:
-                hk = ((steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max))
-                      / float(self.H_max))
-                action, z_imag = self.model.sample(h, p, z_goal=goal_rep, h_norm=hk,
-                                                   generator=self._gen(h.device))
-            else:
-                action, z_imag = self.model.sample(h, p, generator=self._gen(h.device))
-            plan_parts.append(action[:, :fs])
-            z_next = z_imag[:, :1]
-            h = torch.cat([h[:, 1:], z_next], dim=1)
-            p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
-        cost = ((z_next.squeeze(1) - goal_rep) ** 2).mean(-1).view(R, K)
-        plan = torch.cat(plan_parts, dim=1).view(R, K, self.plan_rollout * fs, -1)
+        blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)
+        cost = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
+        plan = blocks.reshape(R, K, self.plan_rollout * fs, -1)
         pick = cost.argmin(1)
         return plan[torch.arange(R, device=plan.device), pick]
 
