@@ -262,7 +262,15 @@ beside each checkpoint.
   the lowest toolhang policy losses on record (act 0.200 / 0.189 at ep 120 vs noreg joint 0.26):
   open-loop loss and closed-loop SR disagree again. TOOLHANG GRID: flow-noreg 86.0 > mse-noreg 80.7
   > flow-sig 70.7 > mse-sig 54.7 (jointflow 89.0 / 76.7; twin 59.3). SIGReg costs 15-26 in every
-  architecture; MSE state head costs 5-16 vs flow. pusht MSE arms pending.**
+  architecture; MSE state head costs 5-16 vs flow.
+  ONE-STEP ACTION DISCRIMINATION of the pusht MoT state flows (200 anchors x 32): mot-flow-noreg
+  at CHANCE everywhere (truth .47-.58; pred err 1.31 vs progress 0.035 = the noise residual) -- with
+  the 0.03-scale latent the state flow is a denoiser no matter how cleanly it is conditioned;
+  mot-flow-sig truth .97/1.00/.98/.96 gross, .58/.77/.89/.98 at 0.25/0.5/1/2 sigma, 1.00 uniform;
+  top-1 other-state .71 (twin .77, LeWM .93). So real dynamics need the well-scaled (SIGReg)
+  latent, and SIGReg is what costs the TC policy: the trade-off is now measured consistently across
+  joint, twin and MoT. Open knob: w_reg was never tuned (0.04; raw SIGReg 4-20 x 0.04 ~ act loss).
+  pusht MSE arms pending.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
