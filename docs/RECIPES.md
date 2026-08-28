@@ -371,6 +371,13 @@ beside each checkpoint.
   at H_i = clamp(round(steps_left), 1, plan_rollout) -- instead of after the last block
   (plan_goal_time, default on). BoK-roll5's 86.7 was measured with the last-block cost; the
   goal-time cost is re-measured in the planning job.**
+- **ORACLE, CORRECTED (2026-08-29, devbox CPU, code c132fbc, mot_nm, expert's remaining demo
+  actions vs 31 uniform-box sequences, K=32, cost at the goal time, exec5, eval seed 42 x 50):
+  SR 96.0; expert picked 47/50, 47/47, 47/47, 46/46, 41/42 at on-demo replans 1-5 (98%/replan),
+  235/251 = 93.6% overall (chance 3%). The owner's sanity check ("expert vs K-1 random -> dynamics
+  for planning -> SR recovers to 95-100") PASSES: the MoT-MSE-noreg dynamics, used as the verifier
+  with the correct receding-horizon cost, recovers the demo's success. The 30-32 measured before
+  was the fixed-horizon scoring artifact, not the dynamics.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
