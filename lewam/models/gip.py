@@ -678,6 +678,17 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
         raise ValueError(f"unknown gip_eval.mode={mode!r})")
 
     config = swm.PlanConfig(**cfg.plan_config)
+    ge = cfg.get("gip_eval", {})
+    if mode == "planning" and str(ge.get("plan_mode", "")) == "oracle_bok":
+        # owner sanity check: the world model scores a fixed set (expert + K-1 wrong sequences)
+        # with its own rollout cost instead of running CEM (lewam/models/oracle_solver.py)
+        from lewam.models.oracle_solver import OracleSolver, OracleWorldModelPolicy
+        pk = policy_kwargs or {}
+        assert "expert_actions" in pk, "oracle_bok needs the demo actions (eval_gip passes them)"
+        solver = OracleSolver(model, pk["expert_actions"], cands=str(ge.get("oracle_cands", "uniform")),
+                              k=int(ge.get("plan_k", 32)), seed=int(cfg.seed),
+                              device="cuda" if torch.cuda.is_available() else "cpu")
+        return OracleWorldModelPolicy(solver=solver, config=config, process=process, transform=transform)
     solver = hydra_instantiate(cfg.solver, model=model)
     return swm.policy.WorldModelPolicy(
         solver=solver, config=config, process=process, transform=transform
@@ -1554,12 +1565,14 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         return torch.stack(blocks, 1), z_next.squeeze(1)
 
     def _oracle_bok(self, history, history_pad, z_goal, h_norm, replan, steps=None):
-        """Expert chunk vs K-1 wrong chunks, scored by the dynamics: one block ahead by inpaint
-        (plan_rollout 1, shared noise) or by rollout to the goal time (plan_rollout H: the
-        candidate's blocks are imagined first, the policy continues in imagination)."""
+        """Expert sequence vs K-1 wrong sequences, scored by the dynamics: one block ahead by
+        inpaint (plan_rollout 1: chunks of num_actions raw actions, shared noise) or by rollout to
+        the goal time (plan_rollout H: sequences of H*fs raw actions, every block imagined from
+        the given actions, no policy continuation)."""
         device = history.device
         R, K = history.shape[0], self.plan_k
-        A, adim = self.model.num_actions, self.model.action_raw_dim
+        adim = self.model.action_raw_dim
+        A = self.plan_rollout * self.action_block if self.plan_rollout > 1 else self.model.num_actions
         if self._raw_done is None:
             self._raw_done = np.zeros(len(self.expert_actions), dtype=int)
         amean = self._amean.cpu().numpy(); astd = self._astd.cpu().numpy()
@@ -1586,14 +1599,14 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0)
         gen = self._gen(device)
-        noise_a = torch.randn(R, 1, A, adim, device=device, generator=gen).expand(R, K, A, adim).reshape(R * K, A, adim)
+        Am = self.model.num_actions
+        noise_a = torch.randn(R, 1, Am, adim, device=device, generator=gen).expand(R, K, Am, adim).reshape(R * K, Am, adim)
         S, D = self.model.num_states, self.model.z_dim
         noise_s = torch.randn(R, 1, S, D, device=device, generator=gen).expand(R, K, S, D).reshape(R * K, S, D)
         if self.plan_rollout > 1:
             fs = self.action_block
-            assert A % fs == 0, (A, fs)
             steps_rep = steps.repeat_interleave(K, 0) if steps is not None else None
-            _, z_final = self._imagine(h, p, goal_rep, steps_rep, given=cz.view(R * K, A // fs, fs, adim))
+            _, z_final = self._imagine(h, p, goal_rep, steps_rep, given=cz.view(R * K, self.plan_rollout, fs, adim))
             cost = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
         else:
             z_imag = self.model.sample_inpaint(h, p, cz, noise_action=noise_a, noise_state=noise_s,
