@@ -252,7 +252,13 @@ beside each checkpoint.
   TOOLHANG mot-flow-noreg {80, 92, 86} = 86.0 (jointflow-noreg 89.0; twinflow 59.3) -- the MoT
   carries a clean-action state flow WITHOUT the twin's policy loss on TC; train act 0.266 / zstd
   0.022 at ep 120 (the noreg signature). mot-flow-sig {72, 80, 60} = 70.7 (SIGReg joint 76.7; twin
-  59.3): SIGReg still costs ~15 on toolhang. MSE-head arms and all pusht arms pending.**
+  59.3): SIGReg still costs ~15 on toolhang.
+  PUSHT (planning BoK-32 inpaint / reactive, 3 seeds x 50): mot-flow-noreg {62,78,54} = 64.7 /
+  {66,82,72} = 73.3 (jointflow-noreg 70.7 / 66.0), readouts .975/.909/.540/.567 (= noreg's);
+  mot-flow-sig {62,74,78} = 71.3 / {68,80,70} = 72.7 (sig04 67.3 / 74.0), readouts .842/.566/
+  .463/.556 (SIGReg degrades linear readouts, SR unaffected). MoT-noreg = best noreg pusht so far
+  (+7 reactive over jointflow), still 15 under unified. MSE-head arms pending (toolhang mse-noreg
+  seed 42 = 80, mse-sig seed 42 = 60 despite the lowest policy losses on record, 0.20 / 0.19).**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
