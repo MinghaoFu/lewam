@@ -401,6 +401,22 @@ beside each checkpoint.
   The goal-time cost itself was a wash for roll5 (-3.3 / +0.7, inside noise). CAVEAT: one training
   seed per arm; needs >= 3 training seeds before it is a headline. SteerMPC OOMed here (50 envs x
   32 draws x 5 blocks x 8 flow steps of autograd); re-run with env chunking = job mf-1f04f3f7.**
+- **SteerMPC ON MoT-MSE (2026-08-29, job mf-1f04f3f7, code e7b5bfa; pusht, 3 eval seeds x 50,
+  K=32, exec5, cost at the goal time). plan_mode=steer on the rollout: Adam (20 steps, lr 0.02) on a
+  z_dim bias delta added to the goal latent fed to the POLICY, through the frozen flow sampler and
+  the dynamics rollout; 32 noise draws per env share one delta (envs optimized 8 at a time);
+  ||delta|| <= 0.3 ||z_goal||; cost vs the TRUE goal (the MoT state stream never sees the goal);
+  iterate 0 = the roll planner (best of 32) stays in the set; the best (candidate, iterate) executes
+  its first block. mot-mse-sig (mot_sm): {94,94,94} = 94.0 (roll5 85.3, action-space gradient 95.3);
+  delta settled at 0.19 of the goal norm, model cost 0.14 -> 0.06, improved on 97% of replans.
+  mot-mse-noreg (mot_nm): {84,90,80} = 84.7 = roll5's band; delta pinned at the 0.3 cap on every
+  replan, cost 0.0012 -> 0.0009. So with the well-scaled SIGReg latent, steering the policy's goal
+  input recovers nearly all of the gradient planner's gain while every executed action remains a
+  policy sample; with the 0.03-scale noreg latent the cost surface is too flat for either search.
+  FLOW-HEAD ARMS UNDER THE FOUR PLANNERS (job mf-75718ac0, code 9c594fe): mot-flow-noreg (mot_nf)
+  roll5 goal-time {68,80,68} = 72.0 (last-block 72.7), gradient {70,74,66} = 70.0 with the
+  refinement improving only 11-14 of ~300 replans (cost 0.0003 -> 0.0003: the noreg flow state
+  head is a denoiser, no gradient signal), gradient+TR 72 (seed 42); mot_sf pending.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
