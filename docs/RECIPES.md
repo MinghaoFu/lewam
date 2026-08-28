@@ -211,6 +211,10 @@ beside each checkpoint.
   the flow objective. But the good dynamics did NOT transfer to the policy: pusht SR unchanged
   (65 vs sig04 74), readouts barely moved, toolhang hurt (59.3). Representation benefit and
   dynamics quality are separate axes.**
+- **twinlr (2026-08-28, unified's split lr: encoder 1e-4 / policy 3e-4 / dynamics 3e-4, otherwise
+  twinsig2 + the trimmed state trunk; code ab90b4b): TOOLHANG {58, 60, 38} = 52.0 vs single-lr twin
+  59.3 (train act 0.234 vs 0.245 -- lower loss, no SR; zstd slid 0.86 -> 0.63 under the slow
+  encoder). The lr split is not the twin's missing ingredient on TC. pusht pending.**
 - **ROLLOUT-TO-GOAL DISCRIMINATION (2026-08-28, probe_wm_discrim --horizon_blocks 5 = the GR
   eval's 25-env-step goal; 200 anchors x 16 wrong SEQUENCES; the expert's sequence rolled out
   through the model vs a wrong sequence: which ends closer to the goal = the real endpoint).
