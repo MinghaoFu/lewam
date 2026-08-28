@@ -214,7 +214,10 @@ beside each checkpoint.
 - **twinlr (2026-08-28, unified's split lr: encoder 1e-4 / policy 3e-4 / dynamics 3e-4, otherwise
   twinsig2 + the trimmed state trunk; code ab90b4b): TOOLHANG {58, 60, 38} = 52.0 vs single-lr twin
   59.3 (train act 0.234 vs 0.245 -- lower loss, no SR; zstd slid 0.86 -> 0.63 under the slow
-  encoder). The lr split is not the twin's missing ingredient on TC. pusht pending.**
+  encoder). The lr split is not the twin's missing ingredient on TC. PUSHT: planning {66,80,72}
+  = 72.7 / reactive {56,76,70} = 67.3 (single-lr twin 68.0 / 65.3; sig04 67.3 / 74.0); readouts
+  agent_pos .971 block_pos .883 angle .512 (sincos .428) vel .622 -- inside seed noise, no
+  readout gain. Split lr closed as a non-lever for the twin on both cells.**
 - **ROLLOUT-TO-GOAL DISCRIMINATION (2026-08-28, probe_wm_discrim --horizon_blocks 5 = the GR
   eval's 25-env-step goal; 200 anchors x 16 wrong SEQUENCES; the expert's sequence rolled out
   through the model vs a wrong sequence: which ends closer to the goal = the real endpoint).
