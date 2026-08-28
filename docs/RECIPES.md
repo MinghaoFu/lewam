@@ -381,6 +381,26 @@ beside each checkpoint.
   Same, rivals = 31 OTHER DEMOS' 25-action sequences (on-manifold, wrong state): SR 98.0; expert
   picked 48/50, 47/48, 44/47, 43/43, 36/39 at on-demo replans 1-5 (96%/replan), 224/242 = 92.6%
   overall. The dynamics separates the right expert sequence from other experts' sequences too.
+- **GRADIENT PLANNING ON MoT-MSE (2026-08-29, job mf-d3633454, code c132fbc; pusht, 3 eval seeds
+  x 50, K=32, exec5, cost at the goal time). plan_mode=grad = action-space gradient MPC: warm start
+  = the best of 32 policy rollouts (the roll planner), then Adam (50 steps, lr 0.05, grad-norm clip
+  10) on the z-scored 5-block plan (25 actions x 2) against the terminal latent cost differentiated
+  through the MSE state head's autoregressive rollout (MoTFlow.imagine_step); |a| <= 3 sigma; warm
+  start = floor; the best iterate by model cost executes its first block, replan.
+  mot-mse-noreg (mot_nm): roll5 with the goal-time cost {80,84,86} = 83.3 (last-block cost 86.7);
+  grad {92,88,86} = 88.7; grad + trust region 1.0*||U-U_warm||^2 {78,86,86} = 83.3.
+  mot-mse-sig (mot_sm):  roll5 goal-time {84,86,86} = 85.3 (last-block 84.7); grad {92,100,94} =
+  95.3; grad + trust region {90,88,86} = 88.0.
+  Reactive 68.7 / 72.0 -> roll5 ~85 -> gradient 88.7 / 95.3: the SIGReg-MSE arm with the gradient
+  planner is the best pusht number of the whole campaign, above LeWM (88.0, its own protocol) and
+  unified (87-89), from a checkpoint whose reactive policy is 72. The refinement moved the plan by
+  ||U-U0|| ~ 2.1 (noreg) / 1.2 (sig) z-units over 50 dims and improved the model cost on ~100% of
+  replans; SR rose with it, so the dynamics is NOT being exploited at this step size -- the trust
+  region (move ~0.2) gives up most of the gain. SIGReg's well-scaled latent (cost 0.18 -> 0.06)
+  gives a better-conditioned landscape than the 0.03-scale noreg latent (0.0011 -> 0.0005).
+  The goal-time cost itself was a wash for roll5 (-3.3 / +0.7, inside noise). CAVEAT: one training
+  seed per arm; needs >= 3 training seeds before it is a headline. SteerMPC OOMed here (50 envs x
+  32 draws x 5 blocks x 8 flow steps of autograd); re-run with env chunking = job mf-1f04f3f7.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
