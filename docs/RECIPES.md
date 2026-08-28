@@ -309,6 +309,14 @@ beside each checkpoint.
   (lewm_repro, 2026-07-03); our epoch-100 retrains 74-88 per seed, ~81 (B_ours/B_ours2). The "93"
   quoted on 2026-08-29 was never measured here (the paper's CEM number in EXPERIMENTS.md is 82.5);
   use 88.7 (release) / 84.0 (repro) for LeWM on pusht.
+  AUTHORS' RELEASE PROBED (2026-08-29, hf_release_native/pusht, same settings; archived under
+  ckpts/wm_discrim/*lewm_release*): readout R2 agent_pos .959 block_pos .974 angle .804 (sincos
+  .915) vel .594 (repro .931/.962/.755/.513); one-step truth pairwise other-state .997 other-time
+  .986 pert .25/.5/1/2 = .80/.91/.98/1.00 uniform 1.00, gap/err 3.7-8.2x, top-1 other-state .93
+  other-time .71 (repro .93/.74); rollout-to-goal expert-first .994/.979/.918/.974/.993/.996
+  (repro 1.00/.99/.94/.98/1.00/1.00), gap/err 1.6-5.1x, endpoint error 2.95 vs start 16.2 (18%
+  drift; repro 14%). Release and repro are alike on every probe: the LeWM rows above stand with
+  the corrected label, and the readout/discrimination conclusions do not depend on which one.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
