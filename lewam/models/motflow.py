@@ -94,6 +94,7 @@ class MoTFlow(nn.Module):
         self.goal_conditioning = bool(cfg.get("goal_conditioning", False))
         self.state_head = str(cfg.get("state_head", "flow"))
         assert self.state_head in ("flow", "mse")
+        self.rollout_only = True        # planning = autoregressive rollout over predict_state, nothing else
         self.state_residual = bool(cfg.get("state_residual", False))
         self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
         self.tau_alpha_state = float(cfg.get("tau_alpha_state", 0) or self.tau_alpha)
@@ -285,16 +286,20 @@ class MoTFlow(nn.Module):
     def sample(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None):
         return self._sample_impl(z_history, history_pad, generator, z_goal, h_norm)
 
-    def _inpaint_impl(self, z_history, history_pad, action_plan, noise_action=None,
-                      noise_state=None, z_goal=None, h_norm=None):
-        return self._state_phase(z_history, history_pad, action_plan[:, :self.n_clean], noise_state,
+    @torch.no_grad()
+    def predict_state(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
+        """The MoT's one dynamics primitive: the state token(s) one block ahead of the history,
+        from the CLEAN actions of that block (the first n_clean of `actions`). Planning is the
+        autoregressive rollout over this step (gip.JointFlowPlanPolicy._imagine); there is no
+        one-block "inpaint" scorer for MoT."""
+        return self._state_phase(z_history, history_pad, actions[:, :self.n_clean], noise_state,
                                  None, z_goal, h_norm)
 
     @torch.no_grad()
     def sample_inpaint(self, z_history, history_pad, action_plan, noise_action=None,
                        noise_state=None, z_goal=None, h_norm=None):
-        return self._inpaint_impl(z_history, history_pad, action_plan, noise_action, noise_state,
-                                  z_goal, h_norm)
+        """Alias of predict_state under the joint model's name, for the shared probe adapters."""
+        return self.predict_state(z_history, history_pad, action_plan, noise_state, z_goal, h_norm)
 
     # ---------------------------------------------------------------- lr groups
     def param_group_of(self, name):

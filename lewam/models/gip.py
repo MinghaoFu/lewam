@@ -1468,6 +1468,22 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             self._oracle_rng = np.random.default_rng(self._flow_seed + 101)
             self._oracle_hits, self._oracle_n = 0, 0
         assert self.model.num_states > 0, "planning needs imagined state tokens"
+        # MoT (model.rollout_only): the dynamics is a one-block step, so planning IS the
+        # autoregressive rollout to the goal time -- plan_rollout defaults to the goal horizon in
+        # blocks, one block executes per replan, and the joint model's one-block scorers
+        # (plan_score=inpaint, cem, steer) are refused (owner 2026-08-29).
+        self.rollout_only = bool(getattr(model, "rollout_only", False))
+        if self.rollout_only:
+            if self.plan_mode not in ("best_of_k", "oracle_bok"):
+                raise ValueError(f"MoT plans by rollout only: plan_mode={self.plan_mode!r} has no rollout form")
+            if self.plan_score != "joint":
+                raise ValueError("MoT has no one-block scorer: drop plan_score (planning is the rollout)")
+            if self.plan_rollout <= 1:
+                self.plan_rollout = max(1, int(round(float(np.max(np.asarray(self.horizon0, dtype=float))))))
+            if self.exec_actions == 0:
+                self.exec_actions = self.action_block
+            print(f"[plan] MoT rollout planning: {self.plan_rollout} blocks imagined per candidate, "
+                  f"execute {self.exec_actions} raw actions per replan", flush=True)
         if self.plan_mode == "steer":
             assert getattr(model, "goal_conditioning", False), \
                 "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
@@ -1554,7 +1570,10 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                     .expand(R, K, A, adim).reshape(R * K, A, adim)
                 noise_s = torch.randn(R, 1, S, D, device=h.device, generator=gen) \
                     .expand(R, K, S, D).reshape(R * K, S, D)
-                z_imag = self.model.sample_inpaint(h, p, plan, noise_action=noise_a, noise_state=noise_s, **cond)
+                if self.rollout_only:
+                    z_imag = self.model.predict_state(h, p, plan, noise_state=noise_s, **cond)
+                else:
+                    z_imag = self.model.sample_inpaint(h, p, plan, noise_action=noise_a, noise_state=noise_s, **cond)
             else:
                 action, z_imag = self.model.sample(h, p, generator=gen, **cond)
                 blk = action[:, :fs]
