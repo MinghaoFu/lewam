@@ -10,11 +10,13 @@ Ridge closed-form, z-scored targets, test R^2 per factor (mean over target dims)
 Angle also probed as sin/cos (2-dim) for the wraparound reference.
 """
 import argparse
+from pathlib import Path
 import json
 
 import h5py
 import numpy as np
 import torch
+import torch.nn as nn
 
 from lewam.models.gip import load_jointflow_model, load_lewam_unified_model
 
@@ -64,6 +66,8 @@ def main():
     ap.add_argument("--h5", required=True)
     ap.add_argument("--jf_ckpts", default="", help="comma run names under $STABLEWM_HOME/checkpoints")
     ap.add_argument("--uni_ckpts", default="", help="comma run names (lewam_unified layout)")
+    ap.add_argument("--lewm_dir", default="", help="official LeWM folder (config.json + weights) -> "
+                                                    "its encoder+projector as a probe column")
     ap.add_argument("--fs", type=int, default=5)
     ap.add_argument("--ctx", type=int, default=5, help="unified aggregator context (anchors)")
     ap.add_argument("--n_train", type=int, default=4000)
@@ -104,6 +108,22 @@ def main():
     for name in [s for s in args.uni_ckpts.split(",") if s]:
         m, ucfg = load_lewam_unified_model(name)
         models.append((f"uni:{name}", m.to(device).eval(), "agg", ucfg))
+    if args.lewm_dir:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from probe_wm_discrim import LeWMAdapter
+
+        class _LeWMEnc(nn.Module):
+            def __init__(self, ad):
+                super().__init__()
+                self.m = ad.m
+
+            def encode(self, px):
+                cls = self.m.encoder(px, interpolate_pos_encoding=True).last_hidden_state[:, 0]
+                return self.m.projector(cls)
+
+        ad = LeWMAdapter(args.lewm_dir, fs=fs, amean=None, astd=None)
+        models.append(("lewm:official", _LeWMEnc(ad).to(device).eval(), None, None))
 
     results = {}
     for label, model, extra, mcfg in models:

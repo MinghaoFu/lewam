@@ -460,7 +460,7 @@ def _h0_at(h0, i):
 
 
 # Policy factory
-def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
+def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy_kwargs=None):
     """Configure policy from cfg. goal_offsets: per-env raw-frame goal offsets (full-traj
     eval); when given, horizon0 becomes a per-env array offsets/action_block."""
     mode = cfg.get("gip_eval", {}).get("mode", "bc")
@@ -541,7 +541,9 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None):
             pm_steps=int(ge.get("pm_steps", 20)),
             pm_lr=float(ge.get("pm_lr", 0.02)),
             pm_rho=float(ge.get("pm_rho", 0.3)),
-            pm_random=bool(ge.get("pm_random", False)), **shared)
+            pm_random=bool(ge.get("pm_random", False)),
+            oracle_cands=str(ge.get("oracle_cands", "uniform")),
+            **(policy_kwargs or {}), **shared)
 
     # mode=unified_policy: LeWAM-Unified adapter. `model` is a loaded LeWAMUnified with its config
     # attached as model._unified_cfg (done in eval_gip.py).
@@ -1438,8 +1440,22 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.cem_iters = int(kwargs.pop("cem_iters", 3))
         self.cem_elites = int(kwargs.pop("cem_elites", 6))
         self.cem_std = float(kwargs.pop("cem_std", 0.5))
+        # oracle_bok (owner sanity check 2026-08-29): candidate 0 = the replayed demo's expert
+        # chunk at the current step, K-1 = wrong chunks ("uniform" over the dataset action box or
+        # "shuffle" = other demos' chunks); the dynamics picks; SR then measures whether the
+        # world model as verifier recovers the demo's success when the expert IS in the set.
+        self.oracle_cands = str(kwargs.pop("oracle_cands", "uniform"))
+        self.expert_actions = kwargs.pop("expert_actions", None)   # per env: (T, adim) raw, from the start step
         super().__init__(model, cfg, *args, **kwargs)
-        assert self.plan_mode in ("best_of_k", "cem", "steer"), self.plan_mode
+        assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok"), self.plan_mode
+        if self.plan_mode == "oracle_bok":
+            assert self.expert_actions is not None, "oracle_bok needs the demo actions (eval_gip passes them)"
+            assert self.oracle_cands in ("uniform", "shuffle"), self.oracle_cands
+            allv = np.concatenate([np.asarray(a) for a in self.expert_actions], 0)
+            self._act_lo, self._act_hi = allv.min(0), allv.max(0)
+            self._raw_done = None
+            self._oracle_rng = np.random.default_rng(self._flow_seed + 101)
+            self._oracle_hits, self._oracle_n = 0, 0
         assert self.model.num_states > 0, "planning needs imagined state tokens"
         if self.plan_mode == "steer":
             assert getattr(model, "goal_conditioning", False), \
@@ -1465,6 +1481,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         super()._flush_env(i)
         if self._prev_plan is not None:
             self._prev_plan[i] = None
+        if getattr(self, "_raw_done", None) is not None:
+            self._raw_done[i] = 0
 
     @staticmethod
     def _final_cost(z_imag, z_goal):
@@ -1484,6 +1502,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             steps_t = torch.tensor(steps, device=device, dtype=torch.float32)
         if self.plan_mode == "best_of_k":
             plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
+        elif self.plan_mode == "oracle_bok":
+            plan = self._oracle_bok(history, history_pad, z_goal, h_norm, replan)
         elif self.plan_mode == "steer":
             plan = self._steer(history, history_pad, z_goal, h_norm)
         else:
@@ -1492,6 +1512,54 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             for row, i in enumerate(replan):
                 self._prev_plan[i] = plan[row]
         return plan
+
+    def _oracle_bok(self, history, history_pad, z_goal, h_norm, replan):
+        """Expert chunk vs K-1 wrong chunks, scored by the dynamics (inpaint, shared noise)."""
+        device = history.device
+        R, K = history.shape[0], self.plan_k
+        A, adim = self.model.num_actions, self.model.action_raw_dim
+        if self._raw_done is None:
+            self._raw_done = np.zeros(len(self.expert_actions), dtype=int)
+        amean = self._amean.cpu().numpy(); astd = self._astd.cpu().numpy()
+        cands = np.zeros((R, K, A, adim), np.float32)
+        for row, i in enumerate(replan):
+            ea = np.asarray(self.expert_actions[i], np.float32)
+            t0 = int(self._raw_done[i])
+            chunk = ea[t0:t0 + A]
+            if len(chunk) < A:                                    # past the demo's end: hold the last action
+                last = ea[-1:] if len(ea) else np.zeros((1, adim), np.float32)
+                chunk = np.concatenate([chunk, np.repeat(last, A - len(chunk), 0)], 0)
+            cands[row, 0] = chunk
+            if self.oracle_cands == "uniform":
+                cands[row, 1:] = self._oracle_rng.uniform(self._act_lo, self._act_hi, (K - 1, A, adim))
+            else:                                                  # other demos' chunks (on-manifold, wrong state)
+                for k in range(1, K):
+                    j = int(self._oracle_rng.integers(len(self.expert_actions)))
+                    src = np.asarray(self.expert_actions[j], np.float32)
+                    if len(src) < A:
+                        src = np.concatenate([src, np.repeat(src[-1:], A - len(src), 0)], 0)
+                    s0 = int(self._oracle_rng.integers(0, len(src) - A + 1))
+                    cands[row, k] = src[s0:s0 + A]
+        cz = torch.from_numpy((cands - amean) / astd).to(device).reshape(R * K, A, adim)
+        h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
+        goal_rep = z_goal.repeat_interleave(K, 0)
+        gen = self._gen(device)
+        noise_a = torch.randn(R, 1, A, adim, device=device, generator=gen).expand(R, K, A, adim).reshape(R * K, A, adim)
+        S, D = self.model.num_states, self.model.z_dim
+        noise_s = torch.randn(R, 1, S, D, device=device, generator=gen).expand(R, K, S, D).reshape(R * K, S, D)
+        z_imag = self.model.sample_inpaint(h, p, cz, noise_action=noise_a, noise_state=noise_s,
+                                           **self._cond_args(z_goal, h_norm, K))
+        cost = self._final_cost(z_imag, goal_rep).view(R, K)
+        pick = cost.argmin(1)
+        self._oracle_hits += int((pick == 0).sum()); self._oracle_n += R
+        take = self._take()
+        for i in replan:
+            self._raw_done[i] += take
+        if self._oracle_n % 50 < R:
+            print(f"[oracle] expert picked {self._oracle_hits}/{self._oracle_n} = "
+                  f"{100.0 * self._oracle_hits / max(1, self._oracle_n):.1f}% of replans "
+                  f"(cands={self.oracle_cands}, K={K})", flush=True)
+        return cz.view(R, K, A, adim)[torch.arange(R, device=device), pick]
 
     def _cond_args(self, z_goal, h_norm, repeat):
         if not getattr(self.model, "goal_conditioning", False):

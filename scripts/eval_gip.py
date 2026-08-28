@@ -385,7 +385,23 @@ def run(cfg: DictConfig):
         model.requires_grad_(False)
         model._jointflow_cfg = jf_cfg
         adim = int(jf_cfg["action_dim"])
-        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets)
+        pk = None
+        if str(cfg.get("gip_eval", {}).get("plan_mode", "")) == "oracle_bok":
+            # the replayed demos' action sequences from each env's start step (raw env units)
+            col = gip.episode_col(dataset)
+            ep_arr = np.asarray(dataset.get_col_data(col)).reshape(-1)
+            st_arr = np.asarray(dataset.get_col_data("step_idx")).reshape(-1)
+            act_arr = np.asarray(dataset.get_col_data("action"))
+            expert = []
+            for e, s0 in zip(episodes, starts):
+                rows = np.nonzero(ep_arr == e)[0]
+                rows = rows[np.argsort(st_arr[rows])]
+                expert.append(act_arr[rows][int(s0):])
+            pk = dict(expert_actions=expert)
+            print(f"[oracle] demo action sequences for {len(expert)} envs, lengths "
+                  f"{min(len(a) for a in expert)}..{max(len(a) for a in expert)}", flush=True)
+        policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets,
+                                  policy_kwargs=pk)
     elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
