@@ -416,7 +416,19 @@ beside each checkpoint.
   FLOW-HEAD ARMS UNDER THE FOUR PLANNERS (job mf-75718ac0, code 9c594fe): mot-flow-noreg (mot_nf)
   roll5 goal-time {68,80,68} = 72.0 (last-block 72.7), gradient {70,74,66} = 70.0 with the
   refinement improving only 11-14 of ~300 replans (cost 0.0003 -> 0.0003: the noreg flow state
-  head is a denoiser, no gradient signal), gradient+TR 72 (seed 42); mot_sf pending.**
+  head is a denoiser, no gradient signal), gradient+TR {72,82,74} = 76.0. mot-flow-sig (mot_sf):
+  roll5 goal-time {78,84,78} = 80.0 (last-block 76.7), gradient {84,84,76} = 81.3 (improved ~50%
+  of replans, cost 0.12 -> 0.08, ||U-U0|| 1.6), gradient+TR {72,82,76} = 76.7. SteerMPC OOMed on
+  both flow arms even at 8 envs/chunk (the state flow doubles the passes in the graph; fixed:
+  chunk/4 on flow heads, not re-run -- owner hold). PLANNING TABLE (pusht, 3x50, K=32, exec5):
+    planner              mse-noreg  mse-sig  flow-noreg  flow-sig
+    reactive               68.7      72.0      73.3        72.7
+    roll5 (goal-time)      83.3      85.3      72.0        80.0
+    gradient               88.7      95.3      70.0        81.3
+    gradient + trust reg   83.3      88.0      76.0        76.7
+    SteerMPC               84.7      94.0      OOM         OOM
+  Only the MSE state head plans; SIGReg's unit-scale latent is what makes the gradient searches
+  work (SteerMPC 94.0 on-manifold, gradient 95.3); the flow heads gain at most a few points.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**

@@ -1708,9 +1708,12 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         """SteerMPC on MoT over all replanning envs, optimized pm_chunk envs at a time (each env's
         delta is independent; the chunking only bounds the autograd graph)."""
         R = history.shape[0]
+        chunk = max(1, self.pm_chunk)
+        if getattr(self.model, "state_head", "mse") == "flow":
+            chunk = max(1, chunk // 4)          # the state flow doubles the passes per block in the graph
         plans = []
-        for lo in range(0, R, max(1, self.pm_chunk)):
-            hi = min(R, lo + max(1, self.pm_chunk))
+        for lo in range(0, R, chunk):
+            hi = min(R, lo + chunk)
             plans.append(self._steer_rollout_chunk(history[lo:hi], history_pad[lo:hi], z_goal[lo:hi],
                                                    None if steps is None else steps[lo:hi]))
         return torch.cat(plans, 0)
