@@ -317,6 +317,26 @@ beside each checkpoint.
   (repro 1.00/.99/.94/.98/1.00/1.00), gap/err 1.6-5.1x, endpoint error 2.95 vs start 16.2 (18%
   drift; repro 14%). Release and repro are alike on every probe: the LeWM rows above stand with
   the corrected label, and the readout/discrimination conclusions do not depend on which one.
+- **ROLLOUT PLANNING ON MoT (2026-08-29, job mf-de5752ce, code 503ce89; pusht, 3 eval seeds x 50,
+  exec5, K=32). The owner's planner (`plan_rollout=5`): from the real 2-frame history the policy
+  samples a chunk, its first block goes through the MSE state head, the imagined latent slides into
+  the history, x5 to the goal time (25 env steps), cost = final imagined latent vs goal latent, execute
+  the winner's first block, replan. mot-mse-noreg (mot_nm) BoK-roll5 {84,86,90} = 86.7 vs BoK-inpaint
+  {60,78,72} = 70.0 (re-run) vs reactive 68.7; mot-mse-sig (mot_sm) BoK-roll5 {84,84,86} = 84.7 vs
+  BoK-inpaint {62,84,70} = 72.0 vs reactive 72.0. +15-17 SR from the dynamics on a 69-72 reactive
+  policy = the first jointflow-family planning result in unified's band (87-89), and the first
+  time planning beats reactive by more than noise. INPAINT RETIRED FOR MoT (15659d0): the old
+  planner scored each 10-action chunk by ONE dynamics step (5 env steps ahead vs a goal 25 steps
+  away); MoT now plans by the rollout by construction (plan_rollout defaults to the goal horizon,
+  exec one block; plan_score=inpaint / cem / steer refused). Every earlier "planning" number for
+  jointflow/twin/MoT was the one-block verifier.
+  ORACLE ROUND 1 (same job; expert chunk + K-1 wrong chunks, the dynamics picks): one-block inpaint
+  scoring picks the expert 14-20% (uniform) / 5-8% (other demos) on mot_nm -> SR 28.7 / 36.7 (mot_sm
+  8-11% / 4-6% -> 26.7 / 35.3); 2-block candidates + goal-conditioned policy continuation in
+  imagination 9-20% -> SR 12.0 / 12.0 (mot_sm 14.7 / 12.7): the policy imagines a recovery after
+  any prefix, so every candidate ends near the goal. Neither is a verifier; round 2 (mf-c5ba118c,
+  staged) scores full 25-action candidate sequences through the dynamics alone, with the authors'
+  LeWM release under the same test + its own CEM SR, and BoK-roll5 on the flow-head arms.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
