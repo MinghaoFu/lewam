@@ -257,8 +257,12 @@ beside each checkpoint.
   {66,82,72} = 73.3 (jointflow-noreg 70.7 / 66.0), readouts .975/.909/.540/.567 (= noreg's);
   mot-flow-sig {62,74,78} = 71.3 / {68,80,70} = 72.7 (sig04 67.3 / 74.0), readouts .842/.566/
   .463/.556 (SIGReg degrades linear readouts, SR unaffected). MoT-noreg = best noreg pusht so far
-  (+7 reactive over jointflow), still 15 under unified. MSE-head arms pending (toolhang mse-noreg
-  seed 42 = 80, mse-sig seed 42 = 60 despite the lowest policy losses on record, 0.20 / 0.19).**
+  (+7 reactive over jointflow), still 15 under unified.
+  TOOLHANG MSE-HEAD ARMS: mot-mse-noreg {80,84,78} = 80.7; mot-mse-sig {60,42,62} = 54.7 -- despite
+  the lowest toolhang policy losses on record (act 0.200 / 0.189 at ep 120 vs noreg joint 0.26):
+  open-loop loss and closed-loop SR disagree again. TOOLHANG GRID: flow-noreg 86.0 > mse-noreg 80.7
+  > flow-sig 70.7 > mse-sig 54.7 (jointflow 89.0 / 76.7; twin 59.3). SIGReg costs 15-26 in every
+  architecture; MSE state head costs 5-16 vs flow. pusht MSE arms pending.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
