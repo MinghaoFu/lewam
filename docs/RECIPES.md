@@ -378,6 +378,9 @@ beside each checkpoint.
   for planning -> SR recovers to 95-100") PASSES: the MoT-MSE-noreg dynamics, used as the verifier
   with the correct receding-horizon cost, recovers the demo's success. The 30-32 measured before
   was the fixed-horizon scoring artifact, not the dynamics.**
+  Same, rivals = 31 OTHER DEMOS' 25-action sequences (on-manifold, wrong state): SR 98.0; expert
+  picked 48/50, 47/48, 44/47, 43/43, 36/39 at on-demo replans 1-5 (96%/replan), 224/242 = 92.6%
+  overall. The dynamics separates the right expert sequence from other experts' sequences too.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
