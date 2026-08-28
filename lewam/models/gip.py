@@ -1791,9 +1791,10 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                   f"{st['dn'] / st['n']:.3f} (steps {self.pm_steps}, lr {self.pm_lr}, rho {self.pm_rho})", flush=True)
         return best_plan.reshape(R, H * fs, adim)
 
-    def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U):
+    def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U, noise_s=None):
         """Differentiable terminal cost (R,) of the z-scored plan U (R, H, fs, adim) through the
-        MoT's imagine_step; the graph flows through U only (history and goal are constants)."""
+        MoT's imagine_step; the graph flows through U only (history and goal are constants).
+        noise_s: per-block state noise (flow state head; fixed per replan), ignored by the MSE head."""
         h, p = history, history_pad
         gc = getattr(self.model, "goal_conditioning", False)
         zs = []
@@ -1802,7 +1803,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             if gc:
                 hk = (steps - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 cond = dict(z_goal=z_goal, h_norm=hk)
-            z_imag = self.model.imagine_step(h, p, U[:, k], **cond)
+            z_imag = self.model.imagine_step(h, p, U[:, k], noise_state=None if noise_s is None else noise_s[k], **cond)
             zs.append(z_imag[:, 0])
             h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
             p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
@@ -1828,12 +1829,15 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             c_warm = cost0[rows, pick].detach()
         if self.grad_steps <= 0:
             return U0.reshape(R, H * fs, -1)
+        S, D = self.model.num_states, self.model.z_dim
+        gen = self._gen(device)
+        noise_s = [torch.randn(R, S, D, device=device, generator=gen) for _ in range(H)]   # flow state head: fixed per replan
         best_U, best_c = U0.clone(), c_warm.clone()
         U = U0.clone().requires_grad_(True)
         opt = torch.optim.Adam([U], lr=self.grad_lr)
         with torch.enable_grad():
             for it in range(self.grad_steps + 1):
-                c = self._rollout_cost_grad(history, history_pad, z_goal, steps_t, U)
+                c = self._rollout_cost_grad(history, history_pad, z_goal, steps_t, U, noise_s)
                 with torch.no_grad():
                     better = c < best_c
                     best_c = torch.where(better, c.detach(), best_c)
