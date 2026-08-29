@@ -437,6 +437,21 @@ beside each checkpoint.
   hurts the flow policy on pusht by 20-27 on every seed -- the owner's "least likely" hypothesis
   (history aggregation explains unified's edge) is closed in the wrong direction for this recipe.
   roll5 / gradient evals of this ckpt staged (mf-d63642ca), not run (owner hold).**
+- **WORLD-MODEL VISUALIZATION (2026-08-29, job mf-9f4139ed, experimental/viz_wm_dynamics.py
+  f4c7068, adapted from the owner's viz_train_decoder.py; pusht, all four MoT arms, k=10 anchors,
+  8 autoregressive imagined blocks, episodes 3/77/1234; per arm a z->pixel decoder trained 20
+  epochs on 20k frames WITH the pred-decode term. Outputs ckpts/wm_viz/<arm>/: PNG grids
+  (GT / decode(z_GT) / decode(z_imagined)), mp4s, decoders, metrics json).
+  Latent MSE per imagined step vs the copy-last-latent baseline (ep77 // ep1234):
+    mse-sig  (mot_sm): 0.005-0.11 vs 0.3-2.4   // 0.005-0.02 vs 0.3-2.4  -> 20-200x better than freeze
+    mse-noreg(mot_nm): 0.017-0.068 vs 0.013-0.061 // ~2x better           -> barely beats freeze (tiny-scale latent)
+    flow-sig (mot_sf): 0.03-0.55 vs 0.12-2.5                              -> 4-10x better, error compounds with depth
+    flow-nore(mot_nf): 0.36-0.62 vs 0.002-0.02                            -> 30-200x WORSE than freeze
+  Decoder recon PSNR: mot_sm 32.2-32.5 dB > mot_sf 30.9-31.1 > mot_nm 26.7-26.9 > mot_nf 25.1
+  (SIGReg latents carry far more decodable content). Visually: mot_sm's imagined row tracks the
+  scene through all 8 blocks (slight late blur); mot_nf's decode(z_GT) is already fog around the
+  goal T and its imagined row fades to nothing. In pixels: SIGReg-MSE is a real world model,
+  noreg-MSE's advantage over freezing depends on the episode, flow heads don't imagine.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
