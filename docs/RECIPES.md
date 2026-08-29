@@ -429,6 +429,14 @@ beside each checkpoint.
     SteerMPC               84.7      94.0      OOM         OOM
   Only the MSE state head plans; SIGReg's unit-scale latent is what makes the gradient searches
   work (SteerMPC 94.0 on-manifold, gradient 95.3); the flow heads gain at most a few points.**
+- **HISTORY LENGTH 5 (2026-08-29, job mf-b7f162e8, mot_nm recipe with --policy_history_len 5,
+  i.e. 5 frames at fs spacing instead of 2; pusht, seed 42, 50 ep): reactive {26,56,42} = 41.3 vs
+  68.7 with 2 frames; one-block planner (old scorer) {42,54,56} = 50.7 vs 70.0; readouts agent_pos .974 block_pos .977 angle .737 (sincos .872) vel .574 = the 2-frame arm's (.973/.980/.734/.586): same encoder content, worse policy.
+  Training: val action loss rose to 1.34 at ep 30 while train fell (overfitting to the longer
+  context), recovered to 0.30 by ep 50 under the lr decay; zstd 0.114, no collapse. More history
+  hurts the flow policy on pusht by 20-27 on every seed -- the owner's "least likely" hypothesis
+  (history aggregation explains unified's edge) is closed in the wrong direction for this recipe.
+  roll5 / gradient evals of this ckpt staged (mf-d63642ca), not run (owner hold).**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
