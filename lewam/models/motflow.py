@@ -100,7 +100,17 @@ class MoTFlow(nn.Module):
         # learns the displacement to z_{t+fs} along a straight path; owner 2026-08-29)
         self.state_prior = str(cfg.get("state_prior", "gauss"))
         assert self.state_prior in ("gauss", "prev"), self.state_prior
-        self.state_prior_sigma = float(cfg.get("state_prior_sigma", 0.0))
+        self.state_prior_sigma = float(cfg.get("state_prior_sigma", 0.0))     # relative to rms(z_t)
+        # state_param: "v" (the state token outputs the velocity) or "x" (JiT-style: it outputs a
+        # prediction of the clean z_{t+fs}; the loss and the sampler go through
+        # v_hat = (z_hat - x_tau) / max(1 - tau, state_x_eps))
+        self.state_param = str(cfg.get("state_param", "v"))
+        assert self.state_param in ("v", "x"), self.state_param
+        self.state_x_eps = float(cfg.get("state_x_eps", 0.05))
+        # state-flow tau draw: uniform^(1/alpha) (default) or logit-normal (JiT: mu -0.8, sigma 0.8)
+        self.state_tau_logit = cfg.get("state_tau_logit", None)     # None or (mu, sigma)
+        if self.state_tau_logit is not None:
+            self.state_tau_logit = (float(self.state_tau_logit[0]), float(self.state_tau_logit[1]))
         assert not (self.state_prior == "prev" and self.state_residual), \
             "state_prior=prev already anchors the flow at z_t; state_residual is the other way to do that"
         self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
@@ -236,14 +246,14 @@ class MoTFlow(nn.Module):
         B = action_target.shape[0]
         dev = action_target.device
         tau_a = torch.rand(B, device=dev) ** (1.0 / self.tau_alpha)
-        tau_s = torch.rand(B, device=dev) ** (1.0 / self.tau_alpha_state)
+        tau_s = self._draw_tau_state(B, dev)
         noise_a = torch.randn_like(action_target)
         noisy_a = torch.lerp(noise_a, action_target, tau_a[:, None, None].to(action_target.dtype))
         clean_a = action_target[:, :self.n_clean]
         if self.state_prior == "prev":
             noise_s = z_history[:, -1:].expand_as(state_target).to(state_target.dtype)     # x_0 = z_t
             if self.state_prior_sigma > 0:
-                noise_s = noise_s + self.state_prior_sigma * torch.randn_like(state_target)
+                noise_s = noise_s + self._prior_scale(z_history) * torch.randn_like(state_target)
         else:
             noise_s = torch.randn_like(state_target)
         noisy_s = torch.lerp(noise_s, state_target, tau_s[:, None, None].to(state_target.dtype))
@@ -254,7 +264,25 @@ class MoTFlow(nn.Module):
             return loss_action, loss_action.new_zeros(())
         if self.state_head == "mse":
             return loss_action, self._masked_mse(out_s, state_target, state_valid)
+        if self.state_param == "x":
+            out_s = self._x_to_v(out_s, noisy_s, tau_s)
         return loss_action, self._masked_mse(out_s, state_target - noise_s, state_valid)
+
+    def _draw_tau_state(self, B, dev):
+        if self.state_tau_logit is not None:
+            mu, sd = self.state_tau_logit
+            return torch.sigmoid(mu + sd * torch.randn(B, device=dev))
+        return torch.rand(B, device=dev) ** (1.0 / self.tau_alpha_state)
+
+    def _prior_scale(self, z_history):
+        """sigma * rms(z_t) per sample (detached): the prev-prior noise scale in latent units."""
+        rms = z_history[:, -1:].detach().float().pow(2).mean(-1, keepdim=True).sqrt()
+        return self.state_prior_sigma * rms.to(z_history.dtype)
+
+    def _x_to_v(self, z_hat, x_tau, tau):
+        """JiT-style reparameterization: velocity implied by a clean-state prediction."""
+        denom = (1.0 - tau).clamp(min=self.state_x_eps)[:, None, None].to(z_hat.dtype)
+        return (z_hat - x_tau) / denom
 
     # ---------------------------------------------------------------- inference
     def _state_phase(self, z_history, history_pad, clean_a, noise_state, generator, z_goal, h_norm):
@@ -270,13 +298,15 @@ class MoTFlow(nn.Module):
                 if self.state_prior_sigma > 0:
                     eps = noise_state if noise_state is not None else \
                         torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
-                    state = state + self.state_prior_sigma * eps
+                    state = state + self._prior_scale(z_history) * eps
             else:
                 state = noise_state if noise_state is not None else \
                     torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
             for i in range(self.n_flow_steps):
                 tau = torch.full((B,), i / self.n_flow_steps, device=dev)
                 _, v_s = self.forward_tokens(z_history, history_pad, clean_a, dummy_a, state, one, tau, z_goal, h_norm)
+                if self.state_param == "x":
+                    v_s = self._x_to_v(v_s, state, tau)
                 state = state + v_s / self.n_flow_steps
         if self.state_residual and self.num_states:
             state = state + z_history[:, -1:]

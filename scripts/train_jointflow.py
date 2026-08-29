@@ -142,7 +142,14 @@ def parse_args():
                          "learns the displacement z[t+fs] - z[t] along a straight path and the ODE "
                          "starts at z_t (owner 2026-08-29, after Action-to-Action Flow Matching)")
     ap.add_argument("--state_prior_sigma", type=float, default=0.0,
-                    help="with --state_prior prev: x_0 = z_t + sigma * eps (0 = deterministic prior)")
+                    help="with --state_prior prev: x_0 = z_t + sigma * rms(z_t) * eps (0 = deterministic prior)")
+    ap.add_argument("--state_param", default="v", choices=["v", "x"],
+                    help="MoT flow state head output: velocity (v) or JiT-style clean-state prediction (x): "
+                         "the flow loss and the sampler go through v = (z_hat - x_tau) / (1 - tau)")
+    ap.add_argument("--state_x_eps", type=float, default=0.05,
+                    help="--state_param x: clamp of (1 - tau) in the reparameterization (bounds the 1/(1-tau)^2 weight)")
+    ap.add_argument("--state_tau_logit", type=float, nargs=2, default=None, metavar=("MU", "SIGMA"),
+                    help="MoT flow state head: draw tau as sigmoid(N(MU, SIGMA)) (JiT: -0.8 0.8) instead of uniform")
     return ap.parse_args()
 
 
@@ -374,7 +381,9 @@ def main():
                state_detach=bool(args.state_detach), state_depth=int(args.state_depth),
                state_ctx_actions=int(args.frameskip * args.num_states_pred),
                state_head=args.mot_state_head, state_prior=args.state_prior,
-               state_prior_sigma=float(args.state_prior_sigma))
+               state_prior_sigma=float(args.state_prior_sigma), state_param=args.state_param,
+               state_x_eps=float(args.state_x_eps),
+               state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None))
     builder = {"jointflow": build_model, "twinflow": build_twinflow, "motflow": build_motflow}[args.model]
     model = builder(cfg).to(device)
     action_mean, action_std = action_stats
@@ -387,6 +396,10 @@ def main():
         "--state_target_norm is the online-target normalization; the ema path has its own"
     assert args.state_prior == "gauss" or (args.model == "motflow" and args.mot_state_head == "flow"), \
         "--state_prior prev is implemented for the MoT flow state head"
+    assert args.state_param == "v" or (args.model == "motflow" and args.mot_state_head == "flow"), \
+        "--state_param x is implemented for the MoT flow state head"
+    assert args.state_tau_logit is None or (args.model == "motflow" and args.mot_state_head == "flow"), \
+        "--state_tau_logit is a MoT flow-state-head option"
     assert not (args.state_prior == "prev" and args.state_residual), \
         "--state_prior prev and --state_residual both anchor the flow at z_t; pick one"
     assert not (args.state_residual and args.state_ema_target), \
