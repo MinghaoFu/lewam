@@ -96,6 +96,13 @@ class MoTFlow(nn.Module):
         assert self.state_head in ("flow", "mse")
         self.rollout_only = True        # planning = autoregressive rollout over predict_state, nothing else
         self.state_residual = bool(cfg.get("state_residual", False))
+        # state_prior: "gauss" (x_0 ~ N(0, I)) or "prev" (x_0 = z_t, the current latent: the flow
+        # learns the displacement to z_{t+fs} along a straight path; owner 2026-08-29)
+        self.state_prior = str(cfg.get("state_prior", "gauss"))
+        assert self.state_prior in ("gauss", "prev"), self.state_prior
+        self.state_prior_sigma = float(cfg.get("state_prior_sigma", 0.0))
+        assert not (self.state_prior == "prev" and self.state_residual), \
+            "state_prior=prev already anchors the flow at z_t; state_residual is the other way to do that"
         self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
         self.tau_alpha_state = float(cfg.get("tau_alpha_state", 0) or self.tau_alpha)
         self.n_clean = self.num_states * self.fs
@@ -233,7 +240,12 @@ class MoTFlow(nn.Module):
         noise_a = torch.randn_like(action_target)
         noisy_a = torch.lerp(noise_a, action_target, tau_a[:, None, None].to(action_target.dtype))
         clean_a = action_target[:, :self.n_clean]
-        noise_s = torch.randn_like(state_target)
+        if self.state_prior == "prev":
+            noise_s = z_history[:, -1:].expand_as(state_target).to(state_target.dtype)     # x_0 = z_t
+            if self.state_prior_sigma > 0:
+                noise_s = noise_s + self.state_prior_sigma * torch.randn_like(state_target)
+        else:
+            noise_s = torch.randn_like(state_target)
         noisy_s = torch.lerp(noise_s, state_target, tau_s[:, None, None].to(state_target.dtype))
         v_a, out_s = self.forward_tokens(z_history, history_pad, clean_a, noisy_a, noisy_s,
                                          tau_a, tau_s, z_goal, h_norm, goal_keep)
@@ -253,8 +265,15 @@ class MoTFlow(nn.Module):
         if self.state_head == "mse":
             _, state = self.forward_tokens(z_history, history_pad, clean_a, dummy_a, None, one, one, z_goal, h_norm)
         else:
-            state = noise_state if noise_state is not None else \
-                torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
+            if self.state_prior == "prev":
+                state = z_history[:, -1:].expand(B, self.num_states, self.z_dim)            # ODE starts at z_t
+                if self.state_prior_sigma > 0:
+                    eps = noise_state if noise_state is not None else \
+                        torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
+                    state = state + self.state_prior_sigma * eps
+            else:
+                state = noise_state if noise_state is not None else \
+                    torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
             for i in range(self.n_flow_steps):
                 tau = torch.full((B,), i / self.n_flow_steps, device=dev)
                 _, v_s = self.forward_tokens(z_history, history_pad, clean_a, dummy_a, state, one, tau, z_goal, h_norm)

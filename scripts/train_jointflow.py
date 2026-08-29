@@ -137,6 +137,12 @@ def parse_args():
     ap.add_argument("--state_residual", action="store_true",
                     help="state flow denoises delta = z[t+q*fs] - z[t] instead of z[t+q*fs]; "
                          "sample/inpaint add z_t back (incompatible with --state_ema_target)")
+    ap.add_argument("--state_prior", default="gauss", choices=["gauss", "prev"],
+                    help="MoT flow state head: x_0 = N(0,I) (gauss) or x_0 = z_t (prev): the flow "
+                         "learns the displacement z[t+fs] - z[t] along a straight path and the ODE "
+                         "starts at z_t (owner 2026-08-29, after Action-to-Action Flow Matching)")
+    ap.add_argument("--state_prior_sigma", type=float, default=0.0,
+                    help="with --state_prior prev: x_0 = z_t + sigma * eps (0 = deterministic prior)")
     return ap.parse_args()
 
 
@@ -367,7 +373,8 @@ def main():
                state_target_norm=bool(args.state_target_norm), model=args.model,
                state_detach=bool(args.state_detach), state_depth=int(args.state_depth),
                state_ctx_actions=int(args.frameskip * args.num_states_pred),
-               state_head=args.mot_state_head)
+               state_head=args.mot_state_head, state_prior=args.state_prior,
+               state_prior_sigma=float(args.state_prior_sigma))
     builder = {"jointflow": build_model, "twinflow": build_twinflow, "motflow": build_motflow}[args.model]
     model = builder(cfg).to(device)
     action_mean, action_std = action_stats
@@ -378,6 +385,10 @@ def main():
         "--tau_alpha_state only takes effect with --split_tau (tied tau cannot bias one branch)"
     assert not (args.state_target_norm and args.state_ema_target), \
         "--state_target_norm is the online-target normalization; the ema path has its own"
+    assert args.state_prior == "gauss" or (args.model == "motflow" and args.mot_state_head == "flow"), \
+        "--state_prior prev is implemented for the MoT flow state head"
+    assert not (args.state_prior == "prev" and args.state_residual), \
+        "--state_prior prev and --state_residual both anchor the flow at z_t; pick one"
     assert not (args.state_residual and args.state_ema_target), \
         "--state_residual mixes raw z_t into the target; incompatible with the layernormed ema path"
     if args.model == "twinflow":
