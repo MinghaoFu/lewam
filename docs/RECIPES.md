@@ -452,6 +452,18 @@ beside each checkpoint.
   scene through all 8 blocks (slight late blur); mot_nf's decode(z_GT) is already fog around the
   goal T and its imagined row fades to nothing. In pixels: SIGReg-MSE is a real world model,
   noreg-MSE's advantage over freezing depends on the episode, flow heads don't imagine.**
+  TOOLHANG (2026-08-30, job mf-be4fe995, same protocol on tc_toolhang_mot_* s42; outputs
+  ckpts/wm_viz/tc_<arm>/). Latent MSE per imagined step vs copy-last (ep77 // ep1234):
+    mse-noreg: 0.0005-0.006 vs 0.005-0.058  -> ~10x better than freeze (unlike pusht, where it
+               was ~freeze: toolhang's latent moves enough for the tiny scale to matter)
+    mse-sig:   0.006-0.06  vs 0.45-2.15     -> 20-80x better
+    flow-nore: 0.0004-0.021 vs 0.0001-0.0017 -> ~4-40x WORSE than freeze (its latents barely move)
+    flow-sig:  0.02-0.47   vs 0.19-3.1      -> ~4-10x better, per-step spikes
+  recon PSNR: mse arms 23.4-24.8 dB > flow arms 19.6-22.1 (the toolhang scene is much harder to
+  decode than pusht; late-episode configurations blur in BOTH the recon and imagined rows =
+  decoder limit, not dynamics). Visually: mse-sig's imagined row matches its recon row through
+  all 8 blocks; flow-noreg's decoded GT is already a smeared robot and its imagination decays
+  (per-step cos down to .43). Same ordering as pusht, with mse-noreg's advantage now clear.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
