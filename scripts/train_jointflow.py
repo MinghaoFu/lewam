@@ -466,7 +466,11 @@ def main():
     if args.grad_probe_every > 0:
         from lewam.models.grad_probe import GradProbe
         probe = GradProbe(model.encoder, run_dir / "grad_probe.jsonl",
-                          every=args.grad_probe_every, ema_steps=args.grad_probe_ema)
+                          every=args.grad_probe_every, ema_steps=args.grad_probe_ema,
+                          run_info=dict(run=Path(args.ckpt_sync_dir or str(run_dir)).name,
+                                        model=args.model, state_head=args.mot_state_head,
+                                        w_reg=args.w_reg, dataset=args.dataset_name,
+                                        seed=args.seed, lr=args.lr, epochs=args.epochs))
         probe.optimizer = opt
     n_states = args.num_states_pred
     # bf16 autocast around the forward (train AND val), backward in fp32 -- exactly the

@@ -40,7 +40,8 @@ def _cos(a, b):
 
 
 class GradProbe:
-    def __init__(self, encoder, out_path, every=250, ema_steps=64, precond=True):
+    def __init__(self, encoder, out_path, every=250, ema_steps=64, precond=True, run_info=None):
+        self.run_info = dict(run_info or {})
         self.every = int(every)
         self.alpha = 2.0 / (float(ema_steps) + 1.0)
         self.precond = bool(precond)
@@ -58,6 +59,14 @@ class GradProbe:
         self.bucket_names = sorted(self.buckets) + ["total"]
         self.ema_g = {}                             # (loss, kind) -> flat cpu tensor
         self.ema_n = {}                             # (loss, kind, bucket) -> float
+        if not self.out_path.exists():
+            meta = dict(meta=dict(every=self.every, ema_steps=int(ema_steps),
+                                  ema_beta=round(1.0 - self.alpha, 6), n_params=self.dim,
+                                  buckets={b: int(sum(self.params[i].numel() for i in idx))
+                                           for b, idx in self.buckets.items()},
+                                  pairs=[list(p) for p in PAIRS], **self.run_info))
+            self.out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.out_path.write_text(json.dumps(meta) + "\n")
         print(f"[grad-probe] {len(self.params)} encoder tensors, {off / 1e6:.2f}M params, "
               f"buckets {sorted((b, len(i)) for b, i in self.buckets.items())}, every {self.every}", flush=True)
 
@@ -122,6 +131,12 @@ class GradProbe:
         g_full = self._flat(loss_D)
         flats["Dtar"] = g_full - flats["Din"]
         row = {"step": int(step)}
+        if self.optimizer is not None:
+            st = self.optimizer.state.get(self.params[0])
+            if st and "step" in st:
+                v = st["step"]
+                row["opt_step"] = int(v.item() if torch.is_tensor(v) else v)
+            row["adam_betas"] = list(self.optimizer.param_groups[0]["betas"])
         if scalars:
             row.update({k: float(v) for k, v in scalars.items()})
         nP = float(flats["P"].norm())
