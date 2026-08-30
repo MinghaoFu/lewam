@@ -150,6 +150,11 @@ def parse_args():
                     help="--state_param x: clamp of (1 - tau) in the reparameterization (bounds the 1/(1-tau)^2 weight)")
     ap.add_argument("--state_tau_logit", type=float, nargs=2, default=None, metavar=("MU", "SIGMA"),
                     help="MoT flow state head: draw tau as sigmoid(N(MU, SIGMA)) (JiT: -0.8 0.8) instead of uniform")
+    ap.add_argument("--grad_probe_every", type=int, default=0,
+                    help="every N steps, log encoder gradient geometry (P / D-input / D-target / "
+                         "SIGReg norms, cosines, EMA cosines, Adam-preconditioned) to grad_probe.jsonl; 0 = off")
+    ap.add_argument("--grad_probe_ema", type=int, default=64,
+                    help="EMA window (in probe steps) for the gradient-vector averages")
     return ap.parse_args()
 
 
@@ -457,6 +462,12 @@ def main():
 
     mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)
     sigreg = SIGReg().to(device)
+    probe = None
+    if args.grad_probe_every > 0:
+        from lewam.models.grad_probe import GradProbe
+        probe = GradProbe(model.encoder, run_dir / "grad_probe.jsonl",
+                          every=args.grad_probe_every, ema_steps=args.grad_probe_ema)
+        probe.optimizer = opt
     n_states = args.num_states_pred
     # bf16 autocast around the forward (train AND val), backward in fp32 -- exactly the
     # reference trainers' setup (train_lewam_gc.py:372, train_lewam_unified.py:1106)
@@ -466,7 +477,7 @@ def main():
     print(f"[jointflow] runtime: amp={'bf16' if use_amp else 'fp32'} "
           f"cudnn.benchmark={torch.backends.cudnn.benchmark}", flush=True)
 
-    def run_batch(batch, train=True):
+    def run_batch(batch, train=True, return_probe=False):
         # both datasets return the same 8-tuple; the goal/h are consumed only under
         # --goal_conditioning (fs_strided: offset goal + countdown h; raw: terminal goal + h=0)
         (history_frames, history_pad, action_target, action_valid, state_frames,
@@ -533,7 +544,39 @@ def main():
             loss_reg = sigreg(z_states)
             loss = loss + args.w_reg * loss_reg
             loss_terms["reg"] = loss_reg.item()
+        if return_probe:
+            return loss, loss_terms, B, dict(z_history=z_history, history_pad=history_pad,
+                                             action_target=action_target, action_valid=action_valid,
+                                             state_target=state_target, state_valid=state_valid,
+                                             z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep, B=B)
         return loss, loss_terms, B
+
+    def probe_measure(pc, loss_terms, gstep, epoch):
+        """Encoder gradient geometry on the current batch (owner design 2026-08-30). Runs in
+        fp32 outside the amp context; the forked, re-seeded RNG makes the two model.loss calls
+        draw IDENTICAL tau/noise, so g_D(target-detached) is the exact input-path component, and
+        SIGReg's projections are drawn once per measurement."""
+        seed = 10_000_019 + gstep
+        devs = [torch.device(device)] if str(device).startswith("cuda") else []
+        with torch.random.fork_rng(devices=devs):
+            torch.manual_seed(seed)
+            if devs:
+                torch.cuda.manual_seed_all(seed)
+            la1, ld1 = model.loss(pc["z_history"], pc["history_pad"], pc["action_target"],
+                                  pc["action_valid"], pc["state_target"], pc["state_valid"],
+                                  z_goal=pc["z_goal"], h_norm=pc["h_norm"], goal_keep=pc["goal_keep"])
+            torch.manual_seed(seed)
+            if devs:
+                torch.cuda.manual_seed_all(seed)
+            la2, ld2 = model.loss(pc["z_history"], pc["history_pad"], pc["action_target"],
+                                  pc["action_valid"], pc["state_target"].detach(), pc["state_valid"],
+                                  z_goal=pc["z_goal"], h_norm=pc["h_norm"], goal_keep=pc["goal_keep"])
+            z_states = torch.cat([pc["z_history"][:, -1],
+                                  pc["state_target"].reshape(pc["B"] * n_states, args.z_dim)]).unsqueeze(0)
+            loss_sig = sigreg(z_states)
+        probe.measure(la1, ld1, ld2, loss_sig, gstep,
+                      scalars=dict({k: v for k, v in loss_terms.items()}, lam_S=args.w_reg,
+                                   lr=sched.get_last_lr()[0], epoch=epoch))
 
     def accumulate(store, loss_terms, n):
         for k, v in loss_terms.items():
@@ -543,14 +586,22 @@ def main():
         return " ".join(f"{k}={store[k]/max(n,1):.5f}"
                         for k in ("act", "state", "reg", "zstd") if k in store)
 
+    gstep = start_epoch * max(1, len(train_loader))
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
         mom_now = args.state_ema_base + (1.0 - args.state_ema_base) * (epoch / max(1, args.epochs))
         model.train()
         train_stats, train_n = {}, 0.0
         for batch in train_loader:
+            do_probe = probe is not None and gstep % args.grad_probe_every == 0
             with amp_ctx():
-                loss, loss_terms, n = run_batch(batch)
+                out = run_batch(batch, return_probe=do_probe)
+            if do_probe:
+                loss, loss_terms, n, pc = out
+                probe_measure(pc, loss_terms, gstep, epoch)
+            else:
+                loss, loss_terms, n = out
+            gstep += 1
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -584,6 +635,8 @@ def main():
             full_state["idm_head"] = idm_head.state_dict()
         torch.save(full_state, full_path)
         files = [run_dir / "jointflow_config.json", run_dir / "jointflow_latest.pt", full_path]
+        if probe is not None and (run_dir / "grad_probe.jsonl").exists():
+            files.append(run_dir / "grad_probe.jsonl")
         if val_act < best_val:
             best_val = val_act
             torch.save(model.state_dict(), run_dir / "jointflow_best.pt")
