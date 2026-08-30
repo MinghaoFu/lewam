@@ -464,6 +464,21 @@ beside each checkpoint.
   decoder limit, not dynamics). Visually: mse-sig's imagined row matches its recon row through
   all 8 blocks; flow-noreg's decoded GT is already a smeared robot and its imagination decays
   (per-step cos down to .43). Same ordering as pusht, with mse-noreg's advantage now clear.**
+- **SUBGOAL PLANNING ON TOOLHANG (2026-08-30, job mf-ac781163, code 6d71d99; goal-blind TC
+  checkpoints, cost target = the encoded demo frame 25 raw steps (5 blocks) ahead of the env's
+  current step, replanned every block; 20 episodes x 1 seed, proof of concept. The model consumes
+  no goal input; the subgoal enters only the planner's cost).
+  mse-sig (tc_toolhang_mot_sm, reactive 54.7): SELECTION (best of 32 BC-policy rollouts through
+  the dynamics vs the subgoal) = 80.0 -- +25, at mse-noreg's reactive 80.7 and near flow-noreg's
+  86. The SIGReg reactive penalty is largely RECOVERABLE at plan time: the policy's latent is the
+  bottleneck, and the dynamics + a subgoal supply what it lacks.
+  Free GRADIENT refinement: mse-sig 10.0, mse-noreg 0.0 -- the optimizer moved plans ||U-U0|| ~8.9
+  z-units (pusht: 1.2-2.2), "improved" the model cost 0.025 -> 0.004 on 100% of replans, and real
+  success collapsed: on the contact-rich 7-dim cell the dynamics is confidently wrong far
+  off-manifold and the unconstrained gradient finds exactly that region (on pusht the same
+  planner gave 95.3 and the trust region only hurt; here a trust region / fewer steps is the
+  missing guard -- untested). Consistent with the oracle picture: the model is a reliable
+  verifier NEAR the manifold, exploitable far from it.**
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
