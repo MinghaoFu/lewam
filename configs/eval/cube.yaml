@@ -54,6 +54,12 @@ eval:
         target_quat:
           value: goal_privileged_block_0_quat
 
+    # -- goal end-effector pose (for the +eff success term; inert unless CUBE_EEF_THRESHOLD set)
+    - method: set_goal_effector
+      args:
+        goal_effector:
+          value: goal_proprio_effector_pos
+
 output:
   filename: ogb_cube_results.txt
 

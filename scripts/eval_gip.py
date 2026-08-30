@@ -40,6 +40,7 @@ import lewam.models.gip as gip
 # so existing configs pay nothing and a new cell needs only its configs/eval yaml.
 _ENV_MODULES = {
     "swm/RoboMimicGC-v0": "lewam.envs.robomimic_gc_env",
+    "swm/OGBCube-v0": "lewam.envs.cube_env",
     "swm/DexMimicGen-v0": "lewam.envs.dexmimicgen_env",
     "swm/PointMaze-v0": "lewam.envs.pointmaze_env",
     "swm/RoboMimic-v0": "lewam.envs.robomimic_env",
