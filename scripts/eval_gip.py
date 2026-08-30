@@ -107,6 +107,39 @@ class BudgetTruncate(gymnasium.Wrapper):
         return obs, rew, terminated, truncated, info
 
 
+def _subgoal_kwargs(cfg, dataset, episodes, starts):
+    """gip_eval.subgoal_every > 0: per env, the demo's fs-strided frames from its start step
+    (uint8 HWC), read straight from the eval h5 (the dataset column would load every pixel)."""
+    ge = cfg.get("gip_eval", {})
+    if int(ge.get("subgoal_every", 0)) <= 0:
+        return None
+    import h5py
+    fs = int(cfg.plan_config.action_block)
+    col = gip.episode_col(dataset)
+    ep_arr = np.asarray(dataset.get_col_data(col)).reshape(-1)
+    st_arr = np.asarray(dataset.get_col_data("step_idx")).reshape(-1)
+    h5_path = Path(swm.data.utils.get_cache_dir(), "datasets", str(cfg.eval.dataset_name) + ".h5")
+    frames = []
+    with h5py.File(h5_path, "r") as f:
+        px = f["pixels"]
+        for e, s0 in zip(episodes, starts):
+            rows = np.nonzero(ep_arr == e)[0]
+            rows = rows[np.argsort(st_arr[rows])][int(s0)::fs]
+            order = np.argsort(rows)                  # h5py needs increasing fancy indices;
+            frames.append(px[rows[order]][np.argsort(order)])   # then restore step order
+    print(f"[subgoal] demo frame stacks for {len(frames)} envs, anchors "
+          f"{min(len(a) for a in frames)}..{max(len(a) for a in frames)}", flush=True)
+    return dict(subgoal_frames=frames)
+
+
+def _policy_kwargs(cfg, dataset, episodes, starts):
+    ok = _oracle_kwargs(cfg, dataset, episodes, starts)
+    sk = _subgoal_kwargs(cfg, dataset, episodes, starts)
+    if ok is None and sk is None:
+        return None
+    return {**(ok or {}), **(sk or {})}
+
+
 def _oracle_kwargs(cfg, dataset, episodes, starts):
     """plan_mode=oracle_bok: the replayed demos' action sequences from each env's start step (raw
     env units), for the oracle candidate sets (jointflow _oracle_bok / OracleSolver)."""
@@ -405,7 +438,7 @@ def run(cfg: DictConfig):
         model._jointflow_cfg = jf_cfg
         adim = int(jf_cfg["action_dim"])
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets,
-                                  policy_kwargs=_oracle_kwargs(cfg, dataset, episodes, starts))
+                                  policy_kwargs=_policy_kwargs(cfg, dataset, episodes, starts))
     elif mode in ("unified_policy", "unified_cem", "unified_grad", "unified_prompt_mpc"):
         # LeWAM-Unified: its own loader + config; adim = the model's z-scored action block dim.
         # unified_cem = CEM planner over the dynamics head (same loader, different policy in build_policy).
@@ -432,7 +465,7 @@ def run(cfg: DictConfig):
             print(f"[GIP] multi-task: eval_task={model.eval_task} of {model.mt_task_names}  "
                   f"action pad {d_raw}x{f} -> trained block")
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets,
-                                  policy_kwargs=_oracle_kwargs(cfg, dataset, episodes, starts))
+                                  policy_kwargs=_policy_kwargs(cfg, dataset, episodes, starts))
     print(f"[GIP] eval mode={mode} policy={type(policy).__name__}")
 
     # random-goal eval: a goal-conditioned policy fed an off-distribution goal can extrapolate to

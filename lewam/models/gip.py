@@ -543,6 +543,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             pm_rho=float(ge.get("pm_rho", 0.3)),
             pm_random=bool(ge.get("pm_random", False)),
             oracle_cands=str(ge.get("oracle_cands", "uniform")),
+            subgoal_every=int(ge.get("subgoal_every", 0)),
             grad_steps=int(ge.get("grad_steps", 50)),
             grad_lr=float(ge.get("grad_lr", 0.05)),
             grad_clip=float(ge.get("grad_clip", 10.0)),
@@ -1474,11 +1475,21 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.grad_action_clip = float(kwargs.pop("grad_action_clip", 3.0))   # |z-scored action| bound (0 = off)
         self.pm_K = int(kwargs.pop("pm_K", 0))                    # SteerMPC on MoT: noise draws per env (0 = plan_k)
         self.pm_chunk = int(kwargs.pop("pm_chunk", 8))            # SteerMPC on MoT: envs per optimization batch (memory)
+        # subgoal planning (owner 2026-08-30): cost target = the demo's frame subgoal_every raw
+        # steps ahead of the env's current step (frames via policy_kwargs, fs-strided, uint8 HWC);
+        # the model stays goal-blind -- the subgoal enters only the planner's cost.
+        self.subgoal_every = int(kwargs.pop("subgoal_every", 0))
+        self.subgoal_frames = kwargs.pop("subgoal_frames", None)
         # rollout scorers take the cost at each env's GOAL TIME (block H_i = remaining blocks,
         # capped at plan_rollout) instead of after the last imagined block
         self.plan_goal_time = bool(kwargs.pop("plan_goal_time", True))
         super().__init__(model, cfg, *args, **kwargs)
         assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok", "grad"), self.plan_mode
+        if self.subgoal_every > 0:
+            assert self.plan_mode in ("best_of_k", "grad"), "subgoal cost: best_of_k / grad"
+            assert self.subgoal_frames is not None, "subgoal planning needs the demo frames (eval_gip passes them)"
+            assert self.expert_actions is None, "subgoal and oracle candidate modes both track raw_done; pick one"
+            self._raw_done = None
         if self.plan_mode == "oracle_bok":
             assert self.expert_actions is not None, "oracle_bok needs the demo actions (eval_gip passes them)"
             assert self.oracle_cands in ("uniform", "shuffle"), self.oracle_cands
@@ -1537,16 +1548,44 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             self._prev_plan[i] = None
         if getattr(self, "_raw_done", None) is not None:
             self._raw_done[i] = 0
-            if self._oracle_idx is not None:
+            if getattr(self, "_oracle_idx", None) is not None:
                 self._oracle_idx[i] = 0; self._oracle_ondemo[i] = True
 
     @staticmethod
     def _final_cost(z_imag, z_goal):
         return ((z_imag[:, -1] - z_goal) ** 2).mean(-1)
 
+    def _subgoal_latents(self, replan, device):
+        """Encode, per replanning env, the demo frame subgoal_every raw steps ahead of the env's
+        current step (clamped to the demo's last frame). Frames are fs-strided uint8 HWC."""
+        if self._raw_done is None:
+            self._raw_done = np.zeros(len(self.subgoal_frames), dtype=int)
+        fs = self.action_block
+        stats = spt.data.dataset_stats.ImageNet
+        mean = torch.tensor(stats["mean"]).view(3, 1, 1)
+        std = torch.tensor(stats["std"]).view(3, 1, 1)
+        frames = []
+        for i in replan:
+            fr = self.subgoal_frames[i]
+            idx = min(int(round((self._raw_done[i] + self.subgoal_every) / fs)), len(fr) - 1)
+            x = torch.from_numpy(np.ascontiguousarray(fr[idx])).permute(2, 0, 1).float() / 255.0
+            frames.append((x - mean) / std)
+        return self._enc(torch.stack(frames).to(device))
+
     def _propose(self, info_dict, replan, history, history_pad):
-        assert "goal" in info_dict, "jointflow_plan eval needs info_dict['goal'] (goal-reaching)"
         device = history.device
+        if self.subgoal_every > 0:
+            z_goal = self._subgoal_latents(replan, device)
+            plan = (self._grad_plan(history, history_pad, z_goal, None) if self.plan_mode == "grad"
+                    else self._best_of_k(history, history_pad, z_goal))
+            take = self._take()
+            for i in replan:
+                self._raw_done[i] += take
+            if self._prev_plan is not None:
+                for row, i in enumerate(replan):
+                    self._prev_plan[i] = plan[row]
+            return plan
+        assert "goal" in info_dict, "jointflow_plan eval needs info_dict['goal'] (goal-reaching)"
         goal = info_dict["goal"][replan]
         g_obs = goal[:, -1] if goal.ndim == 5 else goal
         z_goal = self._enc(g_obs.to(device).float())
