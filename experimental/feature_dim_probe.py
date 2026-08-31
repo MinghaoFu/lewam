@@ -12,10 +12,12 @@ Per (arm, snapshot), on one fixed probe set of training windows (identical acros
   2. usage (diagnostic) E[(u_k^T dL/dz)^2] at the latent, encoder held fixed, for
                        P (action loss wrt z_t), D_in (state loss wrt z_t input path),
                        D_tar (state loss wrt state_target), S (SIGReg wrt z_t).
-  3. ablation (causal)  direction k's variation replaced by its probe mean in ALL latents fed to
-                       the trunk (z_history, state_target, SIGReg input); same RNG draws ->
-                       dL_P(k), dL_D(k), dL_S(k). Top --abl_top directions individually, the
-                       rest in bands. This is the necessity measure A_k.
+  3. ablation (causal)  direction k's variation replaced by its probe mean in the latents fed
+                       to the trunk; same RNG draws -> dL_P(k), dL_D(k), dL_S(k). Top
+                       --abl_top directions individually, the rest in bands. Default variant
+                       "all" ablates every latent (both history slots, state target, goal when
+                       present); --slot_abl adds per-slot variants (zt / prev / tar / goal) to
+                       separate where the policy reads from where the dynamics writes.
   4. induced representation update (centerpiece): encoder-parameter gradients g_l for
                        l in {P, D_full, D_in, S} on the same batch (D_tar = D_full - D_in;
                        the target-detached second loss call under identical RNG gives the exact
@@ -29,14 +31,22 @@ Per (arm, snapshot), on one fixed probe set of training windows (identical acros
   5. conflict index    conflict_k = sqrt(A_P,k * A_D,k) * max(0, -a_k): opposite pushes only
                        count where BOTH losses demonstrably need the direction.
 
+Supports both cell protocols: raw TC arms (toolhang probe retrains; goal-blind) and fs-strided
+GR arms (pusht mot grid; goal-conditioned -- real goals are encoded and fed, and the goal
+latent participates in ablation and the encoder gradients, mirroring training). GR goal
+offsets draw from the global RNG inside the dataset, so probe windows are materialized under
+a forked, re-seeded RNG: every arm/snapshot/rerun sees identical windows AND goals.
+
 All loss evaluations per (arm,snap) run under forked, re-seeded RNG so tau/noise/SIGReg
 projections are identical draws across evaluations; differences are pure signal. Everything
 fp32, model.eval(). One npz per (arm,snap); resumable (existing npz skipped without --force).
+np.savez needs a seekable file, which HDFS fuse rejects (Errno 95): write local, copy.
 
 Usage (GPU job):
-  python3 experimental/feature_dim_probe.py --sync_root <ckpts/jointflow_tc> \
-      --arms mot_nm,mot_sm,mot_nf,mot_sf --snaps ep15,ep30,ep45,ep60,ep75,ep90,ep105,final \
-      --out <ckpts/jointflow_tc>/fdp
+  python3 experimental/feature_dim_probe.py --sync_root <ckpts root> --out <out dir> \
+      --run_tpl 'tc_toolhang_probe_{arm}_s0' --arms mot_nm,mot_sm,mot_nf,mot_sf \
+      --snaps ep15,...,final --slot_abl
+  pusht GR grid: --run_tpl 'jointflow_gr_{arm}/{arm}_s42' --snaps ep25,ep40,final
 Smoke (CPU, synthetic windows, real weights):
   python3 experimental/feature_dim_probe.py --smoke --arms mot_nm --snaps ep15 --out /tmp/fdp
 """
@@ -68,7 +78,9 @@ PAIRS = [("P", "Dfull"), ("P", "Din"), ("P", "Dtar"), ("P", "S"),
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sync_root", default="/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/"
-                                           "lewam/ckpts/jointflow_tc")
+                                           "lewam/ckpts")
+    ap.add_argument("--run_tpl", default="jointflow_tc/tc_toolhang_probe_{arm}_s0",
+                    help="run-dir template under sync_root; {arm} is substituted")
     ap.add_argument("--arms", default="mot_nm,mot_sm,mot_nf,mot_sf")
     ap.add_argument("--snaps", default="ep15,ep30,ep45,ep60,ep75,ep90,ep105,final")
     ap.add_argument("--out", required=True)
@@ -82,6 +94,8 @@ def parse_args():
     ap.add_argument("--enc_chunk", type=int, default=256)
     ap.add_argument("--abl_top", type=int, default=32)
     ap.add_argument("--abl_band", type=int, default=32)
+    ap.add_argument("--slot_abl", action="store_true",
+                    help="add per-slot ablation variants (zt / prev / tar / goal)")
     ap.add_argument("--dz_target", type=float, default=1e-3,
                     help="calibrated rms(dz)/rms(z) for the virtual step")
     ap.add_argument("--seed", type=int, default=777)
@@ -93,13 +107,13 @@ def parse_args():
     return ap.parse_args()
 
 
-def load_arm_model(sync_root, arm, snap, device):
-    d = Path(sync_root) / f"tc_toolhang_probe_{arm}_s0"
+def load_arm_model(sync_root, run_tpl, arm, snap, device):
+    d = Path(sync_root) / run_tpl.format(arm=arm)
     cfg = json.loads((d / "jointflow_config.json").read_text())
     cfg.setdefault("action_dim", int(cfg["fs"]) * int(cfg["action_raw_dim"]))
     assert cfg["model"] == "motflow", cfg["model"]
-    assert not cfg["goal_conditioning"] and not cfg["state_residual"] \
-        and not cfg["state_ema_target"], "analysis assumes plain TC MoT (no goal/residual/ema)"
+    assert not cfg["state_residual"] and not cfg["state_ema_target"], \
+        "analysis assumes plain MoT (no residual/ema target)"
     model = build_motflow(cfg)
     ckpt = d / ("jointflow_best.pt" if snap == "final" else f"snap_{snap}.pt")
     sd = torch.load(ckpt, map_location="cpu")
@@ -111,80 +125,123 @@ def load_arm_model(sync_root, arm, snap, device):
 
 def build_probe_windows(cfg, n_probe, seed, smoke):
     """The trainer's exact dataset over the TRAIN split, n_probe windows drawn with a fixed
-    generator so every arm/snapshot (and every resumed run) sees identical windows."""
+    generator; rows materialized under a forked, re-seeded RNG (the GR dataset draws its goal
+    offset from the global RNG) so every arm/snapshot/rerun sees identical windows and goals."""
+    goal_cond = bool(cfg["goal_conditioning"])
     if smoke:
         g = torch.Generator().manual_seed(seed)
         L, S, A, isz = cfg["policy_history_len"], cfg["num_states_pred"], \
             cfg["num_actions_pred"], cfg["img_size"]
-        return dict(
+        pw = dict(
             history_frames=torch.randint(0, 255, (n_probe, L, 3, isz, isz), generator=g,
                                          dtype=torch.uint8),
-            history_pad=torch.zeros(n_probe, L),
+            history_pad=torch.zeros(n_probe, L, dtype=torch.bool),
             action_target=torch.randn(n_probe, A, cfg["action_raw_dim"], generator=g),
             action_valid=torch.ones(n_probe, A),
             state_frames=torch.randint(0, 255, (n_probe, S, 3, isz, isz), generator=g,
                                        dtype=torch.uint8),
             state_valid=torch.ones(n_probe, S))
-    from train_jointflow import JointFlowDataset
+        if goal_cond:
+            pw["goal_frames"] = torch.randint(0, 255, (n_probe, 3, isz, isz), generator=g,
+                                              dtype=torch.uint8)
+            pw["h_norm"] = torch.rand(n_probe, generator=g)
+        return pw
+    from train_jointflow import JointFlowDataset, JointFlowGRDataset, load_cache_obs
     ca = argparse.Namespace(frames_cache=cfg["frames_cache"], dataset_name=cfg["dataset_name"],
                             frameskip=cfg["frameskip"], img_size=cfg["img_size"], cache_mmap=True)
-    frames, a_frame, t_gidx, ep_base, frames_to_terminal, _ = load_cache(ca)
+    if cfg["fs_strided"]:
+        frames, a_block, t_gidx, maxh, ep_base, _ = load_cache_obs(ca)
+        tail, min_tail = maxh, 1
+    else:
+        frames, a_frame, t_gidx, ep_base, frames_to_terminal, _ = load_cache(ca)
+        tail, min_tail = frames_to_terminal, cfg["frameskip"]
     gen = torch.Generator().manual_seed(cfg["seed"])            # the trainer's split, verbatim
     perm = torch.randperm(t_gidx.shape[0], generator=gen)
-    perm = perm[frames_to_terminal[perm] >= cfg["frameskip"]]
+    perm = perm[tail[perm] >= min_tail]
     n_val = int(round((1 - cfg["train_split"]) * perm.numel()))
     train_idx = perm[n_val:]
     pick = torch.randperm(train_idx.numel(),
                           generator=torch.Generator().manual_seed(seed))[:n_probe]
-    ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, train_idx[pick],
-                          cfg["policy_history_len"], cfg["num_actions_pred"], cfg["frameskip"],
-                          cfg["num_states_pred"])
-    rows = [ds[i] for i in range(len(ds))]
-    hf, hp, at, av, sf, sv, _goal, _h = (torch.stack([r[j] for r in rows]) for j in range(8))
-    return dict(history_frames=hf, history_pad=hp, action_target=at.float(), action_valid=av,
-                state_frames=sf, state_valid=sv)
+    if cfg["fs_strided"]:
+        ds = JointFlowGRDataset(frames, a_block, t_gidx, maxh, ep_base, train_idx[pick],
+                                cfg["policy_history_len"], cfg["num_actions_pred"],
+                                cfg["num_states_pred"], cfg["frameskip"], cfg["H_max"])
+    else:
+        ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal,
+                              train_idx[pick], cfg["policy_history_len"],
+                              cfg["num_actions_pred"], cfg["frameskip"],
+                              cfg["num_states_pred"])
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)                                  # GR goal offsets, fixed
+        rows = [ds[i] for i in range(len(ds))]
+    hf, hp, at, av, sf, sv, goal, hn = (torch.stack([torch.as_tensor(r[j]) for r in rows])
+                                        for j in range(8))
+    pw = dict(history_frames=hf, history_pad=hp.bool(), action_target=at.float(),
+              action_valid=av, state_frames=sf, state_valid=sv)
+    if goal_cond:
+        pw["goal_frames"] = goal
+        pw["h_norm"] = hn.float()
+    return pw
 
 
-def encode_windows(model, pw, sl, device, mean, std, chunk, grad=False):
-    """Mirror run_batch: one encoder call over (history frames ++ state frames) per chunk.
-    Returns z_hist (n,L,zd), z_state (n,S,zd)."""
+def make_norm(mean, std):
+    """run_batch's dtype-gated normalization: uint8 caches get /255-mean-std, pre-normalized
+    fp16 caches pass through."""
+    def norm(px):
+        if px.dtype == torch.uint8:
+            return (px.float() / 255.0 - mean) / std
+        return px.float()
+    return norm
+
+
+def encode_windows(model, pw, sl, device, norm, chunk, grad=False):
+    """Mirror run_batch: one encoder call over (history ++ state [++ goal]) frames per chunk.
+    Returns z_hist (n,L,zd), z_state (n,S,zd), z_goal (n,zd) or None."""
     hf, sf = pw["history_frames"][sl], pw["state_frames"][sl]
+    gf = pw.get("goal_frames")
+    gf = gf[sl] if gf is not None else None
     n, L, S = hf.shape[0], hf.shape[1], sf.shape[1]
-    zh, zs = [], []
+    zh, zs, zg = [], [], []
     ctx = torch.enable_grad if grad else torch.no_grad
     with ctx():
         for i in range(0, n, chunk):
             h = hf[i:i + chunk].to(device)
             s = sf[i:i + chunk].to(device)
             b = h.shape[0]
-            px = torch.cat([h.reshape(b * L, *h.shape[2:]), s.reshape(b * S, *s.shape[2:])])
-            px = (px.float() / 255.0 - mean) / std
-            z = model.encode(px)
+            pix = [h.reshape(b * L, *h.shape[2:]), s.reshape(b * S, *s.shape[2:])]
+            if gf is not None:
+                pix.append(gf[i:i + chunk].to(device))
+            z = model.encode(norm(torch.cat(pix)))
             zh.append(z[:b * L].reshape(b, L, -1))
-            zs.append(z[b * L:].reshape(b, S, -1))
-    return torch.cat(zh), torch.cat(zs)
+            zs.append(z[b * L:b * (L + S)].reshape(b, S, -1))
+            if gf is not None:
+                zg.append(z[b * (L + S):])
+    return torch.cat(zh), torch.cat(zs), (torch.cat(zg) if zg else None)
 
 
-def encode_frames(encoder, frames_u8, device, mean, std, chunk, params=None):
+def encode_frames(encoder, frames_u8, device, norm, chunk, params=None):
     """Plain frame encoding, optionally through functional_call with shifted params."""
     out = []
     with torch.no_grad():
         for i in range(0, frames_u8.shape[0], chunk):
-            px = (frames_u8[i:i + chunk].to(device).float() / 255.0 - mean) / std
+            px = norm(frames_u8[i:i + chunk].to(device))
             out.append(functional_call(encoder, params, (px,)) if params is not None
                        else encoder(px))
     return torch.cat(out)
 
 
-def losses_on(model, sigreg, zh, pad, at, av, st, sv, seed, device, detach_target=False):
+def losses_on(model, sigreg, zh, pad, at, av, st, sv, zg, hn, seed, device,
+              detach_target=False):
     """One (loss_action, loss_state, loss_sigreg) evaluation under forked, re-seeded RNG, so
-    every call with the same seed draws identical tau/noise/projections."""
+    every call with the same seed draws identical tau/noise/projections. SIGReg's input is
+    the trainer's: cat(z_t, state_target) -- the goal latent is excluded, as in run_batch."""
     devs = [device] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=devs):
         torch.manual_seed(seed)
         if devs:
             torch.cuda.manual_seed_all(seed)
-        la, ls = model.loss(zh, pad, at, av, st.detach() if detach_target else st, sv)
+        la, ls = model.loss(zh, pad, at, av, st.detach() if detach_target else st, sv,
+                            z_goal=zg, h_norm=hn)
         zd = zh.shape[-1]
         zcat = torch.cat([zh[:, -1], st.reshape(-1, zd)]).unsqueeze(0)
         lg = sigreg(zcat)
@@ -198,27 +255,48 @@ def ablate(z, U_cols, m_cols):
     return z - proj @ U_cols.T
 
 
+def ablate_slot(zh, st, zg, U_cols, m_cols, slot):
+    """Apply the direction ablation to one slot only ('all' = every latent the trunk sees)."""
+    if slot == "all":
+        return ablate(zh, U_cols, m_cols), ablate(st, U_cols, m_cols), \
+            (ablate(zg, U_cols, m_cols) if zg is not None else None)
+    if slot == "zt":
+        zh2 = zh.clone()
+        zh2[:, -1] = ablate(zh[:, -1], U_cols, m_cols)
+        return zh2, st, zg
+    if slot == "prev":
+        zh2 = zh.clone()
+        zh2[:, :-1] = ablate(zh[:, :-1], U_cols, m_cols)
+        return zh2, st, zg
+    if slot == "tar":
+        return zh, ablate(st, U_cols, m_cols), zg
+    if slot == "goal":
+        return zh, st, ablate(zg, U_cols, m_cols)
+    raise ValueError(slot)
+
+
 def usage_spectrum(rows, U):
     """rows (n, zd) of per-sample latent gradients -> mean squared projection per direction."""
     return (rows @ U).pow(2).mean(0)
 
 
-def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, git_sha):
+def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, norm, git_sha):
     t0 = time.time()
     zd = cfg["z_dim"]
+    goal_cond = "goal_frames" in pw
     sigreg = SIGReg().to(device)
     seed = args.seed
-    meta = dict(arm=arm, snap=snap, w_reg=cfg["w_reg"], state_head=cfg["mot_state_head"],
+    meta = dict(arm=arm, snap=snap, run_tpl=args.run_tpl, w_reg=cfg["w_reg"],
+                state_head=cfg["mot_state_head"], goal_cond=goal_cond,
                 n_probe=args.n_probe, n_grad=args.n_grad, n_eval=args.n_eval, seed=seed,
                 dz_target=args.dz_target, git_sha=git_sha, time=time.strftime("%F %T"))
     res = {}
 
     # ---- 1. spectrum -------------------------------------------------------------------
-    zh_all, zs_all = encode_windows(model, pw, slice(0, args.n_probe), device, mean, std,
-                                    args.enc_chunk)
+    zh_all, zs_all, zg_all = encode_windows(model, pw, slice(0, args.n_probe), device, norm,
+                                            args.enc_chunk)
     z_t = zh_all[:, -1]
     z_next = zs_all[:, 0]
-    mu_t = z_t.mean(0)
     C = torch.cov(z_t.T)
     lam, U = torch.linalg.eigh(C)
     order = torch.argsort(lam, descending=True)
@@ -229,19 +307,24 @@ def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, g
     res["eff_rank"] = (tot ** 2 / lam.pow(2).sum().clamp_min(1e-12)).reshape(1)
     res["top_share"] = torch.stack([lam[:k].sum() / tot for k in (1, 8, 32, 64)])
     res["var_disp"] = ((z_next - z_t) @ U).var(0)
-    pooled = torch.cat([zh_all.reshape(-1, zd), zs_all.reshape(-1, zd)])
-    m_proj = pooled.mean(0) @ U                                          # ablation centers
+    pooled = [zh_all.reshape(-1, zd), zs_all.reshape(-1, zd)]
+    if zg_all is not None:
+        pooled.append(zg_all)
+    m_proj = torch.cat(pooled).mean(0) @ U                               # ablation centers
 
     # ---- 2. usage (diagnostic) ---------------------------------------------------------
     gsl = slice(0, args.n_grad)
-    zh_g, zs_g = encode_windows(model, pw, gsl, device, mean, std, args.enc_chunk)
+    zh_g, zs_g, zg_g = encode_windows(model, pw, gsl, device, norm, args.enc_chunk)
     zh_leaf = zh_g.detach().requires_grad_(True)
     st_leaf = zs_g.detach().requires_grad_(True)
+    zg_d = zg_g.detach() if zg_g is not None else None
     pad = pw["history_pad"][gsl].to(device)
     at = pw["action_target"][gsl].to(device)
     av = pw["action_valid"][gsl].to(device)
     sv = pw["state_valid"][gsl].to(device)
-    la, ls, lg = losses_on(model, sigreg, zh_leaf, pad, at, av, st_leaf, sv, seed, device)
+    hn = pw["h_norm"][gsl].to(device) if goal_cond else None
+    la, ls, lg = losses_on(model, sigreg, zh_leaf, pad, at, av, st_leaf, sv, zg_d, hn,
+                           seed, device)
     gP = torch.autograd.grad(la, zh_leaf, retain_graph=True)[0]
     gD_zh, gD_st = torch.autograd.grad(ls, [zh_leaf, st_leaf], retain_graph=True)
     gS_zh, _gS_st = torch.autograd.grad(lg, [zh_leaf, st_leaf])
@@ -256,22 +339,29 @@ def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, g
     groups = [[k] for k in range(args.abl_top)]
     groups += [list(range(a, min(a + args.abl_band, zd)))
                for a in range(args.abl_top, zd, args.abl_band)]
-    dl = {n: [] for n in ("P", "D", "S")}
+    slots = ["all"] + ((["zt", "prev", "tar"] + (["goal"] if goal_cond else []))
+                       if args.slot_abl else [])
     zh_a, st_a = zh_g.detach(), zs_g.detach()
     with torch.no_grad():
-        la0, ls0, lg0 = losses_on(model, sigreg, zh_a, pad, at, av, st_a, sv, seed, device)
-        for cols in groups:
-            Uc, mc = U[:, cols], m_proj[cols]
-            la_d, ls_d, lg_d = losses_on(model, sigreg, ablate(zh_a, Uc, mc), pad, at, av,
-                                         ablate(st_a, Uc, mc), sv, seed, device)
-            dl["P"].append(la_d - la0)
-            dl["D"].append(ls_d - ls0)
-            dl["S"].append(lg_d - lg0)
+        la0, ls0, lg0 = losses_on(model, sigreg, zh_a, pad, at, av, st_a, sv, zg_d, hn,
+                                  seed, device)
+        for slot in slots:
+            dl = {n: [] for n in ("P", "D", "S")}
+            for cols in groups:
+                Uc, mc = U[:, cols], m_proj[cols]
+                zh_x, st_x, zg_x = ablate_slot(zh_a, st_a, zg_d, Uc, mc, slot)
+                la_d, ls_d, lg_d = losses_on(model, sigreg, zh_x, pad, at, av, st_x, sv,
+                                             zg_x, hn, seed, device)
+                dl["P"].append(la_d - la0)
+                dl["D"].append(ls_d - ls0)
+                dl["S"].append(lg_d - lg0)
+            sfx = "" if slot == "all" else f"_{slot}"
+            for n in ("P", "D", "S"):
+                res[f"abl_dL_{n}{sfx}"] = torch.stack(dl[n])
     res["abl_groups_lo"] = torch.tensor([g[0] for g in groups])
     res["abl_groups_hi"] = torch.tensor([g[-1] for g in groups])
-    for n in ("P", "D", "S"):
-        res[f"abl_dL_{n}"] = torch.stack(dl[n])
     meta["abl_base"] = dict(P=la0.item(), D=ls0.item(), S=lg0.item())
+    meta["abl_slots"] = slots
 
     # ---- 4. induced representation updates ---------------------------------------------
     enc = model.encoder
@@ -283,19 +373,19 @@ def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, g
     nc = 0
     for i in range(0, args.n_grad, args.grad_chunk):
         csl = slice(i, min(i + args.grad_chunk, args.n_grad))
-        zh_c, zs_c = encode_windows(model, pw, csl, device, mean, std, args.grad_chunk,
-                                    grad=True)
+        zh_c, zs_c, zg_c = encode_windows(model, pw, csl, device, norm, args.grad_chunk,
+                                          grad=True)
         w = zh_c.shape[0] / args.n_grad
         sc = seed + 1000 + nc
-        la1, ls1, lg1 = losses_on(model, sigreg, zh_c, pw["history_pad"][csl].to(device),
-                                  pw["action_target"][csl].to(device),
-                                  pw["action_valid"][csl].to(device), zs_c,
-                                  pw["state_valid"][csl].to(device), sc, device)
-        _la2, ls2, _ = losses_on(model, sigreg, zh_c, pw["history_pad"][csl].to(device),
-                                 pw["action_target"][csl].to(device),
-                                 pw["action_valid"][csl].to(device), zs_c,
-                                 pw["state_valid"][csl].to(device), sc, device,
-                                 detach_target=True)
+        hn_c = pw["h_norm"][csl].to(device) if goal_cond else None
+        pad_c = pw["history_pad"][csl].to(device)
+        at_c = pw["action_target"][csl].to(device)
+        av_c = pw["action_valid"][csl].to(device)
+        sv_c = pw["state_valid"][csl].to(device)
+        la1, ls1, lg1 = losses_on(model, sigreg, zh_c, pad_c, at_c, av_c, zs_c, sv_c,
+                                  zg_c, hn_c, sc, device)
+        _la2, ls2, _ = losses_on(model, sigreg, zh_c, pad_c, at_c, av_c, zs_c, sv_c,
+                                 zg_c, hn_c, sc, device, detach_target=True)
         assert abs(la1.item() - _la2.item()) < 1e-5, "RNG fork broke: action losses differ"
         enc_plist = [p for _, p in enc.named_parameters()]
         for name, loss in (("P", la1), ("Dfull", ls1), ("Din", ls2), ("S", lg1)):
@@ -303,19 +393,19 @@ def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, g
             for a, g in zip(acc[name], gs):
                 if g is not None:
                     a.add_(g, alpha=w)
-        del la1, ls1, lg1, _la2, ls2, zh_c, zs_c
+        del la1, ls1, lg1, _la2, ls2, zh_c, zs_c, zg_c
         nc += 1
     acc["Dtar"] = [f - i for f, i in zip(acc["Dfull"], acc["Din"])]
 
     ev_frames = pw["history_frames"][:args.n_eval, -1]                  # current frames
-    Z0 = encode_frames(enc, ev_frames, device, mean, std, args.enc_chunk)
+    Z0 = encode_frames(enc, ev_frames, device, norm, args.enc_chunk)
     z_rms = Z0.pow(2).mean().sqrt().item()
     theta_norm = torch.sqrt(sum(p.pow(2).sum() for p in base_params.values())).item()
 
     def step_encode(g_list, eps):
         shifted = {k: base_params[k] - eps * g for k, g in zip(enc_names, g_list)}
         shifted.update(buffers)
-        return encode_frames(enc, ev_frames, device, mean, std, args.enc_chunk, params=shifted)
+        return encode_frames(enc, ev_frames, device, norm, args.enc_chunk, params=shifted)
 
     V, dz_norm, eps_used, g_norm = {}, {}, {}, {}
     for name in LOSS_NAMES:
@@ -384,7 +474,7 @@ def main():
         args.grad_chunk, args.enc_chunk, args.abl_top, args.abl_band = 8, 16, 4, 128
         torch.set_num_threads(16)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mean, std = _IMG_MEAN.to(device), _IMG_STD.to(device)
+    norm = make_norm(_IMG_MEAN.to(device), _IMG_STD.to(device))
     git_sha = "unknown"
     try:
         import subprocess
@@ -394,10 +484,11 @@ def main():
         pass
     out = Path(args.out)
     arms, snaps = args.arms.split(","), args.snaps.split(",")
-    cfg0 = json.loads((Path(args.sync_root) / f"tc_toolhang_probe_{arms[0]}_s0" /
+    cfg0 = json.loads((Path(args.sync_root) / args.run_tpl.format(arm=arms[0]) /
                        "jointflow_config.json").read_text())
     pw = build_probe_windows(cfg0, args.n_probe, args.seed, args.smoke)
-    print(f"[fdp] probe windows built n={args.n_probe} device={device.type}", flush=True)
+    print(f"[fdp] probe windows built n={args.n_probe} device={device.type} "
+          f"goal_cond={'goal_frames' in pw}", flush=True)
     t_start = time.time()
     for arm in arms:
         for snap in snaps:
@@ -408,8 +499,8 @@ def main():
             if args.deadline_min and (time.time() - t_start) / 60 >= args.deadline_min:
                 print(f"[fdp] DEADLINE_SKIP {arm} {snap}", flush=True)
                 continue
-            model, cfg = load_arm_model(args.sync_root, arm, snap, device)
-            analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, git_sha)
+            model, cfg = load_arm_model(args.sync_root, args.run_tpl, arm, snap, device)
+            analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, norm, git_sha)
             del model
             if device.type == "cuda":
                 torch.cuda.empty_cache()
