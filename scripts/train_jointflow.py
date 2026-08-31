@@ -148,16 +148,17 @@ def parse_args():
                          "the flow loss and the sampler go through v = (z_hat - x_tau) / (1 - tau)")
     ap.add_argument("--state_x_eps", type=float, default=0.05,
                     help="--state_param x: clamp of (1 - tau) in the reparameterization (bounds the 1/(1-tau)^2 weight)")
-    ap.add_argument("--policy_view", action="store_true",
+    ap.add_argument("--sep_policy_state", action="store_true",
                     help="MoT: the action branch attends only P(z) copies of the history (and a "
                          "projected goal); the policy's gradient reaches z through the projection "
                          "only, the dynamics owns z raw (owner design 2026-09-01)")
-    ap.add_argument("--sigreg_mode", default="pooled",
-                    choices=("pooled", "pertime", "pertime_proj"),
-                    help="pooled = original cat(z_t, state_target); pertime = SIGReg per latent "
-                         "group (each history slot, each state target, goal as context), losses "
-                         "averaged; pertime_proj = pertime through a learned DxD linear "
-                         "(identity-init; colleague recipe)")
+    ap.add_argument("--sigreg_pertime", action=argparse.BooleanOptionalAction, default=True,
+                    help="SIGReg per latent group (each history slot, each state target, goal as "
+                         "context), losses averaged; --no-sigreg_pertime = the original pooled "
+                         "cat(z_t, state_target) batch")
+    ap.add_argument("--sigreg_proj_dim", type=int, default=-1,
+                    help="SIGReg sees a learned z_dim -> N linear of each latent (identity-init "
+                         "when square; colleague recipe). -1 = z_dim (default), 0 = no projection")
     ap.add_argument("--state_tau_logit", type=float, nargs=2, default=None, metavar=("MU", "SIGMA"),
                     help="MoT flow state head: draw tau as sigmoid(N(MU, SIGMA)) (JiT: -0.8 0.8) instead of uniform")
     ap.add_argument("--grad_probe_every", type=int, default=0,
@@ -399,7 +400,12 @@ def main():
                state_prior_sigma=float(args.state_prior_sigma), state_param=args.state_param,
                state_x_eps=float(args.state_x_eps),
                state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None),
-               policy_view=bool(args.policy_view), sigreg_mode=args.sigreg_mode)
+               sep_policy_state=bool(args.sep_policy_state),
+               sigreg_pertime=bool(args.sigreg_pertime),
+               # no reg -> no projection module (keeps noreg checkpoints free of dead params)
+               sigreg_proj_dim=(0 if args.w_reg == 0
+                                else (args.z_dim if args.sigreg_proj_dim < 0
+                                      else args.sigreg_proj_dim)))
     builder = {"jointflow": build_model, "twinflow": build_twinflow, "motflow": build_motflow}[args.model]
     model = builder(cfg).to(device)
     action_mean, action_std = action_stats
@@ -429,8 +435,10 @@ def main():
                     or args.state_depth), "motflow: split_tau/state_target_norm/state_ema_target/state_detach/state_depth do not apply"
     else:
         assert not (args.state_detach or args.state_depth), "--state_detach/--state_depth are twinflow flags"
-    assert (not args.policy_view and args.sigreg_mode == "pooled") or args.model == "motflow", \
-        "--policy_view / --sigreg_mode are MoT options"
+    assert not args.sep_policy_state or args.model == "motflow", \
+        "--sep_policy_state is a MoT option"
+    assert args.w_reg == 0 or args.sigreg_proj_dim == 0 or args.model == "motflow", \
+        "projected SIGReg stores its projection on the MoT model"
     print(f"[jointflow] model={args.model}{' detach' if args.state_detach else ''} "
           f"params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
           f"state_target={'ema' if args.state_ema_target else 'online'}"
@@ -480,16 +488,15 @@ def main():
         """The applied anti-collapse loss; probe_measure reuses it so the counterfactual
         always matches the applied form."""
         zd = args.z_dim
-        if args.sigreg_mode == "pooled":
-            zs = torch.cat([z_history[:, -1], state_target.reshape(-1, zd)]).unsqueeze(0)
-            return sigreg(zs)
+        proj = model.sigreg_proj if getattr(model, "sigreg_proj_dim", 0) > 0 else (lambda x: x)
+        if not args.sigreg_pertime:
+            zs = torch.cat([z_history[:, -1], state_target.reshape(-1, zd)])
+            return sigreg(proj(zs).unsqueeze(0))
         groups = [z_history[:, k] for k in range(z_history.shape[1])]
         groups += [state_target[:, q] for q in range(state_target.shape[1])]
         if z_goal is not None:
             groups.append(z_goal)         # goal grouped in as policy context (owner 2026-09-01)
-        if args.sigreg_mode == "pertime_proj":
-            groups = [model.sigreg_proj(g) for g in groups]
-        return torch.stack([sigreg(g.unsqueeze(0)) for g in groups]).mean()
+        return torch.stack([sigreg(proj(g).unsqueeze(0)) for g in groups]).mean()
     probe = None
     if args.grad_probe_every > 0:
         from lewam.models.grad_probe import GradProbe

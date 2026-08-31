@@ -92,21 +92,21 @@ class MoTFlow(nn.Module):
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]
         self.goal_conditioning = bool(cfg.get("goal_conditioning", False))
-        # policy_view (owner design 2026-09-01): the action branch attends ONLY to a projected
-        # view of the latent -- every history token gets a projected copy that feeds the policy,
-        # and the goal latent is projected in place (the state stream never consumes it). The
-        # policy's gradient reaches z only through this projection; the dynamics owns z raw.
-        self.policy_view = bool(cfg.get("policy_view", False))
-        # sigreg_mode lives in the model so the projection checkpoints with it:
-        #   pooled       -- trainer's original cat(z_t, state_target) single batch
-        #   pertime      -- SIGReg per latent group (each history slot, each state target,
-        #                   the goal as policy context), losses averaged
-        #   pertime_proj -- pertime through a learned DxD linear (colleague recipe): z itself
-        #                   no longer has to be white (the projection can whiten any full-rank
-        #                   z); identity init = plain pertime at step 0; full-rank output keeps
-        #                   the anti-collapse pressure
-        self.sigreg_mode = str(cfg.get("sigreg_mode", "pooled"))
-        assert self.sigreg_mode in ("pooled", "pertime", "pertime_proj"), self.sigreg_mode
+        # sep_policy_state (owner design 2026-09-01): the action branch attends ONLY to a
+        # projected view of the latent -- every history token gets a projected copy that feeds
+        # the policy, and the goal latent is projected in place (the state stream never
+        # consumes it). The policy's gradient reaches z only through this projection; the
+        # dynamics owns z raw.
+        self.sep_policy_state = bool(cfg.get("sep_policy_state", False))
+        # SIGReg options live in the model so the projection checkpoints with it. Two
+        # independent features (owner 2026-09-01): sigreg_pertime = SIGReg per latent group
+        # (each history slot, each state target, the goal as policy context), losses averaged;
+        # sigreg_proj_dim > 0 = SIGReg sees a learned z_dim -> proj_dim linear of each latent
+        # (colleague recipe): z itself no longer has to be white -- the projection can whiten
+        # any full-rank z -- while a full-rank output keeps the anti-collapse pressure.
+        # Old checkpoints lack both keys and get the original pooled, unprojected loss.
+        self.sigreg_pertime = bool(cfg.get("sigreg_pertime", False))
+        self.sigreg_proj_dim = int(cfg.get("sigreg_proj_dim", 0))
         self.state_head = str(cfg.get("state_head", "flow"))
         assert self.state_head in ("flow", "mse")
         self.rollout_only = True        # planning = autoregressive rollout over predict_state, nothing else
@@ -146,12 +146,15 @@ class MoTFlow(nn.Module):
         self.state_query = nn.Parameter(torch.randn(1, self.num_states, d) * 0.02)   # mse head
         self.goal_in = nn.Linear(self.z_dim, d)
         self.null_goal = nn.Parameter(torch.zeros(1, 1, d))
-        if self.policy_view:
+        if self.sep_policy_state:
             self.policy_proj = nn.Linear(self.z_dim, self.z_dim)
-        if self.sigreg_mode == "pertime_proj":
-            self.sigreg_proj = nn.Linear(self.z_dim, self.z_dim, bias=False)
+        if self.sigreg_proj_dim > 0:
+            self.sigreg_proj = nn.Linear(self.z_dim, self.sigreg_proj_dim, bias=False)
             with torch.no_grad():
-                self.sigreg_proj.weight.copy_(torch.eye(self.z_dim))
+                if self.sigreg_proj_dim == self.z_dim:
+                    self.sigreg_proj.weight.copy_(torch.eye(self.z_dim))   # plain SIGReg at step 0
+                else:
+                    nn.init.orthogonal_(self.sigreg_proj.weight)
         self.state_type = nn.Embedding(3, d)                 # 0 history, 1 next-state, 2 goal
         # action stream embeddings (shared projection for clean and noisy; type tells them apart)
         self.action_in = nn.Linear(self.action_raw_dim, d)
@@ -170,7 +173,7 @@ class MoTFlow(nn.Module):
         idx = {}
         o = 0
         idx["hist"] = list(range(o, o + H)); o += H
-        idx["phist"] = list(range(o, o + H)) if self.policy_view else []; o += len(idx["phist"])
+        idx["phist"] = list(range(o, o + H)) if self.sep_policy_state else []; o += len(idx["phist"])
         idx["state"] = list(range(o, o + S)); o += S
         idx["goal"] = list(range(o, o + 1)) if self.goal_conditioning else []; o += len(idx["goal"])
         idx["clean"] = list(range(o, o + C)); o += C
@@ -183,7 +186,7 @@ class MoTFlow(nn.Module):
         allow = torch.zeros(o, o, dtype=torch.bool)
         hist, st, gl, cl, ny = idx["hist"], idx["state"], idx["goal"], idx["clean"], idx["noisy"]
         ph = idx["phist"]
-        pol_ctx = ph if self.policy_view else hist    # the history the action branch reads
+        pol_ctx = ph if self.sep_policy_state else hist    # the history the action branch reads
         for r in hist:
             allow[r, hist] = True
         for r in ph:
@@ -245,7 +248,7 @@ class MoTFlow(nn.Module):
         x = z_history.new_zeros(B, self.n_tokens, d)
         st_type = self.state_type.weight
         x[:, self.idx["hist"]] = self.frame_in(z_history) + self.frame_pos + st_type[0]
-        if self.policy_view:
+        if self.sep_policy_state:
             x[:, self.idx["phist"]] = self.frame_in(self.policy_proj(z_history)) \
                 + self.frame_pos + st_type[0]
         if self.state_head == "mse":
@@ -253,7 +256,7 @@ class MoTFlow(nn.Module):
         else:
             x[:, self.idx["state"]] = self.state_in(noisy_state) + self.state_pos + st_type[1]
         if self.goal_conditioning:
-            if z_goal is not None and self.policy_view:
+            if z_goal is not None and self.sep_policy_state:
                 z_goal = self.policy_proj(z_goal)
             g = self.goal_in(z_goal)[:, None] if z_goal is not None else self.null_goal.expand(B, -1, -1)
             if goal_keep is not None:
