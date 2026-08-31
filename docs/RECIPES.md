@@ -482,6 +482,25 @@ beside each checkpoint.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
+- **SNAPSHOT REACTIVE SR CURVES (2026-08-31, jobs mf-d19cf013/mf-cf755c52/mf-969cf385 =
+  3 chunks of 165 min after the single job mf-0cbdb973 hit the 3h low-util kill at ~3h45m;
+  entry jf_snapev2_6fb9727.sh, 20 episodes x eval seed 42 per point; snap_epN =
+  jointflow_latest at epoch N, "final" = the best-val checkpoint, the board-eval artifact).
+  All 32 points, toolhang probe arms s0 (epoch: nm / sm / nf / sf):
+    ep15  65 / 10 / 10 /  5      ep75  60 / 75 / 75 / 60
+    ep30  10 / 40 / 55 / 30      ep90  70 / 65 / 90 / 75
+    ep45  35 / 50 / 55 / 45      ep105 65 / 50 / 70 / 80
+    ep60  85 / 35 / 95 / 70      final 90 / 55 / 100 / 75
+  Read with the two probes: mse-noreg starts FASTEST (65 at ep15, the cooperative phase --
+  fdp gcos(P,Dtar)=+0.76, conflict 0.04), craters to 10 at ep30 = its one anti-aligned
+  epoch AND the grad-probe's target-channel consolidation window, then swings 85/60/70/65
+  while conflict mass climbs; best-val selection dodges the swings (final 90). flow-noreg
+  is the calmest riser and finishes 20/20 = 100 (the zero-interaction arm; its final REACT
+  hb line was lost to a concurrent HDFS append -- recovered from ev_snapev_mot_nf_final.log).
+  mse-sig never exceeds 75 and sags to 50-55 late exactly while carrying the largest
+  late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
+  crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
+  only, no single-point claims.**
 - **FEATURE-DIMENSION PROBE (2026-08-31, jobs mf-a3bd98f9 + ep15 backfill mf-13d17432, code
   5aeac4b, experimental/feature_dim_probe.py, owner design; toolhang, the 4 instrumented
   tc_toolhang_probe_* s0 arms x 8 snapshots ep15..ep105+final on ONE fixed probe set of 2048
