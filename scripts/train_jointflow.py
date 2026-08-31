@@ -148,6 +148,16 @@ def parse_args():
                          "the flow loss and the sampler go through v = (z_hat - x_tau) / (1 - tau)")
     ap.add_argument("--state_x_eps", type=float, default=0.05,
                     help="--state_param x: clamp of (1 - tau) in the reparameterization (bounds the 1/(1-tau)^2 weight)")
+    ap.add_argument("--policy_view", action="store_true",
+                    help="MoT: the action branch attends only P(z) copies of the history (and a "
+                         "projected goal); the policy's gradient reaches z through the projection "
+                         "only, the dynamics owns z raw (owner design 2026-09-01)")
+    ap.add_argument("--sigreg_mode", default="pooled",
+                    choices=("pooled", "pertime", "pertime_proj"),
+                    help="pooled = original cat(z_t, state_target); pertime = SIGReg per latent "
+                         "group (each history slot, each state target, goal as context), losses "
+                         "averaged; pertime_proj = pertime through a learned DxD linear "
+                         "(identity-init; colleague recipe)")
     ap.add_argument("--state_tau_logit", type=float, nargs=2, default=None, metavar=("MU", "SIGMA"),
                     help="MoT flow state head: draw tau as sigmoid(N(MU, SIGMA)) (JiT: -0.8 0.8) instead of uniform")
     ap.add_argument("--grad_probe_every", type=int, default=0,
@@ -388,7 +398,8 @@ def main():
                state_head=args.mot_state_head, state_prior=args.state_prior,
                state_prior_sigma=float(args.state_prior_sigma), state_param=args.state_param,
                state_x_eps=float(args.state_x_eps),
-               state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None))
+               state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None),
+               policy_view=bool(args.policy_view), sigreg_mode=args.sigreg_mode)
     builder = {"jointflow": build_model, "twinflow": build_twinflow, "motflow": build_motflow}[args.model]
     model = builder(cfg).to(device)
     action_mean, action_std = action_stats
@@ -418,6 +429,8 @@ def main():
                     or args.state_depth), "motflow: split_tau/state_target_norm/state_ema_target/state_detach/state_depth do not apply"
     else:
         assert not (args.state_detach or args.state_depth), "--state_detach/--state_depth are twinflow flags"
+    assert (not args.policy_view and args.sigreg_mode == "pooled") or args.model == "motflow", \
+        "--policy_view / --sigreg_mode are MoT options"
     print(f"[jointflow] model={args.model}{' detach' if args.state_detach else ''} "
           f"params={n_params/1e6:.2f}M  w_reg={args.w_reg} "
           f"state_target={'ema' if args.state_ema_target else 'online'}"
@@ -462,6 +475,21 @@ def main():
 
     mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)
     sigreg = SIGReg().to(device)
+
+    def sigreg_loss(z_history, state_target, z_goal):
+        """The applied anti-collapse loss; probe_measure reuses it so the counterfactual
+        always matches the applied form."""
+        zd = args.z_dim
+        if args.sigreg_mode == "pooled":
+            zs = torch.cat([z_history[:, -1], state_target.reshape(-1, zd)]).unsqueeze(0)
+            return sigreg(zs)
+        groups = [z_history[:, k] for k in range(z_history.shape[1])]
+        groups += [state_target[:, q] for q in range(state_target.shape[1])]
+        if z_goal is not None:
+            groups.append(z_goal)         # goal grouped in as policy context (owner 2026-09-01)
+        if args.sigreg_mode == "pertime_proj":
+            groups = [model.sigreg_proj(g) for g in groups]
+        return torch.stack([sigreg(g.unsqueeze(0)) for g in groups]).mean()
     probe = None
     if args.grad_probe_every > 0:
         from lewam.models.grad_probe import GradProbe
@@ -543,9 +571,7 @@ def main():
             # collapse telemetry: per-dim std of the online state latents (collapse -> ~0)
             loss_terms["zstd"] = z_state_online.reshape(-1, args.z_dim).std(0).mean().item()
         if args.w_reg > 0:
-            z_states = torch.cat([z_history[:, -1],
-                                  state_target.reshape(B * n_states, args.z_dim)]).unsqueeze(0)
-            loss_reg = sigreg(z_states)
+            loss_reg = sigreg_loss(z_history, state_target, z_goal)
             loss = loss + args.w_reg * loss_reg
             loss_terms["reg"] = loss_reg.item()
         if return_probe:
@@ -575,9 +601,7 @@ def main():
             la2, ld2 = model.loss(pc["z_history"], pc["history_pad"], pc["action_target"],
                                   pc["action_valid"], pc["state_target"].detach(), pc["state_valid"],
                                   z_goal=pc["z_goal"], h_norm=pc["h_norm"], goal_keep=pc["goal_keep"])
-            z_states = torch.cat([pc["z_history"][:, -1],
-                                  pc["state_target"].reshape(pc["B"] * n_states, args.z_dim)]).unsqueeze(0)
-            loss_sig = sigreg(z_states)
+            loss_sig = sigreg_loss(pc["z_history"], pc["state_target"], pc["z_goal"])
         probe.measure(la1, ld1, ld2, loss_sig, gstep,
                       scalars=dict({k: v for k, v in loss_terms.items()}, lam_S=args.w_reg,
                                    lr=sched.get_last_lr()[0], epoch=epoch))

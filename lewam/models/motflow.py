@@ -92,6 +92,21 @@ class MoTFlow(nn.Module):
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]
         self.goal_conditioning = bool(cfg.get("goal_conditioning", False))
+        # policy_view (owner design 2026-09-01): the action branch attends ONLY to a projected
+        # view of the latent -- every history token gets a projected copy that feeds the policy,
+        # and the goal latent is projected in place (the state stream never consumes it). The
+        # policy's gradient reaches z only through this projection; the dynamics owns z raw.
+        self.policy_view = bool(cfg.get("policy_view", False))
+        # sigreg_mode lives in the model so the projection checkpoints with it:
+        #   pooled       -- trainer's original cat(z_t, state_target) single batch
+        #   pertime      -- SIGReg per latent group (each history slot, each state target,
+        #                   the goal as policy context), losses averaged
+        #   pertime_proj -- pertime through a learned DxD linear (colleague recipe): z itself
+        #                   no longer has to be white (the projection can whiten any full-rank
+        #                   z); identity init = plain pertime at step 0; full-rank output keeps
+        #                   the anti-collapse pressure
+        self.sigreg_mode = str(cfg.get("sigreg_mode", "pooled"))
+        assert self.sigreg_mode in ("pooled", "pertime", "pertime_proj"), self.sigreg_mode
         self.state_head = str(cfg.get("state_head", "flow"))
         assert self.state_head in ("flow", "mse")
         self.rollout_only = True        # planning = autoregressive rollout over predict_state, nothing else
@@ -131,6 +146,12 @@ class MoTFlow(nn.Module):
         self.state_query = nn.Parameter(torch.randn(1, self.num_states, d) * 0.02)   # mse head
         self.goal_in = nn.Linear(self.z_dim, d)
         self.null_goal = nn.Parameter(torch.zeros(1, 1, d))
+        if self.policy_view:
+            self.policy_proj = nn.Linear(self.z_dim, self.z_dim)
+        if self.sigreg_mode == "pertime_proj":
+            self.sigreg_proj = nn.Linear(self.z_dim, self.z_dim, bias=False)
+            with torch.no_grad():
+                self.sigreg_proj.weight.copy_(torch.eye(self.z_dim))
         self.state_type = nn.Embedding(3, d)                 # 0 history, 1 next-state, 2 goal
         # action stream embeddings (shared projection for clean and noisy; type tells them apart)
         self.action_in = nn.Linear(self.action_raw_dim, d)
@@ -149,6 +170,7 @@ class MoTFlow(nn.Module):
         idx = {}
         o = 0
         idx["hist"] = list(range(o, o + H)); o += H
+        idx["phist"] = list(range(o, o + H)) if self.policy_view else []; o += len(idx["phist"])
         idx["state"] = list(range(o, o + S)); o += S
         idx["goal"] = list(range(o, o + 1)) if self.goal_conditioning else []; o += len(idx["goal"])
         idx["clean"] = list(range(o, o + C)); o += C
@@ -160,20 +182,24 @@ class MoTFlow(nn.Module):
         self.register_buffer("stream", stream)
         allow = torch.zeros(o, o, dtype=torch.bool)
         hist, st, gl, cl, ny = idx["hist"], idx["state"], idx["goal"], idx["clean"], idx["noisy"]
+        ph = idx["phist"]
+        pol_ctx = ph if self.policy_view else hist    # the history the action branch reads
         for r in hist:
             allow[r, hist] = True
+        for r in ph:
+            allow[r, ph] = True
         for q, r in enumerate(st):
             allow[r, hist] = True
             allow[r, st[:q + 1]] = True
             allow[r, cl[:(q + 1) * self.fs]] = True
         for r in gl:
-            allow[r, hist] = True
+            allow[r, pol_ctx] = True
             allow[r, gl] = True
         for j, r in enumerate(cl):
-            allow[r, hist] = True
+            allow[r, pol_ctx] = True
             allow[r, cl[:j + 1]] = True
         for j, r in enumerate(ny):
-            allow[r, hist] = True
+            allow[r, pol_ctx] = True
             allow[r, gl] = True
             allow[r, ny[:j + 1]] = True
         self.register_buffer("allow", allow)
@@ -189,6 +215,8 @@ class MoTFlow(nn.Module):
         if history_pad.any():
             key_pad = torch.zeros(B, self.n_tokens, dtype=torch.bool, device=history_pad.device)
             key_pad[:, self.idx["hist"]] = history_pad
+            if self.idx["phist"]:
+                key_pad[:, self.idx["phist"]] = history_pad
             allow = allow & ~key_pad[:, None, :]
         mask = torch.zeros(B, self.n_tokens, self.n_tokens, device=history_pad.device)
         mask[~allow] = float("-inf")
@@ -217,11 +245,16 @@ class MoTFlow(nn.Module):
         x = z_history.new_zeros(B, self.n_tokens, d)
         st_type = self.state_type.weight
         x[:, self.idx["hist"]] = self.frame_in(z_history) + self.frame_pos + st_type[0]
+        if self.policy_view:
+            x[:, self.idx["phist"]] = self.frame_in(self.policy_proj(z_history)) \
+                + self.frame_pos + st_type[0]
         if self.state_head == "mse":
             x[:, self.idx["state"]] = self.state_query.expand(B, -1, -1) + self.state_pos + st_type[1]
         else:
             x[:, self.idx["state"]] = self.state_in(noisy_state) + self.state_pos + st_type[1]
         if self.goal_conditioning:
+            if z_goal is not None and self.policy_view:
+                z_goal = self.policy_proj(z_goal)
             g = self.goal_in(z_goal)[:, None] if z_goal is not None else self.null_goal.expand(B, -1, -1)
             if goal_keep is not None:
                 g = torch.where(goal_keep.view(B, 1, 1), g, self.null_goal.expand(B, -1, -1))
