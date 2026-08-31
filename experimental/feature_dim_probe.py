@@ -42,7 +42,9 @@ Smoke (CPU, synthetic windows, real weights):
 """
 import argparse
 import json
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -362,8 +364,12 @@ def analyze_combo(args, model, cfg, pw, out_npz, arm, snap, device, mean, std, g
         res[f"conflict_{dv}"] = (A_P * A_D).sqrt() * (-res[f"a_P_{dv}"][:k]).clamp_min(0)
 
     out_npz.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(out_npz, meta=json.dumps(meta),
+    # np.savez needs a seekable file; HDFS fuse rejects that (Errno 95) -- write local, copy
+    tmp = Path(tempfile.gettempdir()) / f"fdp_tmp_{arm}_{snap}.npz"
+    np.savez(tmp, meta=json.dumps(meta),
              **{key: v.detach().cpu().numpy() for key, v in res.items()})
+    shutil.copyfile(tmp, out_npz)
+    tmp.unlink()
     er = res["eff_rank"].item()
     print(f"[fdp] {arm} {snap} done {time.time()-t0:.0f}s eff_rank={er:.1f} "
           f"top8={res['top_share'][1].item():.2f} "
