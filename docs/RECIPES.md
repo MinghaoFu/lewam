@@ -482,6 +482,41 @@ beside each checkpoint.
   H1 (--state_mse, regression state slot inside the joint trunk) was implemented (e16c67f) and
   REMOVED the same day at the owner's request (800ddd3): a regression target under actions at
   random noise levels is not a coherent dynamics model.**
+- **FEATURE-DIMENSION PROBE (2026-08-31, jobs mf-a3bd98f9 + ep15 backfill mf-13d17432, code
+  5aeac4b, experimental/feature_dim_probe.py, owner design; toolhang, the 4 instrumented
+  tc_toolhang_probe_* s0 arms x 8 snapshots ep15..ep105+final on ONE fixed probe set of 2048
+  train windows; npz per combo in jointflow_tc/fdp/, figures jobs-tmp fdp_figs/). Method per
+  (arm,snap): eigenbasis u_k/lam_k of Cov(z_t); NECESSITY A(k) = dL/L with direction k's
+  variation replaced by its probe mean in every latent the trunk sees (top-32 dirs
+  individually, identical tau/noise via re-seeded RNG); INDUCED REPRESENTATION UPDATES =
+  virtual encoder step theta-eps*g_l per loss (P=action, D_full=state, D_in=target-detached
+  exact split, D_tar=full-in, S=SIGReg, counterfactual on noreg arms), eps calibrated to
+  rms(dz)/rms(z)=1e-3 (linearity at eps/2: cos .96-.99), dz on the same 1024 probe frames;
+  a_k = uncentered per-direction corr of two updates (this measures interaction THROUGH the
+  encoder Jacobian, unlike raw dL/dz); conflict mass = sum_k sqrt(A_P A_D) max(0,-a_k).
+  FOUR REGIMES, one per arm:
+    flow-noreg (best reactive 86): NO interaction -- every global cos(dz_P,dz_D) ~ 0.00-0.03,
+      conflict ~0.01-0.09 (10x below every other arm), and A_D ~ 0.00-0.02 everywhere (the
+      flow state loss needs no specific direction); the policy owns an eff-rank ~10 latent
+      unopposed.
+    mse-noreg: tug-of-war AT THE TOP of the spectrum -- final dir 1 (14.9% of variance) has
+      A_P=1.55, A_D=2.66, a=-0.54; conflict mass grows 0.04 (ep15) -> 1.89 (final). The ep30
+      SR crater (65 -> 10) coincides with the ONLY negative cos(dz_P,dz_Dtar) epoch (-0.10;
+      +0.76 at ep15, +0.48 by ep45 as SR recovers) and a 15x conflict jump -- and with the
+      grad-probe's cos(Dtar,S) consolidation window (ep20-45), two independent instruments.
+    mse-sig: SIGReg SIDES WITH THE POLICY -- cos(dz_P,dz_S)=+.80/+.75/+.71 in the first half;
+      the fight sits on dynamics-owned mid-spectrum dirs (e.g. dir 3: A_D=5.6 vs A_P=0.12,
+      a=-0.55); the only arm whose eff-rank keeps GROWING (26->42).
+    flow-sig: crammed AND fighting -- rep pins at exactly ~8 live dims (top-8 share 1.00),
+      all eight needed by BOTH losses (A_P .6-1.1, A_D .9-2.0), top-2 anti-aligned (a=-0.89,
+      -0.75), conflict mass highest anywhere (2.77 at final).
+  RANK vs REACTIVE SR INVERTS THE NOISE HYPOTHESIS: the policy is best on the LOWEST-rank
+  rep (flow-noreg ~10 -> 86) and worst on the highest (mse-sig ~42 -> ~55); SIGReg keeps
+  dims alive that only the dynamics needs and the reactive policy pays for their presence --
+  planning (subgoal 80.0) is where those dims pay off. Within mse-noreg, conflict mass and
+  SR move inversely (min conflict 0.31 at the ep60 SR peak 85). Caveats: snapshot SR = 20
+  episodes x 1 seed; a_k uncentered (owner formula, includes mean-push agreement); npz save
+  to HDFS needs local-then-copy (Errno 95, first launch mf-a3bd98f9's predecessor died on it).**
 - **COST-TO-GOAL PROBE (2026-08-27, 0f88f9d, owner spec: distribution over samples +
   cost vs unroll step; 200 dataset anchors, K=32, M=8 rollouts x H=8; pusht goal +10
   anchors, cube terminal goal). Latent-unit medians: pusht cost now 0.73 / real next
