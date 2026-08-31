@@ -501,6 +501,33 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **FEATURE-DIMENSION PROBE ROUND 2 (2026-08-31, job mf-83396961, code bc75e97; [1] toolhang
+  4x8 rerun with per-slot ablation zt/prev/tar -> fdp_slots/, [2] the pusht GR mot grid s42,
+  goal-conditioned with real encoded goals, snaps ep25/ep40/final + goal slot -> fdp_pusht/).
+  PUSHT REGIME TABLE (final): A_D mass (top-32+bands) mse-sig 272 >> mse-noreg 50 > flow-sig
+  13 >> flow-noreg 0.4 -- the two arms where the pusht gradient planner works (95.3 / 88.7)
+  are exactly the top two; eff-rank mse-sig 69 (vs 6.4 noreg: the SIGRegxMSE rank explosion
+  transfers), BUT SIGReg RAISES flow's rank on pusht (4.0 -> 12.7) where it lowered it on
+  toolhang (10.1 -> 7.9): the "SIGReg reduces flow ER" sub-claim is dataset-dependent, revise
+  to inconsistent-and-small under flow. CLAIM-2 CONTRAPOSITIVE: pusht has almost no
+  dynamics-dominated co-need (mse-noreg 0 co-needed anti-aligned dims; mse-sig 6 of ~69 live,
+  asym 85-213x but confined) and pusht reactive is correspondingly FLAT (68.7-72 across arms,
+  no craters) -- damage structure absent, damage absent. Same mse-sig recipe, opposite
+  outcomes by ROOM: pusht = huge A_D mass + rank-69 space + fights confined -> policy fine +
+  best planning; toolhang = fights across a 42-dim live space -> worst policy.
+  SLOT LOCALIZATION (toolhang final): the policy reads BOTH history frames ~equally
+  (A_P zt~=prev, e.g. nm 3.02/3.23); the dynamics ignores the earlier frame (A_D prev 5.2 /
+  8.8 / 0.1 / 0.8) and splits between READING z_t (36.9 / 157 / 0.5 / 28.9) and SHAPING the
+  target (62.8 / 239 / 0.8 / 35.7, ~1.7x the read side); on the top conflicted dims D's
+  z_t-read dependence ALONE exceeds P's total (nm dim1: 6.23 vs 0.46+0.53) -- the fight is
+  read-vs-read AND read-vs-write, not purely write-side. METHOD NOTE: all-slot ablation
+  UNDERSTATES A_D (all < zt alone; ablating input+target together partially cancels in the
+  MSE) -- consistent direction across arms so orderings stand, but single-slot is the sharper
+  instrument. Pusht goal slot: A_D(goal)=0.0 in all arms (the state-stream goal mask verified
+  empirically); mse-sig's policy barely reads the goal (A_P goal 0.14 vs 1.2-2.1 elsewhere).
+  CAVEAT: the eps/2 linearity check degraded on the near-collapsed pusht arms (mse-noreg /
+  flow-noreg cos 0.76-0.85) -- their a_k carry curvature error; ablation-based conclusions
+  (A masses, co-need) don't differentiate and are unaffected.**
 - **FEATURE-DIMENSION PROBE (2026-08-31, jobs mf-a3bd98f9 + ep15 backfill mf-13d17432, code
   5aeac4b, experimental/feature_dim_probe.py, owner design; toolhang, the 4 instrumented
   tc_toolhang_probe_* s0 arms x 8 snapshots ep15..ep105+final on ONE fixed probe set of 2048
