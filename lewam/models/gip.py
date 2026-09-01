@@ -1575,9 +1575,22 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     def _propose(self, info_dict, replan, history, history_pad):
         device = history.device
         if self.subgoal_every > 0:
-            z_goal = self._subgoal_latents(replan, device)
-            plan = (self._grad_plan(history, history_pad, z_goal, None) if self.plan_mode == "grad"
-                    else self._best_of_k(history, history_pad, z_goal))
+            z_cost = self._subgoal_latents(replan, device)
+            z_cond, h_norm = z_cost, None
+            if getattr(self.model, "goal_conditioning", False):
+                # goal-conditioned ckpts trained with a goal on every sample: condition the
+                # policy on the env's real goal (goal_terminal convention, h_norm 0); the
+                # subgoal enters only the planner's cost
+                assert "goal" in info_dict, \
+                    "subgoal planning on a goal-conditioned ckpt needs info_dict['goal']"
+                goal = info_dict["goal"][replan]
+                g_obs = goal[:, -1] if goal.ndim == 5 else goal
+                z_cond = self._enc(g_obs.to(device).float())
+                h_norm = torch.zeros(len(replan), device=device, dtype=torch.float32)
+            plan = (self._grad_plan(history, history_pad, z_cond, None, cost_goal=z_cost)
+                    if self.plan_mode == "grad"
+                    else self._best_of_k(history, history_pad, z_cond, h_norm,
+                                         cost_goal=z_cost))
             take = self._take()
             for i in replan:
                 self._raw_done[i] += take
@@ -1647,7 +1660,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         for k in range(self.plan_rollout):
             cond = dict()
             if gc:
-                hk = (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
+                # steps_rep None = goal_terminal ckpts (h_norm trained constant 0)
+                hk = torch.zeros(h.shape[0], device=h.device) if steps_rep is None else \
+                    (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 cond = dict(z_goal=goal_rep, h_norm=hk)
             if k < n_given:
                 blk = given[:, k]
@@ -1833,38 +1848,45 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                   f"{st['dn'] / st['n']:.3f} (steps {self.pm_steps}, lr {self.pm_lr}, rho {self.pm_rho})", flush=True)
         return best_plan.reshape(R, H * fs, adim)
 
-    def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U, noise_s=None):
+    def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U, noise_s=None,
+                           cost_goal=None):
         """Differentiable terminal cost (R,) of the z-scored plan U (R, H, fs, adim) through the
         MoT's imagine_step; the graph flows through U only (history and goal are constants).
-        noise_s: per-block state noise (flow state head; fixed per replan), ignored by the MSE head."""
+        noise_s: per-block state noise (flow state head; fixed per replan), ignored by the MSE
+        head. steps None = goal_terminal ckpts (h_norm constant 0); cost_goal = score target
+        when it differs from the conditioning goal (subgoal planning)."""
         h, p = history, history_pad
         gc = getattr(self.model, "goal_conditioning", False)
         zs = []
         for k in range(U.shape[1]):
             cond = dict()
             if gc:
-                hk = (steps - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
+                hk = torch.zeros(h.shape[0], device=h.device) if steps is None else \
+                    (steps - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 cond = dict(z_goal=z_goal, h_norm=hk)
             z_imag = self.model.imagine_step(h, p, U[:, k], noise_state=None if noise_s is None else noise_s[k], **cond)
             zs.append(z_imag[:, 0])
             h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
             p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
         z = self._at(torch.stack(zs, 1), self._goal_idx(steps))
-        return ((z - z_goal) ** 2).mean(-1)
+        tgt = cost_goal if cost_goal is not None else z_goal
+        return ((z - tgt) ** 2).mean(-1)
 
-    def _grad_plan(self, history, history_pad, z_goal, steps):
+    def _grad_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
         """Gradient planning on the MoT dynamics: warm start = the best of plan_k policy rollouts
         (the roll planner), then grad_steps of Adam on the z-scored H-block plan against the
         differentiable terminal cost; the warm start is a floor and the best iterate by model
         cost is returned (its first block executes)."""
         R, K, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
         device = history.device
-        steps_t = steps if steps is not None else torch.full((R,), float(H), device=device)
+        steps_t = steps          # None = goal_terminal ckpts (h_norm 0, cost at the last block)
         with torch.no_grad():
             h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
             goal_rep = z_goal.repeat_interleave(K, 0)
-            blocks, z_final = self._imagine(h, p, goal_rep, steps_t.repeat_interleave(K, 0))
-            cost0 = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
+            blocks, z_final = self._imagine(
+                h, p, goal_rep, steps_t.repeat_interleave(K, 0) if steps_t is not None else None)
+            cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
+            cost0 = ((z_final - cg_rep) ** 2).mean(-1).view(R, K)
             pick = cost0.argmin(1)
             rows = torch.arange(R, device=device)
             U0 = blocks.view(R, K, H, fs, -1)[rows, pick].detach()          # (R, H, fs, adim)
@@ -1879,7 +1901,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         opt = torch.optim.Adam([U], lr=self.grad_lr)
         with torch.enable_grad():
             for it in range(self.grad_steps + 1):
-                c = self._rollout_cost_grad(history, history_pad, z_goal, steps_t, U, noise_s)
+                c = self._rollout_cost_grad(history, history_pad, z_goal, steps_t, U, noise_s,
+                                            cost_goal=cost_goal)
                 with torch.no_grad():
                     better = c < best_c
                     best_c = torch.where(better, c.detach(), best_c)
@@ -1912,9 +1935,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if not getattr(self.model, "goal_conditioning", False):
             return dict()
         return dict(z_goal=z_goal.repeat_interleave(repeat, 0),
-                    h_norm=h_norm.repeat_interleave(repeat, 0))
+                    h_norm=h_norm.repeat_interleave(repeat, 0) if h_norm is not None else None)
 
-    def _best_of_k(self, history, history_pad, z_goal, h_norm=None, steps=None):
+    def _best_of_k(self, history, history_pad, z_goal, h_norm=None, steps=None, cost_goal=None):
         R, K = history.shape[0], self.plan_k
         h = history.repeat_interleave(K, 0)
         p = history_pad.repeat_interleave(K, 0)
@@ -1942,9 +1965,12 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         # times to the goal time; cost on the final imagined z (see _imagine).
         fs = self.action_block
         gc = getattr(self.model, "goal_conditioning", False)
-        steps_rep = steps.repeat_interleave(K, 0) if gc else None
+        steps_rep = steps.repeat_interleave(K, 0) if gc and steps is not None else None
         blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)
-        cost = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
+        # cost_goal (subgoal planning on goal-conditioned ckpts): the policy is conditioned on
+        # z_goal, the planner scores against cost_goal
+        cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
+        cost = ((z_final - cg_rep) ** 2).mean(-1).view(R, K)
         plan = blocks.reshape(R, K, self.plan_rollout * fs, -1)
         pick = cost.argmin(1)
         return plan[torch.arange(R, device=plan.device), pick]
