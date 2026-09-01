@@ -501,6 +501,42 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **SEP-POLICY / PROJECTED-SIGREG CAMPAIGN, DAY 1 (2026-09-01/02; 7 trains 00c1d98 + evals
+  911676c; 1 training seed everywhere).**
+  PUSHT (GR, 3x50 evals chained; refs mot grid): reactive/roll/grad --
+    noreg ref 68.7/86.7/88.7 · full-sig ref 72.0/85.3/95.3 ·
+    proj+pertime sig (mot_pw) 73.3/84.0/93.3 · sep_policy_state (mot_nm_zp) 69.3/81.3/81.3
+    {78,94,72} · BOTH (mot_pw_zp) 73.3/83.3/95.3 {96,96,94}.
+  Projected per-time SIGReg keeps the full-sig planning benefit at no reactive cost; the
+  policy view alone mildly hurts planning on the collapsed noreg latent (P trained only on
+  real z misreads imagined states there) and costs nothing on the SIGReg-shaped latent; the
+  combination ties the campaign peak 95.3.
+  TOOLHANG GOAL-TERMINAL (mode=jointflow_gc, 3x50): goal-cond arms all land ~52-60 vs the
+  goal-blind board 80.7 -- g_nm 60.0 {70,64,46} · g_nm_zp 58.0 {64,58,52} · g_pw 52.7
+  {52,60,46} · g_pw_zp 52.0 {44,56,56}. RIG CONTROL: the goal-blind probe mot_nm ckpt
+  through the SAME rig = 85.0 {84,86} (board 80.7) -- the rig is clean, the ~25-pt GOAL COST
+  ON TOOLHANG IS REAL (opposite of cube, where the same recipe+eval scored 95.3 vs 22
+  goal-blind; toolhang demo terminals are near-identical scenes, so the goal token carries
+  ~no task information but its incidentals can mislead -- hypothesis, untested). Within the
+  goal batch: proj-sig costs only ~7 vs its noreg twin (full-sig cost 26 goal-blind), z_P
+  costs ~0-2 reactive. SUBGOAL-SELECTION on the goal-cond pw arms = 15.0 both (20ep,
+  2 shards, fixed planner cost/conditioning split) -- selection UNDERPERFORMS reactive by
+  ~37 on goal-cond ckpts where the goal-blind POC gained +25; OPEN QUESTION, do not reuse
+  goal-cond subgoal numbers.
+  GRAD-PROBE VERDICT on proj+pertime SIGReg (r_S = applied SIGReg share of the encoder
+  update, thirds): TH 0.51/0.48/0.43, PU 0.39/0.35/0.35 vs full-sig 0.44/0.31/0.32 -- the
+  force does NOT retire (DxD W cannot make full-rank-Gaussian satisfiable); BUT
+  cos(Dtar,S) ~ -0.01..-0.09 (collapse standoff neutralized, like full sig; noreg arms
+  -0.19..-0.49) and r_D stays at noreg levels 0.03-0.07 (full sig amplified D's pull to
+  0.14-0.30). Projected form = sigreg's geometry without conscripting the dynamics.
+  OPS: eval-mode trap -- goal-cond TC ckpts MUST eval with +gip_eval.mode=jointflow_gc
+  (jointflow_policy feeds null_goal to goal-always models: numbers 20-56, invalid); >=4
+  parallel eval lanes draw startup SIGKILLs (2-3 lanes safe); idempotence checks must
+  invalidate stale logs FIRST. FORMAL JOBS CAN BE KILLED:
+  `yes | merlin-cli --control-plane i18n-tt job-v2 runs stop --json
+  '{"sid":"<mlx job id>","stop_reason":"..."}'` (verified; the "web-UI only" claim was wrong).
+  Planner fixes 911676c: steps=None => h_norm 0 (goal_terminal convention) everywhere;
+  cost_goal separates the planner score target from the policy conditioning goal.**
 - **FEATURE-DIMENSION PROBE ROUND 2 (2026-08-31, job mf-83396961, code bc75e97; [1] toolhang
   4x8 rerun with per-slot ablation zt/prev/tar -> fdp_slots/, [2] the pusht GR mot grid s42,
   goal-conditioned with real encoded goals, snaps ep25/ep40/final + goal slot -> fdp_pusht/).
