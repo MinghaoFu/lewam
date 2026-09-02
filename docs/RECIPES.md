@@ -501,6 +501,24 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **FEATURE-SPACE CONFLICT (M_s) IS NULL-CONSISTENT ON MSE-NOREG (2026-09-02, devbox, ~10 min).**
+  Owner proposal: PCGrad in representation space via M = E[dz_D dz_P^T], project g_D away from
+  h = E[J^T Q dz_P] with Q = the negative eigenspace of M_s. Measured with the free surrogate
+  (feature gradients g_z = dL/dz at the encoder output, 2048 history rows, toolhang raw cache)
+  on tc_toolhang_probe_mot_nm_s0 at ep15/45/105 + best, and on pw_zp best, against 3
+  shuffled-pairing nulls each: the FIGHTING side of the cosine-normalized M_s spectrum never
+  exceeds independent pairing (negative mass 0.26-0.45 vs null 0.47-0.59; top negative
+  eigenvalue 0.7-1.1x the null's), while COOPERATION does (top positive 1.1-1.8x null,
+  trace 4-7x null, mean cos(g_D,g_P) +0.014/+0.051/+0.020 at ep15/45/105). Policy and
+  dynamics feature gradients are mildly aligned throughout training on the default recipe;
+  Q = Pi_neg(M_s) would project onto noise. Also: with Q = I and the g_z surrogate, h is
+  exactly the encoder part of g_P, so the scheme reduces to encoder-restricted PCGrad.
+  DECISION: not built. Our earlier conflict evidence was regularizer-vs-dynamics-TARGET
+  (cos(Dtar,S), r_S), not policy-vs-dynamics. Caveats: surrogate (not NTK-weighted JVP dz),
+  excludes the dynamics target-path rows, noreg only. Script: jobs tmp ms_spectrum.py.
+  Same day: --detach_goal_grad added (3cfd56b; z_goal.detach() before use, goal still
+  conditions, encoder cannot be shaped by the goal pathway; smoke-verified) -- arms dg1 on
+  toolhang goal-terminal (vs g_nm 60.0) and pusht GR (vs mot_nm 68.7/86.7/88.7), seed 42.**
 - **GOAL-BLIND ROUND + S2S (2026-09-02; trains 00c1d98, evals 911676c; toolhang seed 42,
   3x50 reactive, 20-ep 2-shard subgoal selection; pusht s2s 3x50 chained).**
   TOOLHANG GOAL-BLIND reactive / subgoal-selection:
