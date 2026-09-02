@@ -541,7 +541,21 @@ beside each checkpoint.
   more render-sensitive. CONCLUSION: on the demonstration distribution the policies are
   equivalent by fit, stochasticity, readout geometry and shift sensitivity; the 30-pt reactive
   spread exists only CLOSED-LOOP (on self-induced states). Untested (by owner decision): the
-  off-manifold/recovery gap on the policies' own rollout states.**
+  off-manifold/recovery gap on the policies' own rollout states.
+  WORKING HYPOTHESIS (owner, 2026-09-03): one mechanism explains both halves. A wider /
+  higher-gain latent maps the same small physical deviation to a larger latent displacement:
+  as the policy unrolls and drifts, states look MORE off-manifold than they physically are
+  -> classic IL covariate-shift error (invisible to every on-distribution probe, which all
+  came back flat); the SAME magnification is discriminability for the verifier -> expert vs
+  random chunks separate better -> planning improves. Consistent with: nf/nm/sm ordering,
+  s2s (noreg-like width but 1.7x std, anchored objective: lower reactive 69.3, planning ok),
+  pw 64.7 vs pw_zp 76.7 (same wide latent; the shield gives the policy a low-gain view), the
+  2x action-per-latent-fluctuation gain under full-sig. Evidence bar: keep 95 pusht planning
+  while closing toolhang to -4 (pw_zp does this: -26 -> -4). Not yet measured: the encoder's
+  gain on PHYSICAL state perturbations per arm (predicts the full ordering incl. s2s).
+  Candidate follow-ups, all on the policy's view only: bottlenecked P (384 -> small),
+  contraction/smoothness penalty on P, or noise/DART-style augmentation on P(z) for the
+  policy branch (train on the latent drift it will face).**
 - **FEATURE-SPACE CONFLICT (M_s) IS NULL-CONSISTENT ON MSE-NOREG (2026-09-02, devbox, ~10 min).**
   Owner proposal: PCGrad in representation space via M = E[dz_D dz_P^T], project g_D away from
   h = E[J^T Q dz_P] with Q = the negative eigenspace of M_s. Measured with the free surrogate
