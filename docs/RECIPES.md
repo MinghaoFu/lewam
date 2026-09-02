@@ -501,6 +501,29 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **GOAL-BLIND ROUND + S2S (2026-09-02; trains 00c1d98, evals 911676c; toolhang seed 42,
+  3x50 reactive, 20-ep 2-shard subgoal selection; pusht s2s 3x50 chained).**
+  TOOLHANG GOAL-BLIND reactive / subgoal-selection:
+    noreg ref 80.7 (rig control 85.0) / not measured · full-sig ref 54.7 / 80.0 ·
+    proj+pertime sig ALONE (pw) 64.7 {66,64,64} / 80.0 {100,60 by 10-ep shard} ·
+    proj sig + sep_policy_state (pw_zp) 76.7 {80,78,72} / 60.0 {60,60} ·
+    s2s prev-prior flow sigma0.02 noreg 69.3 {70,64,74} / 75.0 {70,80}.
+  READS: (1) the projection alone recovers only +10 of full-sig's -26 reactive damage; ADDING
+  the policy view recovers +22 (76.7, 4 pts off noreg) -- the sep_policy_state shield is the
+  load-bearing half on TC, causal evidence for the policy-dynamics conflict story. (2) the
+  policy view COSTS plan-time selection (pw 80.0 -> pw_zp 60.0): the planner rolls the policy
+  through P(z) of IMAGINED latents, which P never trained on -- same mechanism as the pusht
+  nm_zp planning dip. No toolhang arm wins both columns; pw_zp is the best compromise.
+  (3) s2s: usable selection (75) with zero regularizer, reactive -11 vs noreg on TC.
+  PUSHT S2S: reactive 74.7 {74,78,72} = BEST pusht reactive of any arm · roll 82.0 · grad
+  80.0 (BELOW its own roll: Adam through the displacement dynamics adds nothing, vs +7-12 on
+  mse dynamics). s2s trades top-end planning for policy quality; direction FLIPS by cell
+  (helps GR reactive, hurts TC reactive).
+  GAP: noreg toolhang subgoal-selection never measured (the POC only ran mse-sig) -- needed
+  for a complete plan-time column.
+  OPS: startup lane-kills recurred at 3 lanes (1 lane lost in each job's first minutes;
+  idempotent sweep-up jobs cover); pw train #1 died to a real H100 hardware fault
+  (cudaErrorContained nvlink) -- plain relaunch reproduced its twin's curve exactly.**
 - **SEP-POLICY / PROJECTED-SIGREG CAMPAIGN, DAY 1 (2026-09-01/02; 7 trains 00c1d98 + evals
   911676c; 1 training seed everywhere).**
   PUSHT (GR, 3x50 evals chained; refs mot grid): reactive/roll/grad --
