@@ -171,6 +171,12 @@ def parse_args():
                          "SIGReg norms, cosines, EMA cosines, Adam-preconditioned) to grad_probe.jsonl; 0 = off")
     ap.add_argument("--grad_probe_ema", type=int, default=64,
                     help="EMA window (in probe steps) for the gradient-vector averages")
+    ap.add_argument("--pcgrad", default="off", choices=["off", "sym", "protect_p"],
+                    help="gradient surgery between the task losses (P=action, D=state, S=sigreg) "
+                         "over the full parameter vector: sym = original PCGrad (every task "
+                         "projected away from each conflicting other, random order); "
+                         "protect_p = only D/S are projected away from P. Per-epoch conflict "
+                         "rates and cosines are logged. Costs one backward per task.")
     return ap.parse_args()
 
 
@@ -582,12 +588,14 @@ def main():
                                              state_target, state_valid,
                                              z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep)
         loss = loss_action + loss_state
+        parts = {"P": loss_action, "D": loss_state}      # per-task losses for --pcgrad
         loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
         if idm_head is not None:
             idm_in = torch.cat([z_history[:, -1], z_state_online[:, 0]], dim=-1)
             loss_idm = F.mse_loss(idm_head(idm_in),
                                   action_target[:, :args.frameskip].reshape(B, -1))
             loss = loss + args.w_idm * loss_idm
+            parts["I"] = args.w_idm * loss_idm
             loss_terms["idm"] = loss_idm.item()
         if n_states:
             # collapse telemetry: per-dim std of the online state latents (collapse -> ~0)
@@ -595,13 +603,17 @@ def main():
         if args.w_reg > 0:
             loss_reg = sigreg_loss(z_history, state_target, z_goal)
             loss = loss + args.w_reg * loss_reg
+            parts["S"] = args.w_reg * loss_reg
             loss_terms["reg"] = loss_reg.item()
+        extra = []
         if return_probe:
-            return loss, loss_terms, B, dict(z_history=z_history, history_pad=history_pad,
-                                             action_target=action_target, action_valid=action_valid,
-                                             state_target=state_target, state_valid=state_valid,
-                                             z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep, B=B)
-        return loss, loss_terms, B
+            extra.append(dict(z_history=z_history, history_pad=history_pad,
+                              action_target=action_target, action_valid=action_valid,
+                              state_target=state_target, state_valid=state_valid,
+                              z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep, B=B))
+        if args.pcgrad != "off":
+            extra.append(parts)
+        return (loss, loss_terms, B, *extra)
 
     def probe_measure(pc, loss_terms, gstep, epoch):
         """Encoder gradient geometry on the current batch (owner design 2026-08-30). Runs in
@@ -636,6 +648,11 @@ def main():
         return " ".join(f"{k}={store[k]/max(n,1):.5f}"
                         for k in ("act", "state", "reg", "zstd") if k in store)
 
+    pcg = None
+    if args.pcgrad != "off":
+        from lewam.models.pcgrad import PCGrad
+        pcg = PCGrad(model.parameters(), mode=args.pcgrad)
+        print(f"[jointflow] PCGrad mode={args.pcgrad} over {len(pcg.params)} param tensors", flush=True)
     gstep = start_epoch * max(1, len(train_loader))
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
@@ -646,14 +663,16 @@ def main():
             do_probe = probe is not None and gstep % args.grad_probe_every == 0
             with amp_ctx():
                 out = run_batch(batch, return_probe=do_probe)
+            loss, loss_terms, n = out[:3]
+            parts = out[-1] if args.pcgrad != "off" else None
             if do_probe:
-                loss, loss_terms, n, pc = out
-                probe_measure(pc, loss_terms, gstep, epoch)
-            else:
-                loss, loss_terms, n = out
+                probe_measure(out[3], loss_terms, gstep, epoch)
             gstep += 1
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            if pcg is not None:
+                pcg.backward(parts)      # per-task backwards + surgery -> .grad
+            else:
+                loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             if tgt_encoder is not None:
@@ -674,9 +693,14 @@ def main():
                     loss, loss_terms, n = run_batch(batch, train=False)
                 accumulate(val_stats, loss_terms, n); val_n += n
         val_act = val_stats.get("act", 0.0) / max(val_n, 1)   # best-checkpoint metric = val action loss
+        pcg_msg = ""
+        if pcg is not None:
+            st = pcg.stats()
+            pcg_msg = "  pcgrad[" + " ".join(f"{k}={v:.3f}" for k, v in sorted(st.items())) + "]"
+            pcg.reset_stats()
         print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(train_stats,train_n)}]  "
               f"val[{fmt(val_stats,val_n)}]  lr={sched.get_last_lr()[0]:.2e}  "
-              f"{time.time()-t0:.1f}s", flush=True)
+              f"{time.time()-t0:.1f}s{pcg_msg}", flush=True)
 
         torch.save(model.state_dict(), run_dir / "jointflow_latest.pt")
         full_state = dict(model=model.state_dict(), optimizer=opt.state_dict(),
