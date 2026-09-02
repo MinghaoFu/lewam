@@ -528,8 +528,20 @@ beside each checkpoint.
   ~10 directions everywhere; what differs is the gain per typical latent fluctuation
   (|dA/dz| x z-std: noreg 0.03, full-sig 0.06). Owner hypothesis (2) survives as "more
   action movement per unit latent motion, part of it nuisance", not as "reads more dims".
-  Next: overlap of the policy's sensitive directions with z's variance (effdim2), and the
-  live-render vs dataset latent shift along them.**
+  FINAL DIAGNOSTICS (2026-09-03, owner: stop probing after these): (a) policy sensitive
+  directions sit INSIDE z's live subspace in every arm (0.70-0.90; random ~0.05) carrying
+  20-30x random variance -- no policy reads noise directions; the share of z variance inside
+  the policy subspace falls with regularization: nf 59% / nm 57% / s2s 59% / pw_zp 33% /
+  pw 38% / sm 22%. (b) Within-state action spread over 16 flow-noise draws: nf 0.147 (best
+  SR, widest), all others 0.092-0.100; rmse(mean draw, dataset action) 0.16-0.17 for all but
+  nf 0.23 -- the SIGReg policies are neither noisier nor worse-fit on demo states. (c) Paired
+  live-vs-dataset render (same sim state, local robosuite 1.4.1 = lower bound): latent shift
+  0.12-0.20 of z-std, isotropic w.r.t. policy dirs (0.10-0.18 std along policy dirs = along
+  random dirs), action change 5-8% of between-state variation for EVERY arm -- no arm is
+  more render-sensitive. CONCLUSION: on the demonstration distribution the policies are
+  equivalent by fit, stochasticity, readout geometry and shift sensitivity; the 30-pt reactive
+  spread exists only CLOSED-LOOP (on self-induced states). Untested (by owner decision): the
+  off-manifold/recovery gap on the policies' own rollout states.**
 - **FEATURE-SPACE CONFLICT (M_s) IS NULL-CONSISTENT ON MSE-NOREG (2026-09-02, devbox, ~10 min).**
   Owner proposal: PCGrad in representation space via M = E[dz_D dz_P^T], project g_D away from
   h = E[J^T Q dz_P] with Q = the negative eigenspace of M_s. Measured with the free surrogate
