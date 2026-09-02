@@ -518,7 +518,15 @@ beside each checkpoint.
   excludes the dynamics target-path rows, noreg only. Script: jobs tmp ms_spectrum.py.
   Same day: --detach_goal_grad added (3cfd56b; z_goal.detach() before use, goal still
   conditions, encoder cannot be shaped by the goal pathway; smoke-verified) -- arms dg1 on
-  toolhang goal-terminal (vs g_nm 60.0) and pusht GR (vs mot_nm 68.7/86.7/88.7), seed 42.**
+  toolhang goal-terminal (vs g_nm 60.0) and pusht GR (vs mot_nm 68.7/86.7/88.7), seed 42.
+  RESULTS (2026-09-02 evening, 3x50): PUSHT detach reactive 69.3 {64,78,66} / roll 78.7
+  {76,80,80} / grad 89.3 {86,96,86} vs mot_nm 68.7/86.7/88.7 -- reactive and gradient
+  planning unchanged, rollout selection -8 (single seed, flag only). TOOLHANG goal+detach
+  reactive 62/70 on seeds 0/1 (g_nm: 64/46 same seeds; seed 42 swept separately) -- the
+  ~25-pt goal cost is NOT recovered (66 vs 60 vs goal-blind 80.7); subgoal 10.0 (the
+  quarantined goal-cond selection anomaly again). VERDICT: the goal does not damage
+  toolhang by reshaping the encoder; the cost lives in the conditioning itself (policy
+  reading an uninformative, varying terminal image). Detach is harmless on GR.**
 - **GOAL-BLIND ROUND + S2S (2026-09-02; trains 00c1d98, evals 911676c; toolhang seed 42,
   3x50 reactive, 20-ep 2-shard subgoal selection; pusht s2s 3x50 chained).**
   TOOLHANG GOAL-BLIND reactive / subgoal-selection:
