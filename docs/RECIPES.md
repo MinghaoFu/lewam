@@ -519,8 +519,16 @@ beside each checkpoint.
   80.0 (BELOW its own roll: Adam through the displacement dynamics adds nothing, vs +7-12 on
   mse dynamics). s2s trades top-end planning for policy quality; direction FLIPS by cell
   (helps GR reactive, hurts TC reactive).
-  GAP: noreg toolhang subgoal-selection never measured (the POC only ran mse-sig) -- needed
-  for a complete plan-time column.
+  GAP CLOSED (10:41): noreg toolhang subgoal-selection = 80.0 {80,80} (probe mot_nm ckpt,
+  POC protocol). Full plan-time column: noreg 80.0 = full-sig 80.0 = pw 80.0 > s2s 75 >
+  pw_zp 60. SELECTION NEVER DISCRIMINATED the dynamics on toolhang -- the POC's "+25 from
+  plan-time support" was only full-sig recovering its own reactive damage (54.7 -> 80), not
+  a regularizer-specific capability. On toolhang, plain noreg mse wins or ties EVERY
+  measured column (reactive 80.7, selection 80.0); the sigreg family's real wins are pusht
+  gradient planning (95.3 vs 88.7) -- the projected+shielded recipe's value is keeping that
+  while not losing toolhang reactive (76.7 vs full-sig's 54.7). pw_zp is the ONLY arm where
+  selection lands BELOW its own reactive (76.7 -> 60): the policy-view-on-imagined-latents
+  OOD cost, now isolated against three 80s.
   OPS: startup lane-kills recurred at 3 lanes (1 lane lost in each job's first minutes;
   idempotent sweep-up jobs cover); pw train #1 died to a real H100 hardware fault
   (cudaErrorContained nvlink) -- plain relaunch reproduced its twin's curve exactly.**
