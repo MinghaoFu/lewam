@@ -553,9 +553,21 @@ beside each checkpoint.
   2x action-per-latent-fluctuation gain under full-sig. Evidence bar: keep 95 pusht planning
   while closing toolhang to -4 (pw_zp does this: -26 -> -4). Not yet measured: the encoder's
   gain on PHYSICAL state perturbations per arm (predicts the full ordering incl. s2s).
-  Candidate follow-ups, all on the policy's view only: bottlenecked P (384 -> small),
-  contraction/smoothness penalty on P, or noise/DART-style augmentation on P(z) for the
-  policy branch (train on the latent drift it will face).**
+  Candidate follow-ups, all on the policy's view only: bottlenecked P (384 -> small,
+  LoRA-style low-rank factorization so frame_in weight sharing is untouched), contraction/
+  smoothness penalty on P, or noise/DART-style augmentation on P(z) for the policy branch.
+  PHYSICAL-PERTURBATION TEST (2026-09-03, 48 demo states, 4 perturbed renders x 2 scales,
+  arm joints 0.01/0.03 rad + object xyz 2/6 mm): the encoder's gain on physical deviation is
+  the SAME in every arm in its own units -- |dz|/tot_std 0.24-0.30 (small) / 0.58-0.66
+  (large); |dz| / demo nearest-neighbour spacing 2.6-3.4 / 6.1-7.5 (a 2 mm nudge moves every
+  arm's latent ~3x beyond the demo spacing); along the policy's directions 0.21-0.25 / 0.48-
+  0.56 std; action change 9-14% / 21-28% of between-state variation, no SR ordering (nf 13%,
+  sm 14%, pw_zp 9%); the shield's P(z) gain (0.28 / 0.63) equals its raw-z gain. So the
+  local-gain form of the hypothesis ("same deviation looks more off-manifold under SIGReg")
+  is NOT supported: relative to each latent's own scale, all encoders resolve physical
+  deviation identically and the policies compensate their gain. Whatever separates the arms
+  closed-loop is non-local (larger/compounded deviations, or temporal structure of the latent
+  along rollouts), not the local sensitivity at demo states.**
 - **FEATURE-SPACE CONFLICT (M_s) IS NULL-CONSISTENT ON MSE-NOREG (2026-09-02, devbox, ~10 min).**
   Owner proposal: PCGrad in representation space via M = E[dz_D dz_P^T], project g_D away from
   h = E[J^T Q dz_P] with Q = the negative eigenspace of M_s. Measured with the free surrogate
