@@ -111,6 +111,11 @@ def parse_args():
     ap.add_argument("--p_drop_goal", type=float, default=0.0,
                     help="per-row goal dropout to the learned null goal (0 = every sample "
                          "keeps its goal)")
+    ap.add_argument("--detach_goal_grad", action="store_true",
+                    help="stop-gradient z_goal into the encoder: the goal frame is still "
+                         "encoded and conditions the policy/dynamics, but the encoder cannot "
+                         "be shaped by the goal pathway (tests whether the goal 'hacks' the "
+                         "representation into shortcuts). Requires --goal_conditioning.")
     ap.add_argument("--fs_strided", action="store_true",
                     help="load the fs-strided (old GR) cache and sample goals at anchor offsets")
     # anti-collapse
@@ -336,6 +341,8 @@ def main():
     run_dir = Path(args.run_dir) if args.run_dir else Path(f"runs/{args.run_name}_{tag}" if tag else args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    assert not (args.detach_goal_grad and not args.goal_conditioning), \
+        "--detach_goal_grad requires --goal_conditioning"
     if args.goal_terminal:
         assert args.goal_conditioning and not args.fs_strided, \
             "--goal_terminal is the raw-path TC goal mode: needs --goal_conditioning, excludes --fs_strided"
@@ -550,6 +557,11 @@ def main():
         z_goal = goal_keep = None
         if args.goal_conditioning:
             z_goal = z[B * (n_history + n_states):]
+            if args.detach_goal_grad:
+                # goal still conditions the policy/dynamics, but its gradient cannot reshape
+                # the encoder (also removes the goal group from SIGReg's encoder push, since
+                # a detached group contributes no encoder gradient)
+                z_goal = z_goal.detach()
             if train and args.p_drop_goal > 0:
                 goal_keep = torch.rand(B, device=device) >= args.p_drop_goal
         if tgt_encoder is not None:
