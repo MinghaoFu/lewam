@@ -501,6 +501,18 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
+  Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
+  --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
+  drawer mse-noreg (120 ep), toolhang/pusht mse-noreg at d192/depth4/4heads (17.3M total,
+  MoT 5.3M vs 55.0M/42.6M). REACHER mse-noreg: first attempt OOM (rc 137: the 115 GB
+  mmapped strided cache needs memory 200000, not the 120000 eval-template default);
+  relaunched, then COLLAPSED SILENTLY by ep 10 (zstd 1.1e-4, state loss 1e-4, act flat at
+  1.52 = marginal action variance; not a NaN, so the collapse guard did not fire) -- killed
+  by owner. Reacher is the first cell where the default recipe fails outright; the SIGReg
+  comparison exists (jointflow+sigreg 2026-08-27: reactive {92,80,88} = 86.7, planning
+  {96,96,90} = 94.0). Open: reacher with proj-sig + policy view (candidate #2).
+  OPS: collapse guard is NaN-only -- add a zstd floor kill for GR cells.**
 - **THE POLICY-DYNAMICS TRADEOFF IS NOT A GRADIENT CONFLICT (2026-09-03, devbox diagnostics).**
   Four independent measurements on the toolhang mse-noreg arm (and others), all agreeing:
   (1) TRUE induced feature changes dz = z(theta - eta*g) - z(theta) on the encoder (owner's
