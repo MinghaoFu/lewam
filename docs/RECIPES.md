@@ -501,6 +501,35 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **THE POLICY-DYNAMICS TRADEOFF IS NOT A GRADIENT CONFLICT (2026-09-03, devbox diagnostics).**
+  Four independent measurements on the toolhang mse-noreg arm (and others), all agreeing:
+  (1) TRUE induced feature changes dz = z(theta - eta*g) - z(theta) on the encoder (owner's
+  definition, linearity 2.00): at ep15 cos(E[dz_D],E[dz_P]) = +0.83, per-row +0.41, the
+  mean-removed cross-cov cooperative 6x null vs fighting 2x null; converged +0.37 / +0.09.
+  |dz_D| is 58x (ep15) to 135x (converged) SMALLER than |dz_P|: the dynamics is a passenger
+  on the shared encoder. The earlier "opposed mean pulls -0.33 at ep15" used the dL/dz
+  stand-in and is an artifact of ignoring the shared-encoder coupling. (2) Parameter-space
+  cos(P,D) restricted to the MoT trunk: +0.005 (ep15 and converged), coin-flip signs, P/D
+  norm ratio 26-103x; full-sig trunk -0.001, 11x. (3) Probe pairs over training: P vs D_in /
+  D_tar / S all within +-0.05 with 15-45% negative steps at every timescale incl. ep<=1;
+  the only large anti-alignment, D_in vs D_tar (-0.5, 100% of steps, all arms), is Siamese
+  geometry (one residual through two similar Jacobians with opposite sign; net keeps ~90% of
+  the larger half, target path 1.3-5x the input path) -- not conflict. (4) Round-1 fdp
+  per-direction scores a_P_Dfull: mse arms ALIGNED early (+0.60 / +0.49, 1-3% negative dirs
+  at ep15), mild late disagreement only under noreg (38% at final); flow arms = noise.
+  DECISIONS: representation-space PCGrad (all variants) and parameter-space PCGrad NOT
+  built; --pcgrad flag (sym / protect_p, {P,D[,S]} over the full param vector, per-epoch
+  conflict-rate logging) exists in the trainer but is untested on the cluster.
+  WHAT TRACKS SR INSTEAD: the width of z's live subspace and of what the policy reads.
+  z dims90 (real frames): flow-noreg 9 (SR 86.0, per-dim std 0.003!), mse-noreg 17 (80.7),
+  s2s 18 (69.3), pw_zp 30 (76.7; its P(z) 22), pw 31 (64.7), full-sig 34 (54.7). fdp
+  usage_P dims90: 12 / 19 / 74 (sm) / 207 (sf). BUT the inference-side action<-z_t
+  sensitivity has PR 3.5-5.8 (dims90 7-13) in EVERY arm -- the policy OUTPUT responds to
+  ~10 directions everywhere; what differs is the gain per typical latent fluctuation
+  (|dA/dz| x z-std: noreg 0.03, full-sig 0.06). Owner hypothesis (2) survives as "more
+  action movement per unit latent motion, part of it nuisance", not as "reads more dims".
+  Next: overlap of the policy's sensitive directions with z's variance (effdim2), and the
+  live-render vs dataset latent shift along them.**
 - **FEATURE-SPACE CONFLICT (M_s) IS NULL-CONSISTENT ON MSE-NOREG (2026-09-02, devbox, ~10 min).**
   Owner proposal: PCGrad in representation space via M = E[dz_D dz_P^T], project g_D away from
   h = E[J^T Q dz_P] with Q = the negative eigenspace of M_s. Measured with the free surrogate
