@@ -157,6 +157,9 @@ def parse_args():
                     help="MoT: the action branch attends only P(z) copies of the history (and a "
                          "projected goal); the policy's gradient reaches z through the projection "
                          "only, the dynamics owns z raw (owner design 2026-09-01)")
+    ap.add_argument("--policy_proj_rank", type=int, default=0,
+                    help="with --sep_policy_state: bottleneck the policy view to a rank-r "
+                         "LoRA-style factorization P = U V (output stays z_dim); 0 = full linear")
     ap.add_argument("--sigreg_pertime", action=argparse.BooleanOptionalAction, default=True,
                     help="SIGReg per latent group (each history slot, each state target, goal as "
                          "context), losses averaged; --no-sigreg_pertime = the original pooled "
@@ -414,6 +417,7 @@ def main():
                state_x_eps=float(args.state_x_eps),
                state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None),
                sep_policy_state=bool(args.sep_policy_state),
+               policy_proj_rank=int(args.policy_proj_rank),
                sigreg_pertime=bool(args.sigreg_pertime),
                # no reg -> no projection module (keeps noreg checkpoints free of dead params)
                sigreg_proj_dim=(0 if args.w_reg == 0

@@ -147,7 +147,21 @@ class MoTFlow(nn.Module):
         self.goal_in = nn.Linear(self.z_dim, d)
         self.null_goal = nn.Parameter(torch.zeros(1, 1, d))
         if self.sep_policy_state:
-            self.policy_proj = nn.Linear(self.z_dim, self.z_dim)
+            r = int(cfg.get("policy_proj_rank", 0) or 0)
+            if r > 0:
+                # bottlenecked policy view (owner 2026-09-03): LoRA-style rank-r factorization
+                # P = U V, output stays z_dim so frame_in sharing is untouched; init U = V^T with
+                # V row-orthonormal -> P starts as an orthogonal projector onto a random r-dim
+                # subspace (an unbiased narrow view the policy then rotates)
+                self.policy_proj = nn.Sequential(nn.Linear(self.z_dim, r, bias=False),
+                                                 nn.Linear(r, self.z_dim))
+                with torch.no_grad():
+                    q, _ = torch.linalg.qr(torch.randn(self.z_dim, r))
+                    self.policy_proj[0].weight.copy_(q.T)
+                    self.policy_proj[1].weight.copy_(q)
+                    self.policy_proj[1].bias.zero_()
+            else:
+                self.policy_proj = nn.Linear(self.z_dim, self.z_dim)
         if self.sigreg_proj_dim > 0:
             self.sigreg_proj = nn.Linear(self.z_dim, self.sigreg_proj_dim, bias=False)
             with torch.no_grad():
