@@ -535,6 +535,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             plan_score=str(ge.get("plan_score", "joint")),
             plan_k=int(ge.get("plan_k", 32)),
             plan_rollout=int(ge.get("plan_rollout", 1)),
+            plan_random_candidates=bool(ge.get("plan_random_candidates", False)),
             cem_iters=int(ge.get("cem_iters", 3)),
             cem_elites=int(ge.get("cem_elites", 6)),
             cem_std=float(ge.get("cem_std", 0.5)),
@@ -1457,6 +1458,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         # step) into the latent history, H times. Cost scores the FINAL imagined state
         # against the goal; the winner's full H*frameskip raw actions execute, then replan.
         self.plan_rollout = int(kwargs.pop("plan_rollout", 1))
+        # control: replace the K policy proposals by N(0,1) block sequences (random shooting on the
+        # dynamics, same scoring/selection) -- measures how much the policy contributes to best_of_k
+        self.plan_random_candidates = bool(kwargs.pop("plan_random_candidates", False))
         self.cem_iters = int(kwargs.pop("cem_iters", 3))
         self.cem_elites = int(kwargs.pop("cem_elites", 6))
         self.cem_std = float(kwargs.pop("cem_std", 0.5))
@@ -1966,7 +1970,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         fs = self.action_block
         gc = getattr(self.model, "goal_conditioning", False)
         steps_rep = steps.repeat_interleave(K, 0) if gc and steps is not None else None
-        blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)
+        given = None
+        if self.plan_random_candidates:
+            given = torch.randn(h.shape[0], self.plan_rollout, fs, self.model.action_raw_dim,
+                                device=h.device, generator=self._gen(h.device))
+        blocks, z_final = self._imagine(h, p, goal_rep, steps_rep, given=given)
         # cost_goal (subgoal planning on goal-conditioned ckpts): the policy is conditioned on
         # z_goal, the planner scores against cost_goal
         cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
