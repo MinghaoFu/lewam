@@ -551,10 +551,22 @@ beside each checkpoint.
   arm; whatever is wrong is wrong on the training pixels. Open-loop at K=8 both arms' mean
   draw sits at the zero-action floor (rmse ~1.00 vs 0.987 for zero; single-draw spread
   0.87 z-scored), i.e. single draws are near the action marginal even for the 88% sig policy;
-  a K=48 mean-signal test (cosine of the K-mean chunk with the dataset chunk vs a shuffled
-  null, + wrong-goal control) is the pending discriminator. Also noted: the eval's first
-  replan feeds h_norm 25/50 = 0.5 (countdown in raw env steps) while training's convention
-  for the same 5-anchor goal is 5/50 = 0.1 -- shared by both arms, sig works with it.
+  K=48 MEAN-SIGNAL TEST (N=64 states, 24 min CPU; eval-consistent conditioning h_norm 0.1 --
+  the eval countdown IS in anchors, horizon0 = goal_offset_steps/action_block = 5, so first
+  replan = 5/50 = 0.1 = training convention; no protocol bug): cosine of the K-mean chunk
+  with the dataset chunk, true goal: bottleneck 0.101+-0.028 (shuffled null 0.046) vs sig
+  0.204+-0.023 (null 0.040); WRONG goal (another state's): both drop to 0.052 = null, so
+  both use the goal, but the goal-dependent part is ~0.05 (bottleneck) vs ~0.15 (sig), 3x
+  weaker; |mean|/single-draw spread 0.28 vs 0.45; re-rendered pixels give identical numbers
+  (0.101 / 0.205). Off-distribution probe h_norm 0.5: sig 0.108, bottleneck null (0.060).
+  POLICY-VIEW SURVIVAL: the goal-relative latent direction (z_goal - z_cur) keeps 81% of its
+  norm through the trained rank-32 P (random rank-32 projector 28%, top-32 PCA 80%);
+  velocity direction 75%. So the view does NOT discard the goal information -- the action
+  branch under-learned a small goal-conditioned signal that the flow loss cannot see (both
+  arms val act ~1.5: the loss is dominated by the action noise; on reacher closed-loop SR is
+  the only readout of the policy). Not separated yet: policy view per se vs rank 32 (no
+  full-rank pw_zp reacher run exists). Owner's renderer-mismatch mechanism: real pixel shift,
+  but not amplified by either of these encoders (their 0.257 cosine is from another ckpt).
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
