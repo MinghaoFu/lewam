@@ -119,6 +119,10 @@ def parse_args():
     ap.add_argument("--fs_strided", action="store_true",
                     help="load the fs-strided (old GR) cache and sample goals at anchor offsets")
     # anti-collapse
+    ap.add_argument("--zstd_floor", type=float, default=0.0,
+                    help="collapse guard: after epoch 5, abort (write run_dir/collapse_killed) when the val "
+                         "per-dim std of the state latents drops below this (0 = off; reacher mse-noreg "
+                         "collapsed to 1e-4 and the NaN-only guard let it run to the end)")
     ap.add_argument("--w_reg", type=float, default=0.0,
                     help="SIGReg anti-collapse weight on the encoder latent")
     ap.add_argument("--w_idm", type=float, default=0.0,
@@ -705,6 +709,12 @@ def main():
         print(f"[jointflow] ep {epoch+1}/{args.epochs}  train[{fmt(train_stats,train_n)}]  "
               f"val[{fmt(val_stats,val_n)}]  lr={sched.get_last_lr()[0]:.2e}  "
               f"{time.time()-t0:.1f}s{pcg_msg}", flush=True)
+
+        val_zstd = val_stats.get("zstd", float("inf")) / max(val_n, 1)
+        if args.zstd_floor > 0 and epoch + 1 >= 5 and val_zstd < args.zstd_floor:
+            (run_dir / "collapse_killed").write_text(f"epoch {epoch+1} val zstd {val_zstd:.6f} < floor {args.zstd_floor}\n")
+            print(f"[jointflow] COLLAPSE_KILL zstd={val_zstd:.6f} < {args.zstd_floor} at ep {epoch+1}", flush=True)
+            break
 
         torch.save(model.state_dict(), run_dir / "jointflow_latest.pt")
         full_state = dict(model=model.state_dict(), optimizer=opt.state_dict(),
