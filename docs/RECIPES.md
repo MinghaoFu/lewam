@@ -525,6 +525,18 @@ beside each checkpoint.
     off), so goal variation (orientation/pose) is orthogonal to reward = causal confusion,
     unlike cube (goal=position=reward). Failure videos at ckpts/jointflow_tc/toolhang_gc_fail_videos.
     Reacher bottleneck did NOT collapse (zstd ~0.20 through training vs mse-noreg 1e-4).
+  DRAWER mse+noreg reactive (tc_drawer_mnm_s42, 120 ep, TC eval jf_tc_ev_c299ee7): 65.3
+  {62,64,70} vs the jointflow-noreg drawer baseline 68.0 -- reproduced within noise.
+  TRANSPORT mse+noreg reactive (tc_transport_mnm_s42, 120 ep): 86.7 {86,88,86} vs baseline
+  86.7 -- reproduced exactly. (Eval job queued ~4 h on research with 18-42 H100 showing free;
+  capacity was not the block.)
+  CUBE mse+noreg (tc_cube_gcf_mnm_s42, goal-cond, 75 ep): trained 4 epochs healthy (val act
+  0.585, zstd 0.26) at ~2400 s/epoch = 4.2x the jointflow cube's 574 s (transport/drawer show
+  motflow at a uniform 1.3x), then killed at 3h17m with no error = the 3h low-util kill on a
+  fuse-latency-bound loader (302 GB cache cannot fit the 120 GB pod; 0.29 s/step = 64 random
+  fuse reads at ~7 ms with 6 workers, while 8 other jobs hammered the same fuse). Resume chain
+  is built into the gcf2 entry (seeds jointflow_full.pt, --resume); ep-4 full ckpt is on HDFS.
+  Proposed relaunch (not launched): --num_workers 12 + memory 200000, resume at ep 5.
   REACHER RESULT (bottleneck recipe): reactive 26.0 {26,26,26}; planning 99.3 roll
   {100,98,100} / 99.3 grad {100,98,100} vs the sigreg baseline 86.7/94.0. mse-noreg could not
   train here (collapsed), so SIGReg in the recipe is what makes reacher trainable.
