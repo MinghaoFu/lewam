@@ -525,12 +525,36 @@ beside each checkpoint.
     off), so goal variation (orientation/pose) is orthogonal to reward = causal confusion,
     unlike cube (goal=position=reward). Failure videos at ckpts/jointflow_tc/toolhang_gc_fail_videos.
     Reacher bottleneck did NOT collapse (zstd ~0.20 through training vs mse-noreg 1e-4).
-  REACHER RESULT (bottleneck recipe): reactive 26.0 {26,26,26} (weak, identical across seeds
-  = systematic sub-mode) but PLANNING recovers to 99.3 roll {100,98,100} / 99.3 grad
-  {100,98,100}, ABOVE the sigreg baseline 86.7/94.0. Clearest instance of the system claim
-  (weak reactive policy + good WM verifier -> near-perfect), and mse-noreg could not train
-  here at all (collapsed) -- so SIGReg in the recipe is what makes reacher trainable. The one
-  recipe survives + excels on reacher via planning.
+  REACHER RESULT (bottleneck recipe): reactive 26.0 {26,26,26}; planning 99.3 roll
+  {100,98,100} / 99.3 grad {100,98,100} vs the sigreg baseline 86.7/94.0. mse-noreg could not
+  train here (collapsed), so SIGReg in the recipe is what makes reacher trainable.
+  CORRECTION (2026-09-04, owner flagged the 26 as suspect; devbox re-eval, ~22 min/seed on
+  CPU, same eval code): the reactive 26 is NOT "a weak policy rescued by the verifier" -- the
+  policy is at the RANDOM-ACTION FLOOR. Fresh seed 7, same 50 configs: sig baseline 88.0
+  (matches the pod 92/80/88, so the local eval reproduces the cluster); bottleneck 32.0;
+  bottleneck with every executed action replaced by N(0,1) noise (+gip_eval.dyn_random_p=1.0)
+  32.0 -- and the SAME 16 episodes succeed in both (identical index sets): those are the
+  configs that succeed regardless of action. The three identical 13/50 on the pod were a
+  ~1.6% coincidence (configs are resampled per seed; the count moved to 16 on seed 7). So
+  JFROLL/JFGRAD 99 on this ckpt is best-of-32 shooting on a good dynamics model, not policy
+  candidates + selection. Eval-side causes ruled out: config carries policy_proj_rank 32,
+  the eval loader asserts on missing/unexpected keys (none), the reactive path uses the real
+  horizon countdown for goal_terminal=False ckpts (911676c zeros apply only to goal_terminal).
+  Owner's renderer-mismatch hypothesis (MuJoCo-EGL is machine-sensitive; an e2e encoder
+  amplifies the pixel shift): the PIXEL shift reproduces exactly (dataset frame vs the same
+  qpos/qvel re-rendered through the eval's own ReacherDMControlWrapper: MAE 2.581/255, 50% of
+  pixels off by >2; owner measured 2.576/40%; the residual is anti-aliasing along the arm
+  outline + floor texture filtering, pose identical) but NEITHER encoder amplifies it:
+  latent cosine z(dataset) vs z(re-render) = 0.993 bottleneck / 0.998 sig, shift 8-11% of
+  the between-state latent distance, and the bottleneck's mean action chunk is IDENTICAL
+  under the two renders (per-state cosine 1.000). Render mismatch does not explain this
+  arm; whatever is wrong is wrong on the training pixels. Open-loop at K=8 both arms' mean
+  draw sits at the zero-action floor (rmse ~1.00 vs 0.987 for zero; single-draw spread
+  0.87 z-scored), i.e. single draws are near the action marginal even for the 88% sig policy;
+  a K=48 mean-signal test (cosine of the K-mean chunk with the dataset chunk vs a shuffled
+  null, + wrong-goal control) is the pending discriminator. Also noted: the eval's first
+  replan feeds h_norm 25/50 = 0.5 (countdown in raw env steps) while training's convention
+  for the same 5-anchor goal is 5/50 = 0.1 -- shared by both arms, sig works with it.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
