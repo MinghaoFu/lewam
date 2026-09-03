@@ -501,6 +501,30 @@ beside each checkpoint.
   late conflict (3.1/1.2/1.2/2.5); flow-sig rises monotonically to 75-80 despite its 8
   crammed dims. n=20 x 1 seed per point: +-~10 binomial SE at p~0.5-0.7 -- shape claims
   only, no single-point claims.**
+- **BOTTLENECK + PARAM-ABLATION RESULTS (2026-09-03, seed 42, evals on c299ee7).**
+  BOTTLENECK (proj-sig + policy view + rank-32 P=UV) vs full-width pw_zp:
+    toolhang reactive 73.3 {78,66,76} (pw_zp 76.7, noreg 80.7) / subgoal 70.0 (pw_zp 60.0) ·
+    pusht reactive 75.3 {66,86,74} / roll 86.7 / grad 90.7 {90,90,92} (pw_zp 73.3/83.3/95.3).
+  VERDICT: the bottleneck did NOT meet the owner's bar (keep ~95 pusht planning + close
+  toolhang to -4). It TRADES: toolhang reactive -3.4 / subgoal +10; pusht reactive +2 / grad
+  -4.6 (lost the 95.3 peak). A narrower policy view does not recover toolhang reactive; the
+  hypothesis is not supported by the rank-32 arm (1 seed). pusht reactive 75.3 is the best of
+  any pusht arm.
+  PARAM ABLATION (d192/depth4/4heads, 17.3M total vs 55.0M) mse-noreg:
+    toolhang reactive 82.0 {90,78,78} (55M 80.7) / subgoal 75.0 (55M 80.0) ·
+    pusht reactive 72.7 {72,78,68} / roll 83.3 / grad 85.3 (55M noreg 68.7/86.7/88.7).
+    The 3x-smaller model is EQUAL on reactive (toolhang +1.3, pusht +4) and ~3-5 lower on
+    planning/selection; the ~0.11 toolhang loss gap did not cost success. Param count is
+    nearly free -- a clean paper result.
+  OPS SLIP (mine): reused the 911676c eval entry for c299ee7-trained bottleneck ckpts ->
+    AssertionError missing policy_proj.weight / unexpected policy_proj.0.weight (old build_model
+    makes single-Linear P, ckpt has rank-r Sequential). Violated the standing "eval tarball
+    >= training commit" invariant. Fixed: jf_pvev_c299ee7.sh; all bottleneck/param evals pin
+    c299ee7. Also: goal-state montage refutes "toolhang goals are wallpaper" -- goals vary
+    MORE than starts (L1 17.4 vs 11.6); success predicate uses object xyz only (quats sliced
+    off), so goal variation (orientation/pose) is orthogonal to reward = causal confusion,
+    unlike cube (goal=position=reward). Failure videos at ckpts/jointflow_tc/toolhang_gc_fail_videos.
+    Reacher bottleneck did NOT collapse (zstd ~0.20 through training vs mse-noreg 1e-4); eval pending.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
