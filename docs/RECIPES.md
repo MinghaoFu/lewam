@@ -524,7 +524,13 @@ beside each checkpoint.
     MORE than starts (L1 17.4 vs 11.6); success predicate uses object xyz only (quats sliced
     off), so goal variation (orientation/pose) is orthogonal to reward = causal confusion,
     unlike cube (goal=position=reward). Failure videos at ckpts/jointflow_tc/toolhang_gc_fail_videos.
-    Reacher bottleneck did NOT collapse (zstd ~0.20 through training vs mse-noreg 1e-4); eval pending.
+    Reacher bottleneck did NOT collapse (zstd ~0.20 through training vs mse-noreg 1e-4).
+  REACHER RESULT (bottleneck recipe): reactive 26.0 {26,26,26} (weak, identical across seeds
+  = systematic sub-mode) but PLANNING recovers to 99.3 roll {100,98,100} / 99.3 grad
+  {100,98,100}, ABOVE the sigreg baseline 86.7/94.0. Clearest instance of the system claim
+  (weak reactive policy + good WM verifier -> near-perfect), and mse-noreg could not train
+  here at all (collapsed) -- so SIGReg in the recipe is what makes reacher trainable. The one
+  recipe survives + excels on reacher via planning.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
