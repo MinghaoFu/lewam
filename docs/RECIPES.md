@@ -678,6 +678,20 @@ beside each checkpoint.
   val act 0.496 zstd 0.290 -- latents ~2x wider than the noreg runs' 0.16); GR evals submitted one mode
   per job (gc/plan/grad/cemp): drawer 9765c5090d93fd75 47f311a2f13bdc9e 491e75c7e347d706 09996ff9c8e7a015;
   transport 458e3e581e2165a1 44e85d608d9b3631 82c4db186d68c524 76e2f6366eeb656a.
+  RESULT (3 eval seeds x 50; noreg@192 row in brackets): reactive / best-of-K / grad / CEM-policy
+    drawer-as-GR    pw_zp 45.3 {38,46,52} / 52.7 {46,58,54} / 15.3 {12,20,14} / 15.3 {6,20,20}
+                    [noreg 42.7 / 48.0 / 14.0 / 16.0]
+    transport-as-GR pw_zp 80.0 {78,78,84} / 77.3 {78,72,82} / 54.7 {58,52,54} / 67.3 {70,66,66}
+                    [noreg 68.7 / 69.3 / 42.0 / 62.0]
+  READS: (1) planning does NOT recover -- on both cells the gradient planner still lands far below
+  reactive (drawer 15 vs 45, transport 55 vs 80) and its drift from the warm start is unchanged
+  (drawer ||U-U0|| 12.5-13.0, transport 10.9-11.3 vs 13 / 13 noreg; every replan "improves" the model
+  cost 3-4x), so projected SIGReg at 192 does not regularize the latent enough to stop the
+  exploitation; the TR grid remains the only thing that removes it (and only back to warm start).
+  (2) the regularizer + policy view lifts transport's goal-conditioned REACTIVE row by +11 (68.7 ->
+  80.0, 3 seeds all >= 78; goal-blind TC on the same data 86.7) and best-of-K by +8; drawer moves
+  within noise (+2.6 / +4.7; goal-blind TC 68.7). So on transport most of the goal-conditioning cost
+  is recoverable on the policy side without touching the goal pathway; on drawer it is not.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
