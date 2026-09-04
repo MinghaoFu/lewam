@@ -539,6 +539,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             cem_iters=int(ge.get("cem_iters", 3)),
             cem_elites=int(ge.get("cem_elites", 6)),
             cem_std=float(ge.get("cem_std", 0.5)),
+            cem_init=str(ge.get("cem_init", "policy")),
             pm_steps=int(ge.get("pm_steps", 20)),
             pm_lr=float(ge.get("pm_lr", 0.02)),
             pm_rho=float(ge.get("pm_rho", 0.3)),
@@ -1464,6 +1465,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.cem_iters = int(kwargs.pop("cem_iters", 3))
         self.cem_elites = int(kwargs.pop("cem_elites", 6))
         self.cem_std = float(kwargs.pop("cem_std", 0.5))
+        # MoT CEM (Minghao 2026-09-04, "same ckpt: CEM vs grad-based"): cem_init=policy warm-starts the
+        # Gaussian at the best of plan_k policy rollouts (same warm start as grad); cem_init=zero is the
+        # pure world-model planner (LeWM-style, no policy prior).
+        self.cem_init = str(kwargs.pop("cem_init", "policy"))
+        assert self.cem_init in ("policy", "zero"), self.cem_init
         # oracle_bok (owner sanity check 2026-08-29): candidate 0 = the replayed demo's expert
         # chunk at the current step, K-1 = wrong chunks ("uniform" over the dataset action box or
         # "shuffle" = other demos' chunks); the dynamics picks; SR then measures whether the
@@ -1514,7 +1520,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_mode == "grad" and not getattr(model, "rollout_only", False):
             raise ValueError("plan_mode=grad is implemented on the MoT (rollout) dynamics only")
         if self.rollout_only:
-            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad", "steer"):
+            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad", "steer", "cem"):
                 raise ValueError(f"MoT plans by rollout only: plan_mode={self.plan_mode!r} has no rollout form")
             if self.plan_score != "joint":
                 raise ValueError("MoT has no one-block scorer: drop plan_score (planning is the rollout)")
@@ -1528,9 +1534,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             assert getattr(model, "goal_conditioning", False), \
                 "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
         if self.plan_rollout > 1:
-            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad", "steer"), \
-                "rollout planning: best_of_k / oracle_bok / grad / steer"
-            if self.plan_mode in ("best_of_k", "grad", "steer"):
+            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad", "steer", "cem"), \
+                "rollout planning: best_of_k / oracle_bok / grad / steer / cem"
+            if self.plan_mode in ("best_of_k", "grad", "steer", "cem"):
                 # the plan is H*fs raw actions; execute all of it by default, then replan.
                 # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
                 self.num_actions = self.plan_rollout * self.action_block
@@ -1622,7 +1628,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             plan = (self._steer_rollout(history, history_pad, z_goal, steps_t) if self.rollout_only
                     else self._steer(history, history_pad, z_goal, h_norm))
         else:
-            plan = self._cem(history, history_pad, z_goal, h_norm, replan)
+            plan = (self._cem_rollout(history, history_pad, z_goal, steps_t) if self.rollout_only
+                    else self._cem(history, history_pad, z_goal, h_norm, replan))
         if self._prev_plan is not None:
             for row, i in enumerate(replan):
                 self._prev_plan[i] = plan[row]
@@ -1934,6 +1941,56 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                   f"{st['c_warm'] / st['n']:.4f} -> {st['c_best'] / st['n']:.4f}; mean ||U-U0|| "
                   f"{st['du'] / st['n']:.3f} (steps {self.grad_steps}, lr {self.grad_lr}, tr {self.grad_tr})", flush=True)
         return best_U.detach().reshape(R, H * fs, -1)
+
+    def _cem_rollout(self, history, history_pad, z_goal, steps, cost_goal=None):
+        """CEM on the MoT rollout dynamics (Minghao 2026-09-04: same ckpt, CEM vs grad). Candidate
+        H-block plans are imagined as GIVEN actions through `_imagine` (no policy inside the loop);
+        cost = terminal latent distance to the goal, as in best_of_k/grad. Per replan: cem_iters
+        rounds of plan_k Gaussian candidates around the running mean (candidate 0 = the mean),
+        elites (cem_elites) refit mean/std. cem_init=policy: mean0 = the best of plan_k policy
+        rollouts (grad's warm start, the policy prior); cem_init=zero: mean0 = 0 (pure world model).
+        The best candidate seen executes (its first block)."""
+        R, P, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
+        adim = self.model.action_raw_dim
+        device = history.device
+        steps_t = steps
+        h = history.repeat_interleave(P, 0); p = history_pad.repeat_interleave(P, 0)
+        goal_rep = z_goal.repeat_interleave(P, 0)
+        steps_rep = steps_t.repeat_interleave(P, 0) if steps_t is not None else None
+        cg_rep = cost_goal.repeat_interleave(P, 0) if cost_goal is not None else goal_rep
+        rows = torch.arange(R, device=device)
+        with torch.no_grad():
+            if self.cem_init == "policy":
+                blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)
+                cost0 = ((z_final - cg_rep) ** 2).mean(-1).view(R, P)
+                pick = cost0.argmin(1)
+                mean = blocks.view(R, P, H, fs, adim)[rows, pick].clone()      # (R, H, fs, adim)
+                best_plan, best_cost = mean.clone(), cost0[rows, pick].clone()
+            else:
+                mean = torch.zeros(R, H, fs, adim, device=device)
+                best_plan, best_cost = mean.clone(), torch.full((R,), float("inf"), device=device)
+            std = torch.full_like(mean, self.cem_std)
+            for _ in range(self.cem_iters):
+                cand = mean[:, None] + std[:, None] * torch.randn(R, P, H, fs, adim, device=device,
+                                                                  generator=self._gen(device))
+                cand[:, 0] = mean
+                _, z_final = self._imagine(h, p, goal_rep, steps_rep, given=cand.reshape(R * P, H, fs, adim))
+                cost = ((z_final - cg_rep) ** 2).mean(-1).view(R, P)
+                iter_cost, iter_pick = cost.min(1)
+                better = iter_cost < best_cost
+                best_plan[better] = cand[rows, iter_pick][better]
+                best_cost = torch.minimum(iter_cost, best_cost)
+                elite_idx = cost.topk(min(self.cem_elites, P), dim=1, largest=False).indices
+                elites = cand[rows[:, None], elite_idx]
+                mean, std = elites.mean(1), elites.std(1, correction=0).clamp_min(0.02)
+        st = self.__dict__.setdefault("_cem_stats", dict(n=0, c0=0.0, c=0.0))
+        st["n"] += R; st["c"] += float(best_cost.sum())
+        if self.cem_init == "policy":
+            st["c0"] += float(cost0[rows, pick].sum())
+        if st["n"] % 50 < R:
+            print(f"[cem] init={self.cem_init} iters={self.cem_iters} elites={self.cem_elites} std0={self.cem_std}: "
+                  f"mean best cost {st['c'] / st['n']:.4f}" + (f" (warm start {st['c0'] / st['n']:.4f})" if self.cem_init == "policy" else ""), flush=True)
+        return best_plan.reshape(R, H * fs, adim)
 
     def _cond_args(self, z_goal, h_norm, repeat):
         if not getattr(self.model, "goal_conditioning", False):
