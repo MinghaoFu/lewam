@@ -642,7 +642,8 @@ beside each checkpoint.
     Eval cost: 10-15 min per 50-episode eval on H100 (robosuite) -> the 18-eval job hit the 3h
     util kill at 17/18; continuation relaunched (idempotent). RULE: <=3 modes per grev job on TC cells.
   - pointmaze_large: reactive 100 {100,100,100} | best-of-K 100 | gradient 100 | random candidates
-    80.0 {82,78,80}. Policy essential (random 80 -> 100), nothing left for planning to add.
+    80.0 {82,78,80} | CEM policy-init 100 {100,100,100} | CEM zero-init 76.0 {72,80,76}. Policy essential
+    (pure WM 76-80 -> 100), nothing left for planning to add.
   - cube gcf2 (TC goal-cond): memory 400000 AND 256000 both died before the entrypoint ran (no
     heartbeat, no platform reason) -> relaunched at the proven 200000 (50310dd78ba952ab).
   - pusht (192): reactive 70.0 {62,78,70} | best-of-K 80.7 {76,84,82} | gradient 86.7 {80,92,88} | random
