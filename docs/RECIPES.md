@@ -590,6 +590,15 @@ beside each checkpoint.
   suffices; R3 > R1 -> magnitude story real; R3 collapsing -> SIGReg size load-bearing. NOTE the
   banked "192/4/4" arms (pusht 72.7/83.3/85.3, toolhang 82.0/75.0) are TRUNK-ONLY (z_dim 384),
   not the 192-throughout model the owner asked for; R2 is the first z192 run.
+  R3 RESULT (2026-09-04): first launch crashed at the end of epoch 1 on a latent PCGrad-path bug
+  (validation loop unpacked 3 of run_batch's 4 values; fixed 0cc5c38, relaunched 6528e75552900457
+  resuming from the ep-1 checkpoint). TRAIN_COLLAPSED at epoch 6: val zstd 0.012 (ep1) -> 0.006
+  -> 0.004 -> 0.003 -> 0.017 -> 0.0021 (< floor 0.01), reg 50 -> 105 (R1 at the same epochs:
+  zstd ~0.5 -> 0.3). With the SIGReg encoder gradient rescaled to the policy's norm the mse
+  dynamics collapses the latent inside the first epoch -- SIGReg's SIZE is load-bearing on
+  reacher; gradient-magnitude balancing is not a route to the policy. Side facts: match_s costs
+  2.07x per epoch (740 s vs 358 s: three backward passes); full-vector conflict rates PD ~0.5
+  (orthogonal), DS ~1.0 (dynamics vs SIGReg oppose every step = the collapse tug-of-war).
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
