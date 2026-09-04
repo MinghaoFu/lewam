@@ -653,8 +653,8 @@ beside each checkpoint.
   - toolhang goal-blind TC (192, 120 ep; pvev board, jointflow_policy full_traj on the eval split):
     reactive 86.7 {82,82,96} | subgoal planner 80.0 (shards 70/90) -- same as the trunk-only
     192 (82.0/75.0) and the 384 noreg (80.7/80.0).
-  - transport AS GR (192): reactive 68.7 {66,70,70} | best-of-K 69.3 {68,64,76} | gradient 38, 38, (e1
-    pending) | random candidates 4.0 {4,4,4} | CEM policy-init 62.0 {60,54,72} | CEM zero pending.
+  - transport AS GR (192): reactive 68.7 {66,70,70} | best-of-K 69.3 {68,64,76} | gradient 42.0 {38,38,50}
+    | random candidates 4.0 {4,4,4} | CEM policy-init 62.0 {60,54,72} | CEM zero pending.
   - drawer AS GR (192): reactive 42.7 {40,48,40} | best-of-K 48.0 {38,54,52} | gradient 4 (e42; e0/e1
     pending) | random candidates 9.3 {6,10,12} | CEM policy-init 16.0 {12,18,18} | CEM zero pending.
     On the bimanual dexmg cells pure-WM planners are near zero and BOTH refining planners (gradient, CEM)
