@@ -690,6 +690,13 @@ beside each checkpoint.
     pusht     tr1e-3 e95906fdaeb3d690  tr1e-2 155d57e9e0be1a6d  tr1e-1 bb2cb00cabefaf21  (reference)
   Working theory: SIGReg regularizes the space so the pw_zp arms need no trust region (pw_zp@192
   drawer/transport diagnostic running).
+  TR GRID RESULTS (3 seeds x 50; move = mean ||U-U0||):
+    pusht:     warm 80.7 | free grad 86.7 (2.6) | tr1e-3 82.7 (0.36) | tr1e-2 84.7 (0.22) | tr1e-1 84.7 (0.21)
+    transport: warm 69.3 | free grad 42.0 (13)  | tr1e-3 72.7 (1.4)  | tr1e-2 70.0 (1.3)  | tr1e-1 71.3 (1.3)
+    drawer:    warm 48.0 | free grad 14.0 (13)  | tr1e-3 38.7 (1.7)  | tr1e-2 43.3 (1.4)  | tr1e-1 42.7 (1.3)
+  The trust region removes the exploitation (transport 42 -> ~71, drawer 14 -> ~43) but lands at or
+  slightly below the warm start: restrained refinement adds nothing on the manipulation cells; on pusht
+  (where free refinement helped) it costs 2-4 pts. The penalty saturates by 1e-2 (moves ~equal 1e-2..1e-1).
   DYNAMICS ABLATION (owner 2026-09-05: "is the world model learned with the policy useful for grading
   policy rollouts, or could any-old world model do?"): plan_mode=extwm_bok (0d96e3d) keeps the policy's
   K=32 best-of-K proposals (still imagined block-by-block through OUR dynamics) but SELECTS by an
