@@ -659,7 +659,8 @@ beside each checkpoint.
   - drawer goal-blind TC (192, 120 ep; jf_tc_ev reactive, dexmg): 68.7 {60,70,76} vs the 384 mse+noreg 65.3
     and DP 52.7 {44,60,54}.
   - transport goal-blind TC (192, 120 ep; jf_tc_ev reactive, dexmg; standalone eval job e85d1318d5d82a12 after
-    TRAIN_OK 03:06): 84.7 {86,82,86} vs the 384 mse+noreg 86.7 {84,92,84} and DP 84.7 {84,86,84}. Same data
+    TRAIN_OK 03:06): 84.7 {86,82,86} vs the 384 MoT mse+noreg (tc_transport_mnm) 86.7 {86,88,86}, the 08-22
+    jointflow-class noreg arm 86.7 {84,92,84}, and DP 84.7 {84,86,84}. Same data
     goal-conditioned (transport AS GR below): 68.7 noreg, 80.0 pw_zp -- the goal pathway, not the model
     size, is what the small model loses on transport.
   - transport AS GR (192): reactive 68.7 {66,70,70} | best-of-K 69.3 {68,64,76} | gradient 42.0 {38,38,50}
