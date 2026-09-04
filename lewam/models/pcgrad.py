@@ -15,17 +15,25 @@ import torch
 
 
 class PCGrad:
-    def __init__(self, params, mode="sym", protect="P"):
-        assert mode in ("sym", "protect_p"), mode
+    def __init__(self, params, mode="sym", protect="P", match_params=None):
+        assert mode in ("sym", "protect_p", "match_s"), mode
         self.params = [p for p in params if p.requires_grad]
         self.mode = mode
         self.protect = protect
+        # mode="match_s" (owner 2026-09-04, gradient-MAGNITUDE hypothesis): no projection; the
+        # SIGReg gradient is rescaled every step so its norm on the shared encoder equals the
+        # policy gradient's norm there (probes: ||g_S|| ~ 100x ||g_P|| on the reacher encoder).
+        # match_params = the encoder parameters the norms are measured on.
+        ids = {id(p) for p in (match_params or [])}
+        self.match_mask = torch.cat([torch.full((p.numel(),), id(p) in ids, dtype=torch.bool)
+                                     for p in self.params]) if ids else None
         self.reset_stats()
 
     def reset_stats(self):
         self.n_steps = 0
         self.n_conflict = {}      # pair -> steps with negative dot
         self.cos_sum = {}         # pair -> summed cosine (pre-surgery)
+        self.scale_sum = 0.0      # match_s: summed S rescale factor
 
     def _flat_grad(self, loss, retain):
         grads = torch.autograd.grad(loss, self.params, retain_graph=retain, allow_unused=True)
@@ -51,7 +59,14 @@ class PCGrad:
                 if dot < 0:
                     self.n_conflict[key] = self.n_conflict.get(key, 0) + 1
         out = {k: flats[k].clone() for k in names}
-        if self.mode == "sym":
+        if self.mode == "match_s":
+            if "S" in flats and "P" in flats:
+                m = self.match_mask.to(flats["S"].device) if self.match_mask is not None else \
+                    torch.ones_like(flats["S"], dtype=torch.bool)
+                scale = (flats["P"][m].norm() / (flats["S"][m].norm() + 1e-12)).clamp(max=1.0).item()
+                out["S"] = flats["S"] * scale
+                self.scale_sum += scale
+        elif self.mode == "sym":
             for k in names:
                 others = [o for o in names if o != k]
                 random.shuffle(others)
@@ -78,4 +93,5 @@ class PCGrad:
     def stats(self):
         n = max(self.n_steps, 1)
         return {f"conflict_rate_{k}": v / n for k, v in self.n_conflict.items()} | \
-               {f"cos_{k}": v / n for k, v in self.cos_sum.items()}
+               {f"cos_{k}": v / n for k, v in self.cos_sum.items()} | \
+               ({"s_scale": self.scale_sum / n} if self.mode == "match_s" else {})

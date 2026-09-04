@@ -178,7 +178,7 @@ def parse_args():
                          "SIGReg norms, cosines, EMA cosines, Adam-preconditioned) to grad_probe.jsonl; 0 = off")
     ap.add_argument("--grad_probe_ema", type=int, default=64,
                     help="EMA window (in probe steps) for the gradient-vector averages")
-    ap.add_argument("--pcgrad", default="off", choices=["off", "sym", "protect_p"],
+    ap.add_argument("--pcgrad", default="off", choices=["off", "sym", "protect_p", "match_s"],
                     help="gradient surgery between the task losses (P=action, D=state, S=sigreg) "
                          "over the full parameter vector: sym = original PCGrad (every task "
                          "projected away from each conflicting other, random order); "
@@ -659,7 +659,8 @@ def main():
     pcg = None
     if args.pcgrad != "off":
         from lewam.models.pcgrad import PCGrad
-        pcg = PCGrad(model.parameters(), mode=args.pcgrad)
+        pcg = PCGrad(model.parameters(), mode=args.pcgrad,
+                     match_params=list(model.encoder.parameters()) if args.pcgrad == "match_s" else None)
         print(f"[jointflow] PCGrad mode={args.pcgrad} over {len(pcg.params)} param tensors", flush=True)
     gstep = start_epoch * max(1, len(train_loader))
     for epoch in range(start_epoch, args.epochs):
