@@ -712,6 +712,13 @@ beside each checkpoint.
     gr_pusht_gh192       mf-1338381d 8c8f76d09737cd77   (chained gc/plan/grad/rand)
   Rows to beat (reactive / best-of-K / grad): toolhang 86.7 / 88.0 / 61.3, transport 68.7 / 69.3 / 42.0
   (pw_zp 80.0 / 77.3 / 54.7; goal-blind 84.7), pusht 70.0 / 80.7 / 86.7.
+  RESULT toolhang-as-GR gh192 (TRAIN_OK 05:35, 21 min, val zstd 0.14; 3 x 50): reactive 86.7 {80,92,88} |
+  best-of-K 88.0 {86,88,90} | gradient 70.0 {68,70,72} (token 86.7 / 88.0 / 61.3; gradient drift 9.2 vs
+  10.1). Identical to the token model on the reactive and best-of-K rows; the gradient planner is +8.7,
+  consistent across seeds but inside the ~8-pt noise band. On the GR protocol the goal pathway's location
+  does not matter for toolhang. NOTE (owner, same morning): the goal-image failure to test against is
+  the goal-TERMINAL TC arm (toolhang g_nm 60.0 vs goal-blind 80.7 at 384), not GR -- transport never had
+  a goal-conditioned TC arm; proposal for the TC-protocol head test pending the owner's go.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
