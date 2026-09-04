@@ -645,6 +645,21 @@ beside each checkpoint.
     80.0 {82,78,80}. Policy essential (random 80 -> 100), nothing left for planning to add.
   - cube gcf2 (TC goal-cond): memory 400000 AND 256000 both died before the entrypoint ran (no
     heartbeat, no platform reason) -> relaunched at the proven 200000 (50310dd78ba952ab).
+  - pusht (192): reactive 70.0 {62,78,70} | best-of-K 80.7 {76,84,82} | gradient 86.7 {80,92,88} | random
+    candidates 39.3 {34,44,40}. vs the 384 pw_zp (73.3 / 83.3 / 95.3 / 44): the small model is -3 reactive,
+    -9 on the gradient planner; the policy is alive (70 vs the 39 floor) -> the reacher policy death is
+    reacher-specific to the small model. (val act 0.386 at ep 50 vs 0.32 at 384: slower learner.)
+  - tworoom (192): reactive 98.7 {96,100,100} | best-of-K 100 | gradient 100 | random candidates 94.0.
+  - toolhang goal-blind TC (192, 120 ep; pvev board, jointflow_policy full_traj on the eval split):
+    reactive 82, 82, (3rd seed pending) | subgoal planner 80.0 (shards 70/90) -- same as the trunk-only
+    192 (82.0/75.0) and the 384 noreg (80.7/80.0).
+  - transport AS GR (192): reactive 68.7 {66,70,70} | best-of-K 69.3 {68,64,76} | gradient 38, 38, (e1
+    pending) | random candidates 4.0 {4,4,4} | CEM policy-init 62.0 {60,54,72} | CEM zero pending.
+  - drawer AS GR (192): reactive 42.7 {40,48,40} | best-of-K 48.0 {38,54,52} | gradient 4 (e42; e0/e1
+    pending) | random candidates 9.3 {6,10,12} | CEM policy-init 16.0 {12,18,18} | CEM zero pending.
+    On the bimanual dexmg cells pure-WM planners are near zero and BOTH refining planners (gradient, CEM)
+    fall well below the policy's best-of-K: refinement walks off the policy's proposals. Eval cost 24-36
+    min per 50 episodes (dexmg) -> the four 3-mode jobs hit the 3h kill; continuations run one mode/job.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
