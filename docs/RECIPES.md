@@ -618,6 +618,20 @@ beside each checkpoint.
     tc_transport_nm192 mf-ec77b56c bfc2a3002543110f  (goal-blind, train-only; standalone TC evals after)
     tc_cube_gcf_nm192 mf-4c9d91f1 60ad363ec0c03bd8   (goal-cond gcf2, in-entry gc eval, 400000 MB)
   Result dirs: ckpts/jointflow_gr_<cell>_nm192/ (GR + TC->GR), ckpts/jointflow_tc/tc_<cell>_nm192_s42/ (TC).
+
+  REACHER WAVE RESULTS (2026-09-04): R1 base (z384/d384/depth8/heads6, mse + projected SIGReg + full-rank
+  P(z) view): reactive 92.0 {94,92,90}, best-of-K 100 {100,100,100}, gradient 99.3 {100,98,100},
+  best-of-K with RANDOM candidates 95.3 {96,96,94} -- a LIVE reacher policy, above the jointflow-class
+  sig baseline (86.7/94.0); the policy adds ~5 over pure random shooting at K=32. R2 small (192
+  THROUGHOUT: z192/proj384/d192/depth4/heads4): reactive 28.7 {28,28,30} = the random floor, best-of-K
+  99.3, gradient 100, random-candidate 99.3 -- dead policy on a world model that plans anyway. R3
+  (SIGReg gradient matched to the policy's) collapsed at epoch 6. So on reacher the rank-32 bottleneck
+  was NOT the cause (R1 full-rank works at 384); MODEL SIZE is: the 192-throughout model kills the
+  reacher policy. Unresolved: latent width (z 192) vs trunk (d192/depth4/heads4) -- the banked
+  trunk-only 192 arms (z 384) kept live policies on pusht/toolhang; no z192 run exists elsewhere yet.
+  The final wave is entirely 192-throughout; pusht_nm192's chained reactive eval is the first check.
+  CEM planner for the MoT rollout added (b74c53d: plan_mode=cem, cem_init=policy|zero); unified GR
+  eval entry jf_grev_b74c53d.sh CELL CKDIR MODES (gc,plan,grad,rand,cemp,cemz) for all 8 GR envs.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
