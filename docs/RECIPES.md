@@ -674,6 +674,10 @@ beside each checkpoint.
   Context: GCBC (frozen DINOv2-small 22.1M + 19.3M trained predictor = 41.4M) vs ours 16.9M; on the
   noreg 192 TC->GR ckpts planning falls off a cliff (drawer grad 14 / CEM 16 vs best-of-K 48;
   transport grad 42 / CEM 62 vs 69) -- the owner reads this as noreg's shortcoming.
+  pw_zp@192 diagnostics TRAINED (drawer TRAIN_OK 01:49 val act 0.273 zstd 0.296; transport TRAIN_OK 02:24
+  val act 0.496 zstd 0.290 -- latents ~2x wider than the noreg runs' 0.16); GR evals submitted one mode
+  per job (gc/plan/grad/cemp): drawer 9765c5090d93fd75 47f311a2f13bdc9e 491e75c7e347d706 09996ff9c8e7a015;
+  transport 458e3e581e2165a1 44e85d608d9b3631 82c4db186d68c524 76e2f6366eeb656a.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
