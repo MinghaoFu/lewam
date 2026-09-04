@@ -658,6 +658,10 @@ beside each checkpoint.
     192 (82.0/75.0) and the 384 noreg (80.7/80.0).
   - drawer goal-blind TC (192, 120 ep; jf_tc_ev reactive, dexmg): 68.7 {60,70,76} vs the 384 mse+noreg 65.3
     and DP 52.7 {44,60,54}.
+  - transport goal-blind TC (192, 120 ep; jf_tc_ev reactive, dexmg; standalone eval job e85d1318d5d82a12 after
+    TRAIN_OK 03:06): 84.7 {86,82,86} vs the 384 mse+noreg 86.7 {84,92,84} and DP 84.7 {84,86,84}. Same data
+    goal-conditioned (transport AS GR below): 68.7 noreg, 80.0 pw_zp -- the goal pathway, not the model
+    size, is what the small model loses on transport.
   - transport AS GR (192): reactive 68.7 {66,70,70} | best-of-K 69.3 {68,64,76} | gradient 42.0 {38,38,50}
     | random candidates 4.0 {4,4,4} | CEM policy-init 62.0 {60,54,72} | CEM zero-init 4.0 {4,4,4}.
   - drawer AS GR (192): reactive 42.7 {40,48,40} | best-of-K 48.0 {38,54,52} | gradient 14.0 {4,16,22}
