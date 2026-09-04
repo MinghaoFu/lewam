@@ -696,6 +696,21 @@ beside each checkpoint.
   80.0, 3 seeds all >= 78; goal-blind TC on the same data 86.7) and best-of-K by +8; drawer moves
   within noise (+2.6 / +4.7; goal-blind TC 68.7). So on transport most of the goal-conditioning cost
   is recoverable on the policy side without touching the goal pathway; on drawer it is not.
+  GOAL CONDITIONING AT THE HEAD (owner 2026-09-05, go on the proposal; code 96618d4): the goal-blind TC
+  rows beat the goal-conditioned GR rows on the same data by 18 (transport) and 26 (drawer) points, the
+  same loss the goal-image TC arms showed, so the MoT's goal pathway itself is suspect. jointflow never
+  fed the goal to the trunk: goal + horizon conditioned ONLY the action readout (GCHeadMSE) and that
+  worked. New --goal_cond head (config key goal_cond, default token = unchanged, old checkpoints load
+  strictly): no goal token and no horizon AdaLN anywhere in the trunk (the action stream is goal- and
+  horizon-free), the readout becomes GCHeadMSE(in 192, goal 192, hidden 512, cond 128, depth 3, dropout
+  0.1) = +1.05M params (16.85M -> 17.90M at 192); the state stream is goal-invariant by construction
+  (smoke-tested on CPU). Launched, mse + noreg, 192 throughout, seed 42, otherwise the final-wave nm192
+  recipe (jf_gr_96618d4.sh, arm gh192):
+    grtc_toolhang_gh192  mf-fc19e5be dcd311a1cb3328fc   (train-only; GR evals via jf_grev_96618d4.sh)
+    grtc_transport_gh192 mf-2cdf5494 26634f2f5ea9aad2   (train-only; evals one mode per job, 3h kill)
+    gr_pusht_gh192       mf-1338381d 8c8f76d09737cd77   (chained gc/plan/grad/rand)
+  Rows to beat (reactive / best-of-K / grad): toolhang 86.7 / 88.0 / 61.3, transport 68.7 / 69.3 / 42.0
+  (pw_zp 80.0 / 77.3 / 54.7; goal-blind 84.7), pusht 70.0 / 80.7 / 86.7.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
