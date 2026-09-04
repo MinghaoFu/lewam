@@ -672,6 +672,18 @@ beside each checkpoint.
   Context: GCBC (frozen DINOv2-small 22.1M + 19.3M trained predictor = 41.4M) vs ours 16.9M; on the
   noreg 192 TC->GR ckpts planning falls off a cliff (drawer grad 14 / CEM 16 vs best-of-K 48;
   transport grad 42 / CEM 62 vs 69) -- the owner reads this as noreg's shortcoming.
+  TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
+  super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
+  the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
+  0.002) on EVERY replan (pusht: move 2.6, cost 0.0020 -> 0.0011, and it helps). Grid launched on the
+  noreg-192 ckpts, gradient planner otherwise unchanged (warm start best-of-K K32, 50 Adam steps, lr
+  0.05, clip 10, |a|<=3), penalty grad_tr * ||U-U0||^2 with grad_tr in {1e-3, 1e-2, 1e-1} (the pusht-era
+  value 1.0 would freeze the plan here); eval entry mode `gradtr` (env GRAD_TR/GRAD_STEPS/GRAD_LR):
+    drawer    tr1e-3 31c037ae89816d4e  tr1e-2 caf8c7b4c7ef1388  tr1e-1 f56c28aca865818b
+    transport tr1e-3 9bc778d6375bb77d  tr1e-2 e953c69981c8f427  tr1e-1 239769eced1399b3
+    pusht     tr1e-3 e95906fdaeb3d690  tr1e-2 155d57e9e0be1a6d  tr1e-1 bb2cb00cabefaf21  (reference)
+  Working theory: SIGReg regularizes the space so the pw_zp arms need no trust region (pw_zp@192
+  drawer/transport diagnostic running).
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
