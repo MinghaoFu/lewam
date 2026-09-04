@@ -540,6 +540,10 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             cem_elites=int(ge.get("cem_elites", 6)),
             cem_std=float(ge.get("cem_std", 0.5)),
             cem_init=str(ge.get("cem_init", "policy")),
+            ext_wm_path=str(ge.get("ext_wm_path", "")),
+            ext_wm_action_block_dim=int(ge.get("ext_wm_action_block_dim", 0)),
+            ext_wm_embed_dim=int(ge.get("ext_wm_embed_dim", 192)),
+            ext_wm_hist=int(ge.get("ext_wm_hist", 3)),
             pm_steps=int(ge.get("pm_steps", 20)),
             pm_lr=float(ge.get("pm_lr", 0.02)),
             pm_rho=float(ge.get("pm_rho", 0.3)),
@@ -1422,6 +1426,49 @@ class JointFlowGCPolicy(JointFlowPolicy):
               f"({int(sum(r['is_random'] for r in rows))} random) -> {path}")
 
 
+def _load_official_lewm(path):
+    """Load a LeWM checkpoint (the authors' release or one trained by our train.py port) as the
+    OFFICIAL stable_worldmodel.wm.lewm.LeWM, predictor included, by instantiating its own
+    config.json with the package classes (probe_wm_discrim's retarget: module.* / jepa.JEPA ->
+    stable_worldmodel.wm.lewm.*). `path` = the checkpoint folder, or a .pt inside it (that file
+    is used; otherwise the last .pt by name). Returns (model.eval(), cfg, weights filename)."""
+    import os as _os
+    from omegaconf import OmegaConf
+    from hydra.utils import instantiate
+    folder, weights = (_os.path.dirname(path), path) if path.endswith(".pt") else (path, None)
+    raw = json.loads(open(_os.path.join(folder, "config.json")).read())
+
+    def retarget(o):
+        if isinstance(o, dict):
+            o = {k: retarget(v) for k, v in o.items()}
+            t = o.get("_target_")
+            if t == "module.ARPredictor":
+                o["_target_"] = "stable_worldmodel.wm.lewm.module.Predictor"
+            elif isinstance(t, str) and t.startswith("module."):
+                o["_target_"] = "stable_worldmodel.wm.lewm.module." + t[len("module."):]
+            elif t == "jepa.JEPA":
+                o["_target_"] = "stable_worldmodel.wm.lewm.LeWM"
+            return o
+        if isinstance(o, list):
+            return [retarget(v) for v in o]
+        return o
+
+    cfg = OmegaConf.create(retarget(raw))
+    model = instantiate(cfg)
+    if weights is None:
+        pts = sorted(p for p in _os.listdir(folder) if p.endswith(".pt"))
+        weights = _os.path.join(folder, pts[-1])
+    sd = torch.load(weights, map_location="cpu", weights_only=False)
+    if isinstance(sd, dict) and "state_dict" in sd:
+        sd = sd["state_dict"]
+    res = model.load_state_dict(sd, strict=False)
+    core = [k for k in res.missing_keys if k.startswith(("encoder.", "predictor.", "action_encoder.", "projector."))]
+    assert not core, f"LeWM core weights missing: {core[:5]}"
+    assert not res.unexpected_keys, f"unexpected keys: {res.unexpected_keys[:5]}"
+    model.requires_grad_(False)
+    return model.eval(), cfg, _os.path.basename(weights)
+
+
 class JointFlowPlanPolicy(JointFlowPolicy):
     """Goal-reaching planner on a trained jointflow (mode=jointflow_plan). Candidate action
     chunks are scored by the final cost ||z_imag_last - z_goal||^2 over the imagined boundary
@@ -1493,8 +1540,29 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         # rollout scorers take the cost at each env's GOAL TIME (block H_i = remaining blocks,
         # capped at plan_rollout) instead of after the last imagined block
         self.plan_goal_time = bool(kwargs.pop("plan_goal_time", True))
+        # plan_mode=extwm_bok (owner 2026-09-05, dynamics ablation): the SAME K policy proposals as
+        # best_of_k (imagined through our dynamics), but GRADED by an external frozen LeWM world
+        # model: its encoder on the last ext_wm_hist real frames + the goal frame, its predictor
+        # rolled over the candidate action blocks (past executed blocks as the action history),
+        # cost = ||z_lewm_terminal - z_lewm_goal||^2. Answers "is the jointly trained world model
+        # needed to grade rollouts, or would any world model do?"
+        self.ext_wm_path = str(kwargs.pop("ext_wm_path", ""))
+        self.ext_wm_action_block_dim = int(kwargs.pop("ext_wm_action_block_dim", 0))
+        self.ext_wm_embed_dim = int(kwargs.pop("ext_wm_embed_dim", 192))
+        self.ext_wm_hist = int(kwargs.pop("ext_wm_hist", 3))
+        self.ext = None; self._ext_frames = None; self._ext_acts = None
         super().__init__(model, cfg, *args, **kwargs)
-        assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok", "grad"), self.plan_mode
+        if self.plan_mode == "extwm_bok":
+            assert self.ext_wm_path, "extwm_bok needs ext_wm_path (a LeWM checkpoint folder with config.json, or a .pt inside one)"
+            self.ext, ext_cfg, ext_weights = _load_official_lewm(self.ext_wm_path)
+            self.ext_wm_hist = int(ext_cfg.predictor.num_frames)
+            abd = int(ext_cfg.action_encoder.input_dim)
+            assert self.ext_wm_action_block_dim in (0, abd), \
+                f"ext_wm_action_block_dim {self.ext_wm_action_block_dim} != checkpoint's {abd}"
+            self.ext_wm_action_block_dim = abd
+            print(f"[extwm] external LeWM {ext_weights} (hist {self.ext_wm_hist} frames, action block {abd}) grades the "
+                  f"policy's best-of-{self.plan_k} proposals; our dynamics still imagines the proposals", flush=True)
+        assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok", "grad", "extwm_bok"), self.plan_mode
         if self.subgoal_every > 0:
             assert self.plan_mode in ("best_of_k", "grad"), "subgoal cost: best_of_k / grad"
             assert self.subgoal_frames is not None, "subgoal planning needs the demo frames (eval_gip passes them)"
@@ -1520,7 +1588,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_mode == "grad" and not getattr(model, "rollout_only", False):
             raise ValueError("plan_mode=grad is implemented on the MoT (rollout) dynamics only")
         if self.rollout_only:
-            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad", "steer", "cem"):
+            if self.plan_mode not in ("best_of_k", "oracle_bok", "grad", "steer", "cem", "extwm_bok"):
                 raise ValueError(f"MoT plans by rollout only: plan_mode={self.plan_mode!r} has no rollout form")
             if self.plan_score != "joint":
                 raise ValueError("MoT has no one-block scorer: drop plan_score (planning is the rollout)")
@@ -1534,9 +1602,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             assert getattr(model, "goal_conditioning", False), \
                 "steer needs a goal pathway to bias (goal-conditioned checkpoint)"
         if self.plan_rollout > 1:
-            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad", "steer", "cem"), \
-                "rollout planning: best_of_k / oracle_bok / grad / steer / cem"
-            if self.plan_mode in ("best_of_k", "grad", "steer", "cem"):
+            assert self.plan_mode in ("best_of_k", "oracle_bok", "grad", "steer", "cem", "extwm_bok"), \
+                "rollout planning: best_of_k / oracle_bok / grad / steer / cem / extwm_bok"
+            if self.plan_mode in ("best_of_k", "grad", "steer", "cem", "extwm_bok"):
                 # the plan is H*fs raw actions; execute all of it by default, then replan.
                 # GR checkpoints are supported: h_norm counts down by one obs step per unroll.
                 self.num_actions = self.plan_rollout * self.action_block
@@ -1620,6 +1688,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             steps_t = torch.tensor(steps, device=device, dtype=torch.float32)
         if self.plan_mode == "best_of_k":
             plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
+        elif self.plan_mode == "extwm_bok":
+            plan = self._extwm_bok(info_dict, replan, history, history_pad, z_goal, steps_t, g_obs)
         elif self.plan_mode == "oracle_bok":
             plan = self._oracle_bok(history, history_pad, z_goal, h_norm, replan, steps=steps_t)
         elif self.plan_mode == "grad":
@@ -1633,6 +1703,73 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self._prev_plan is not None:
             for row, i in enumerate(replan):
                 self._prev_plan[i] = plan[row]
+        return plan
+
+    def _flush_env(self, i):
+        super()._flush_env(i)
+        if self._ext_frames is not None:
+            self._ext_frames[i].clear(); self._ext_acts[i].clear()
+
+    def _extwm_bok(self, info_dict, replan, history, history_pad, z_goal, steps, g_obs):
+        """best_of_k proposals (policy chunks imagined through OUR dynamics, as in _best_of_k's
+        rollout path), selected by an EXTERNAL frozen LeWM world model's terminal cost. The LeWM
+        sees the last ext_wm_hist real frames (its own encoder), the executed past action blocks
+        as action history, and each candidate's H blocks (time-major (fs*adim) blocks, z-scored
+        with the dataset stats both models share); cost = MSE(z_lewm_after_H, z_lewm_goal).
+        Logs how often the LeWM pick coincides with our dynamics' pick and its rank under our cost."""
+        R, K, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
+        adim = self.model.action_raw_dim
+        device = history.device
+        num_envs = self.env.num_envs
+        if self._ext_frames is None:
+            self._ext_frames = [deque(maxlen=self.ext_wm_hist) for _ in range(num_envs)]
+            self._ext_acts = [deque(maxlen=max(self.ext_wm_hist - 1, 0)) for _ in range(num_envs)]
+        if next(self.ext.parameters()).device != torch.device(device):
+            self.ext = self.ext.to(device)
+        # current real frame per replanning env -> the LeWM frame history (one frame per replan = one block)
+        cur = info_dict["pixels"][replan]
+        cur = cur[:, -1] if cur.ndim == 5 else cur
+        for row, i in enumerate(replan):
+            self._ext_frames[i].append(cur[row].detach().float().cpu())
+        with torch.no_grad():
+            # 1) proposals + our dynamics' own cost (identical to best_of_k)
+            h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
+            goal_rep = z_goal.repeat_interleave(K, 0)
+            steps_rep = steps.repeat_interleave(K, 0) if steps is not None else None
+            blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)            # (R*K, H, fs, adim)
+            cost_ours = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
+            # 2) LeWM grading
+            Hf = self.ext_wm_hist; A = fs * adim
+            frames = []; pasts = []
+            for i in replan:
+                fr = list(self._ext_frames[i])
+                fr = [fr[0]] * (Hf - len(fr)) + fr                                    # pad early episodes with the oldest frame
+                frames.append(torch.stack(fr))                                        # (Hf, C, H, W)
+                pa = list(self._ext_acts[i])
+                pa = [torch.zeros(A)] * ((Hf - 1) - len(pa)) + pa                      # zero (= mean action) padding
+                pasts.append(torch.stack(pa) if pa else torch.zeros(0, A))            # (Hf-1, A)
+            px = torch.stack(frames).to(device).float()                              # (R, Hf, C, H, W)
+            past = torch.stack(pasts).to(device).float()                             # (R, Hf-1, A)
+            cand = blocks.reshape(R, K, H, A)                                          # (R, K, H, fs*adim) time-major blocks
+            act_seq = torch.cat([past[:, None].expand(R, K, Hf - 1, A), cand], dim=2)  # (R, K, Hf-1+H, A)
+            info = {"pixels": px[:, None].expand(R, K, Hf, *px.shape[2:])}
+            out = self.ext.rollout(info, act_seq, history_size=Hf)
+            term = out["predicted_emb"][:, :, -1]                                      # (R, K, D) after the H blocks
+            g_ext = self.ext.encode({"pixels": g_obs.to(device).float()[:, None]})["emb"][:, 0]   # (R, D)
+            cost_ext = ((term - g_ext[:, None]) ** 2).mean(-1)                         # (R, K)
+            pick = cost_ext.argmin(1)
+            rows = torch.arange(R, device=device)
+            pick_ours = cost_ours.argmin(1)
+            rank = (cost_ours < cost_ours[rows, pick][:, None]).sum(1).float()         # 0 = LeWM's pick is also our best
+            st = self.__dict__.setdefault("_extwm_stats", dict(n=0, agree=0, rank=0.0))
+            st["n"] += R; st["agree"] += int((pick == pick_ours).sum()); st["rank"] += float(rank.sum())
+            if st["n"] % 50 < R:
+                print(f"[extwm] LeWM pick == our-dynamics pick on {st['agree']}/{st['n']} replans; "
+                      f"mean rank of the LeWM pick under our cost {st['rank'] / st['n']:.2f} (of {K})", flush=True)
+            plan = blocks.reshape(R, K, H * fs, adim)[rows, pick]                       # (R, H*fs, adim) z-scored
+            # the executed first block becomes LeWM action history for the next replan
+            for row, i in enumerate(replan):
+                self._ext_acts[i].append(plan[row, :fs].reshape(-1).detach().cpu())
         return plan
 
     def _goal_idx(self, steps, n_rows_per_env=1):
