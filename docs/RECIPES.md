@@ -632,6 +632,19 @@ beside each checkpoint.
   The final wave is entirely 192-throughout; pusht_nm192's chained reactive eval is the first check.
   CEM planner for the MoT rollout added (b74c53d: plan_mode=cem, cem_init=policy|zero); unified GR
   eval entry jf_grev_b74c53d.sh CELL CKDIR MODES (gc,plan,grad,rand,cemp,cemz) for all 8 GR envs.
+  FINAL-WAVE RESULTS (192 throughout, mse+noreg, seed 42, 3 eval seeds x 50):
+  - toolhang AS GR (fs5 strided, goal+horizon, H_max 50; eval goal_offset 50 / budget 100, train h5):
+    reactive 86.7 {84,90,86} | best-of-K (policy) 88.0 {90,86,88} | gradient 61.3 {62,62,60} |
+    best-of-K random candidates 29.3 {32,26,30} | CEM policy-init 89.3 {88,94,86} | CEM zero-init 35.0
+    {32,38,+1 pending}. The policy is the planner's prior here: pure-WM planners (random / CEM-zero) sit
+    at ~30-35, policy-guided best-of-K/CEM ~88-89 = the reactive number; the GRADIENT planner HURTS
+    (61). Note: reactive-with-goal 86.7 vs the goal-BLIND 384 toolhang 80.7 and trunk-only-192 82.0.
+    Eval cost: 10-15 min per 50-episode eval on H100 (robosuite) -> the 18-eval job hit the 3h
+    util kill at 17/18; continuation relaunched (idempotent). RULE: <=3 modes per grev job on TC cells.
+  - pointmaze_large: reactive 100 {100,100,100} | best-of-K 100 | gradient 100 | random candidates
+    80.0 {82,78,80}. Policy essential (random 80 -> 100), nothing left for planning to add.
+  - cube gcf2 (TC goal-cond): memory 400000 AND 256000 both died before the entrypoint ran (no
+    heartbeat, no platform reason) -> relaunched at the proven 200000 (50310dd78ba952ab).
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
