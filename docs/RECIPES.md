@@ -651,7 +651,7 @@ beside each checkpoint.
     reacher-specific to the small model. (val act 0.386 at ep 50 vs 0.32 at 384: slower learner.)
   - tworoom (192): reactive 98.7 {96,100,100} | best-of-K 100 | gradient 100 | random candidates 94.0.
   - toolhang goal-blind TC (192, 120 ep; pvev board, jointflow_policy full_traj on the eval split):
-    reactive 82, 82, (3rd seed pending) | subgoal planner 80.0 (shards 70/90) -- same as the trunk-only
+    reactive 86.7 {82,82,96} | subgoal planner 80.0 (shards 70/90) -- same as the trunk-only
     192 (82.0/75.0) and the 384 noreg (80.7/80.0).
   - transport AS GR (192): reactive 68.7 {66,70,70} | best-of-K 69.3 {68,64,76} | gradient 38, 38, (e1
     pending) | random candidates 4.0 {4,4,4} | CEM policy-init 62.0 {60,54,72} | CEM zero pending.
