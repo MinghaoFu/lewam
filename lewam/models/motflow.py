@@ -21,6 +21,11 @@ z_g (clean-action conditioning, goal-free dynamics); z_hist sees no target.
 Conditioning: tau_a via AdaLN on a* only, tau_s on z* only, h on a* only; clean tokens get the
 fixed tau=1 embedding. The goal reaches the policy as the z_g token, not through the readout.
 
+goal_cond=head (owner 2026-09-05; jointflow's arrangement): no z_g token and no h term anywhere in
+the trunk -- the action stream is goal- and horizon-free -- and the action readout is GCHeadMSE
+(per-token feature ++ goal latent through AdaLN-Zero MLP layers modulated by the horizon), so goal
+and horizon condition ONLY the decoding head.
+
 Losses: rectified flow on a*; on z* either rectified flow (`state_head=flow`) or MSE with a
 learned query token (`state_head=mse`, clean-action-conditioned regression).
 
@@ -35,7 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lewam.models.module import VisionEncoder, sinusoid
+from lewam.models.module import VisionEncoder, GCHeadMSE, sinusoid
 
 
 class MoTBlock(nn.Module):
@@ -92,6 +97,14 @@ class MoTFlow(nn.Module):
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]
         self.goal_conditioning = bool(cfg.get("goal_conditioning", False))
+        # goal_cond: "token" = goal token in the trunk + horizon AdaLN on the noisy action tokens
+        # (the design above); "head" = the trunk never sees goal or horizon, both condition only
+        # the GCHeadMSE action readout (owner 2026-09-05). Old checkpoints lack the key -> token.
+        self.goal_cond = str(cfg.get("goal_cond", "token"))
+        assert self.goal_cond in ("token", "head"), self.goal_cond
+        assert not (self.goal_cond == "head" and not self.goal_conditioning), \
+            "goal_cond=head needs goal_conditioning"
+        self.goal_token = self.goal_conditioning and self.goal_cond == "token"
         # sep_policy_state (owner design 2026-09-01): the action branch attends ONLY to a
         # projected view of the latent -- every history token gets a projected copy that feeds
         # the policy, and the goal latent is projected in place (the state stream never
@@ -144,8 +157,9 @@ class MoTFlow(nn.Module):
         self.state_in = nn.Linear(self.z_dim, d)
         self.state_pos = nn.Parameter(torch.zeros(1, self.num_states, d))
         self.state_query = nn.Parameter(torch.randn(1, self.num_states, d) * 0.02)   # mse head
-        self.goal_in = nn.Linear(self.z_dim, d)
-        self.null_goal = nn.Parameter(torch.zeros(1, 1, d))
+        if self.goal_cond == "token":     # also the goal-free layout: existing checkpoints carry these
+            self.goal_in = nn.Linear(self.z_dim, d)
+            self.null_goal = nn.Parameter(torch.zeros(1, 1, d))
         if self.sep_policy_state:
             r = int(cfg.get("policy_proj_rank", 0) or 0)
             if r > 0:
@@ -176,10 +190,16 @@ class MoTFlow(nn.Module):
         self.action_type = nn.Embedding(2, d)                # 0 clean, 1 noisy
         # conditioning
         self.tau_in = nn.Linear(d, d)
-        self.h_in = nn.Linear(d, d)
+        if self.goal_cond == "token":
+            self.h_in = nn.Linear(d, d)
         self.blocks = nn.ModuleList(MoTBlock(d, cfg["n_heads"], dropout=cfg["dropout"])
                                     for _ in range(cfg["depth"]))
-        self.action_out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, self.action_raw_dim))
+        if self.goal_conditioning and self.goal_cond == "head":
+            # jointflow's readout: per-token feature ++ goal latent -> 3 AdaLN-Zero MLP layers
+            # (hidden 512, cond 128) modulated by the horizon embedding; learned null goal
+            self.action_out = GCHeadMSE(d, self.z_dim, self.action_raw_dim, dropout=cfg["dropout"])
+        else:
+            self.action_out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, self.action_raw_dim))
         self.state_out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, self.z_dim))
 
         # ---- token layout and the attention map (fixed) ----
@@ -189,7 +209,7 @@ class MoTFlow(nn.Module):
         idx["hist"] = list(range(o, o + H)); o += H
         idx["phist"] = list(range(o, o + H)) if self.sep_policy_state else []; o += len(idx["phist"])
         idx["state"] = list(range(o, o + S)); o += S
-        idx["goal"] = list(range(o, o + 1)) if self.goal_conditioning else []; o += len(idx["goal"])
+        idx["goal"] = list(range(o, o + 1)) if self.goal_token else []; o += len(idx["goal"])
         idx["clean"] = list(range(o, o + C)); o += C
         idx["noisy"] = list(range(o, o + A)); o += A
         self.n_tokens = o
@@ -246,7 +266,7 @@ class MoTFlow(nn.Module):
         cond = c_clean[:, None].expand(B, self.n_tokens, d).clone()
         cond[:, self.idx["state"]] = self.tau_in(sinusoid(tau_s, d))[:, None]
         c_noisy = self.tau_in(sinusoid(tau_a, d))
-        if self.goal_conditioning:
+        if self.goal_token:
             hn = h_norm if h_norm is not None else torch.zeros(B, device=device)
             c_noisy = c_noisy + self.h_in(sinusoid(hn, d))
         cond[:, self.idx["noisy"]] = c_noisy[:, None]
@@ -269,9 +289,9 @@ class MoTFlow(nn.Module):
             x[:, self.idx["state"]] = self.state_query.expand(B, -1, -1) + self.state_pos + st_type[1]
         else:
             x[:, self.idx["state"]] = self.state_in(noisy_state) + self.state_pos + st_type[1]
-        if self.goal_conditioning:
-            if z_goal is not None and self.sep_policy_state:
-                z_goal = self.policy_proj(z_goal)
+        if self.goal_conditioning and z_goal is not None and self.sep_policy_state:
+            z_goal = self.policy_proj(z_goal)          # the policy's view of the goal (both modes)
+        if self.goal_token:
             g = self.goal_in(z_goal)[:, None] if z_goal is not None else self.null_goal.expand(B, -1, -1)
             if goal_keep is not None:
                 g = torch.where(goal_keep.view(B, 1, 1), g, self.null_goal.expand(B, -1, -1))
@@ -283,7 +303,12 @@ class MoTFlow(nn.Module):
         mask = self._mask(history_pad)
         for block in self.blocks:
             x = block(x, self.stream, cond, mask)
-        return self.action_out(x[:, self.idx["noisy"]]), self.state_out(x[:, self.idx["state"]])
+        feat = x[:, self.idx["noisy"]]
+        if self.goal_conditioning and self.goal_cond == "head":
+            v_a = self.action_out(feat, z_goal, h_norm, goal_keep)     # goal + horizon enter here only
+        else:
+            v_a = self.action_out(feat)
+        return v_a, self.state_out(x[:, self.idx["state"]])
 
     @staticmethod
     def _masked_mse(pred, target, valid):
@@ -422,6 +447,6 @@ def build_model(cfg):
     defaults = dict(encoder_size="tiny", encoder_backbone="resnet18dp", encoder_ckpt=None,
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=10, num_states_pred=1,
-                    policy_history_len=2, goal_conditioning=False, state_head="flow",
+                    policy_history_len=2, goal_conditioning=False, goal_cond="token", state_head="flow",
                     state_residual=False, tau_alpha=1.0, tau_alpha_state=0.0)
     return MoTFlow({**defaults, **cfg})

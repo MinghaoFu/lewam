@@ -103,6 +103,10 @@ def parse_args():
                          "--fs_strided")
     ap.add_argument("--H_max", type=int, default=50,
                     help="horizon cap in obs-steps; h_norm = min(h, H_max)/H_max")
+    ap.add_argument("--goal_cond", choices=["token", "head"], default="token",
+                    help="motflow only: where goal + horizon enter -- 'token' (goal token in the "
+                         "trunk, horizon AdaLN on the noisy action tokens) or 'head' (jointflow's "
+                         "GCHeadMSE readout: the trunk never sees goal or horizon)")
     ap.add_argument("--goal_terminal", action="store_true",
                     help="marks the raw-path TC goal convention (goal = terminal/success frame, "
                          "h fixed at 0 -- the raw dataset always supplies both; this flag gates "
@@ -410,7 +414,7 @@ def main():
                num_actions_pred=args.num_actions_pred, num_states_pred=args.num_states_pred,
                policy_history_len=args.policy_history_len,
                actions_attend_states=bool(args.actions_attend_states), split_tau=args.split_tau,
-               goal_conditioning=args.goal_conditioning, tau_cond=args.tau_cond,
+               goal_conditioning=args.goal_conditioning, goal_cond=args.goal_cond, tau_cond=args.tau_cond,
                state_residual=bool(args.state_residual), tau_alpha=float(args.tau_alpha),
                tau_alpha_state=float(args.tau_alpha_state),
                state_target_norm=bool(args.state_target_norm), model=args.model,
