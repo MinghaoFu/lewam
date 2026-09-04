@@ -699,7 +699,8 @@ def main():
         with torch.no_grad():
             for batch in val_loader:
                 with amp_ctx():
-                    loss, loss_terms, n = run_batch(batch, train=False)
+                    out = run_batch(batch, train=False)
+                loss, loss_terms, n = out[:3]     # --pcgrad appends the per-loss parts (4-tuple)
                 accumulate(val_stats, loss_terms, n); val_n += n
         val_act = val_stats.get("act", 0.0) / max(val_n, 1)   # best-checkpoint metric = val action loss
         pcg_msg = ""
