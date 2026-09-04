@@ -579,6 +579,17 @@ beside each checkpoint.
   the only readout of the policy). Not separated yet: policy view per se vs rank 32 (no
   full-rank pw_zp reacher run exists). Owner's renderer-mismatch mechanism: real pixel shift,
   but not amplified by either of these encoders (their 0.257 cosine is from another ckpt).
+  REACHER WAVE LAUNCHED 2026-09-04 (owner go; manual mode): three MoT arms, MSE head + projected
+  SIGReg + FULL-RANK policy view + zstd_floor 0.01, seed 42, one variable each; entry
+  jf_gr_reacher_d9bbefd.sh (tarball d9bbefd = a2cf7cb + pcgrad match_s), evals gc/roll/grad +
+  roll-with-random-candidates (3 seeds x 50), memory 200000, research H100:
+    R1 rea_r1_base   mf-95d69b77 8079682924f46362  z384 d384 depth8 heads6 (the pusht/toolhang candidate)
+    R2 rea_r2_small  mf-588ebbf3 e37f6ba8ec8a91cd  z192 proj_hidden384 d192 depth4 heads4 (192 throughout, ~17M)
+    R3 rea_r3_sigbal mf-c39c3af8 04332abcdbae9359  R1 + --pcgrad match_s (S encoder grad rescaled to ||g_P|| each step)
+  Readouts: R1 reactive >> 32 (random floor) -> the bottleneck was the problem; R2 ~ R1 -> 17M
+  suffices; R3 > R1 -> magnitude story real; R3 collapsing -> SIGReg size load-bearing. NOTE the
+  banked "192/4/4" arms (pusht 72.7/83.3/85.3, toolhang 82.0/75.0) are TRUNK-ONLY (z_dim 384),
+  not the 192-throughout model the owner asked for; R2 is the first z192 run.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
