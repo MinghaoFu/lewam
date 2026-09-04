@@ -684,6 +684,17 @@ beside each checkpoint.
     pusht     tr1e-3 e95906fdaeb3d690  tr1e-2 155d57e9e0be1a6d  tr1e-1 bb2cb00cabefaf21  (reference)
   Working theory: SIGReg regularizes the space so the pw_zp arms need no trust region (pw_zp@192
   drawer/transport diagnostic running).
+  DYNAMICS ABLATION (owner 2026-09-05: "is the world model learned with the policy useful for grading
+  policy rollouts, or could any-old world model do?"): plan_mode=extwm_bok (0d96e3d) keeps the policy's
+  K=32 best-of-K proposals (still imagined block-by-block through OUR dynamics) but SELECTS by an
+  external frozen LeWM's terminal latent cost (official stable_worldmodel LeWM instantiated from the
+  checkpoint's config, predictor included; its encoder on the last 3 real frames + goal; rollout over
+  the executed past blocks + candidate blocks; z-scored blocks = shared dataset stats). Logs the
+  LeWM-vs-our-dynamics pick agreement. Graders: pusht = the authors' HF release
+  (code/lewm_main_eval/hf_release_native/pusht, CEM 88.7 on our protocol); toolhang = the newest LeWM,
+  wf8_uni/toolhang/toolhang_lewm_official50 (ep 50, 2026-09-03, vit-tiny scratch). NOTE the repo's
+  build_frozen_lewm drops the predictor (GC-IDM encoder-only path) and the "cem_lewm" entry planned with
+  a LeWAM-Unified ckpt -- neither is a LeWM world model; the probe_wm_discrim retarget loader is.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
