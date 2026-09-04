@@ -599,6 +599,25 @@ beside each checkpoint.
   reacher; gradient-magnitude balancing is not a route to the policy. Side facts: match_s costs
   2.07x per epoch (740 s vs 358 s: three backward passes); full-vector conflict rates PD ~0.5
   (orthogonal), DS ~1.0 (dynamics vs SIGReg oppose every step = the collapse tug-of-war).
+
+## Final-experiments push (owner + Minghao, launched 2026-09-04; manual mode, owner go)
+  Recipe: MoT + MSE head + noreg, 192 THROUGHOUT (--z_dim 192 --proj_hidden 384 --d_model 192 --depth 4
+  --n_heads 4 = 16.9M: encoder 11.3M + trunk 5.6M), --w_reg 0, --zstd_floor 0.005, seed 42, tarball 0cc5c38.
+  Minghao's list: (1) GR on 8 envs = 4 GR (pusht, tworoom, pointmaze_large, reacher) + the 4 TC cells converted
+  to GR (fs5 strided caches, goal + horizon, H_max 50; toolhang/transport/drawer/cube), same ckpt CEM vs grad
+  (CEM for the MoT rollout planner = code todo); (2) TC goal-blind toolhang/drawer/transport + cube goal-cond
+  (gcf2, memory 400000, --num_workers 12, resume chain); (3) DP baselines: drawer 52.7 {44,60,54}, transport
+  84.7 {84,86,84}, toolhang DP-T 71.0 done; cube DP must be goal-conditioned (todo, DP-side); (4) interpretability
+  and (5) longer-horizon GR after training. Reacher HELD for R2 (192-throughout pw_zp) per owner.
+  Jobs (entries jf_gr_0cc5c38.sh CELL ARM SEED EXTRA SKIP_EVAL / jf_tc_0cc5c38.sh / jf_tc_gcf2_0cc5c38.sh):
+    gr_pusht_nm192    mf-f894e20a 9cd4f7aed939fd1b   gr_tworoom_nm192  mf-f210c74c fde3928fc48b274b
+    gr_pointmaze_large_nm192 mf-4dc17ae3 efa41753747f11fb   (GR cells: chained gc/roll/grad/rand evals)
+    grtc_toolhang_nm192 mf-a854f305 55858a25ae58dbf4   grtc_transport_nm192 mf-1470a067 5a793e87a86e0b76
+    grtc_drawer_nm192 mf-150c9d9a 21bbc004c4dc87c9   grtc_cube_nm192 mf-0431adfe 30b7bb9071f875c9 (TC->GR, train-only; sim-stack GR eval entry todo)
+    tc_toolhang_nm192 mf-823e5711 3c9274107615205a   tc_drawer_nm192 mf-6b5ef6ed 4ea65e747e07b2a0
+    tc_transport_nm192 mf-ec77b56c bfc2a3002543110f  (goal-blind, train-only; standalone TC evals after)
+    tc_cube_gcf_nm192 mf-4c9d91f1 60ad363ec0c03bd8   (goal-cond gcf2, in-entry gc eval, 400000 MB)
+  Result dirs: ckpts/jointflow_gr_<cell>_nm192/ (GR + TC->GR), ckpts/jointflow_tc/tc_<cell>_nm192_s42/ (TC).
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
