@@ -716,6 +716,14 @@ beside each checkpoint.
   the policy grades its proposals at least as well as the co-trained one (+7, within seed spread
   {80,94,90}); the +18 over reactive comes from selection among policy proposals, which any decent
   latent cost delivers. The co-trained dynamics is not what makes best-of-K work here.
+  RESULT toolhang-as-GR (nm192 ckpt, official50 LeWM grader, 3 seeds x 50): JFEXTWM {86, 86, 84} = 85.3
+  vs our-dynamics best-of-K 88.0, reactive 86.7, random candidates 29.3, grad 61.3, CEM-policy 89.3.
+  Picks again nearly independent (agreement 28/403, 26/353, 21/405 = 5-7%; LeWM pick at mean rank
+  14.6/13.6/14.7 of 32 under our cost). On toolhang selection buys nothing under either grader
+  (both within noise of reactive), so the row says only that swapping the grader costs nothing.
+  Across both cells: the co-trained dynamics is interchangeable with a foreign LeWM as the best-of-K
+  scorer, and the two cost landscapes barely correlate -- the planner gain (pusht) or its absence
+  (toolhang) is a property of the policy proposals, not of which world model ranks them.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
