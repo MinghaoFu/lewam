@@ -663,6 +663,15 @@ beside each checkpoint.
     On the bimanual dexmg cells pure-WM planners are near zero and BOTH refining planners (gradient, CEM)
     fall well below the policy's best-of-K: refinement walks off the policy's proposals. Eval cost 24-36
     min per 50 episodes (dexmg) -> the four 3-mode jobs hit the 3h kill; continuations run one mode/job.
+  DIAGNOSTIC (owner 2026-09-05): does the regularizer/policy view recover planning on the TC->GR
+  cells? drawer-as-GR and transport-as-GR at 192 throughout with projected SIGReg + P(z) view
+  (--w_reg 0.04 --sigreg_pertime --sep_policy_state, sigreg_proj_dim = z_dim 192, no rank), same
+  entry/data/H_max as the noreg runs; train-only, evals as one-mode grev jobs on TRAIN_OK:
+    grtc_drawer_pwzp192    mf-3bc46bc9 1bebdac1423906d8
+    grtc_transport_pwzp192 mf-2819429c 145ba2f779d1df50
+  Context: GCBC (frozen DINOv2-small 22.1M + 19.3M trained predictor = 41.4M) vs ours 16.9M; on the
+  noreg 192 TC->GR ckpts planning falls off a cliff (drawer grad 14 / CEM 16 vs best-of-K 48;
+  transport grad 42 / CEM 62 vs 69) -- the owner reads this as noreg's shortcoming.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
