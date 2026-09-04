@@ -646,10 +646,12 @@ beside each checkpoint.
   - cube gcf2 (TC goal-cond): memory 400000 AND 256000 both died before the entrypoint ran (no
     heartbeat, no platform reason) -> relaunched at the proven 200000 (50310dd78ba952ab).
   - pusht (192): reactive 70.0 {62,78,70} | best-of-K 80.7 {76,84,82} | gradient 86.7 {80,92,88} | random
-    candidates 39.3 {34,44,40}. vs the 384 pw_zp (73.3 / 83.3 / 95.3 / 44): the small model is -3 reactive,
+    candidates 39.3 {34,44,40} | CEM policy-init 86.0 {86,86,86} | CEM zero-init 40.0 {34,52,34}.
+    vs the 384 pw_zp (73.3 / 83.3 / 95.3 / 44): the small model is -3 reactive,
     -9 on the gradient planner; the policy is alive (70 vs the 39 floor) -> the reacher policy death is
     reacher-specific to the small model. (val act 0.386 at ep 50 vs 0.32 at 384: slower learner.)
-  - tworoom (192): reactive 98.7 {96,100,100} | best-of-K 100 | gradient 100 | random candidates 94.0.
+  - tworoom (192): reactive 98.7 {96,100,100} | best-of-K 100 | gradient 100 | random candidates 94.0 |
+    CEM policy-init 99.3 {100,98,100} | CEM zero-init 98.0 {96,98,100} (the pure WM solves tworoom).
   - toolhang goal-blind TC (192, 120 ep; pvev board, jointflow_policy full_traj on the eval split):
     reactive 86.7 {82,82,96} | subgoal planner 80.0 (shards 70/90) -- same as the trunk-only
     192 (82.0/75.0) and the 384 noreg (80.7/80.0).
