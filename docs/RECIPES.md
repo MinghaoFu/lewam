@@ -708,6 +708,14 @@ beside each checkpoint.
   wf8_uni/toolhang/toolhang_lewm_official50 (ep 50, 2026-09-03, vit-tiny scratch). NOTE the repo's
   build_frozen_lewm drops the predictor (GC-IDM encoder-only path) and the "cem_lewm" entry planned with
   a LeWAM-Unified ckpt -- neither is a LeWM world model; the probe_wm_discrim retarget loader is.
+  RESULT pusht (nm192 ckpt, HF-release LeWM grader, 3 seeds x 50): JFEXTWM {80, 94, 90} = 88.0 vs
+  our-dynamics best-of-K 80.7, reactive 70.0, random candidates 39.3, grad 86.7, CEM-policy 86.0.
+  The picks are nearly independent: LeWM's argmin equals ours on 17/309, 21/266, 23/265 replans
+  (6-9%, chance 3%), and the LeWM pick sits at mean rank 14.8/15.3/14.1 of 32 under our cost
+  (uniform = 16.5). So on pusht the grader is interchangeable: a foreign world model that never saw
+  the policy grades its proposals at least as well as the co-trained one (+7, within seed spread
+  {80,94,90}); the +18 over reactive comes from selection among policy proposals, which any decent
+  latent cost delivers. The co-trained dynamics is not what makes best-of-K work here.
 - **BENCHMARK SWEEP + BOTTLENECK + PARAM ABLATION (2026-09-03, code c299ee7, seed 42).**
   Launched (owner go, waves 1+2 + p192): toolhang/pusht bottleneck (proj-sig + policy view,
   --policy_proj_rank 32), cube mse-noreg goal-terminal (gcf2 entry, 75 ep), transport and
