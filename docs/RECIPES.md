@@ -736,6 +736,14 @@ beside each checkpoint.
   (jf_tc_ev with the mode switched to goal-conditioned full-traj) on TRAIN_OK. No token control at 192
   (owner's call): the head number is read against goal-blind 86.7 (192) / 80.7 (384) and token 60.0 (384).
     tc_toolhang_gt192h  mf-60465876 36f7f3fec0dc3147  (memory 120000; goal-blind twin trained in 3 h 04 min)
+  CUBE GOAL-CONDITIONED TC (gcf2 entry, 192, 75 ep, 200 GB raw cache mmap, resume chain): TRAIN_OK 2026-09-05
+  08:23 (ep 75/75, val act 0.386, val zstd 0.184; 10.9 min/epoch measured). The entry's chained eval died in
+  15 s on every seed: FileNotFoundError datasets/ogbench/cube_single_expert.h5 -- the cube eval config reads
+  the dataset under the ogbench/ subdirectory and the gcf2 entry links it at datasets/ root (the 08-25 cube
+  eval used jf_tc_eval_gc_2b7f7f5.sh, which mkdirs the subdirectory). Relaunched as a standalone
+  goal-conditioned eval on the synced checkpoint through jf_tcgc_ev_96618d4.sh (jointflow_gc + full_traj on
+  the cube eval split, 3 x 50 -- the 95.3 protocol; mkdir fix added): tcgc_ev_tc_cube_gcf_nm192_s42
+  mf-39fc73be 7421b9461bb9facf. References: jointflow-class gcf 95.3 {96,96,94}; cube DP unmeasured (GC todo).
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
