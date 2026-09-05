@@ -744,6 +744,19 @@ beside each checkpoint.
     tc_toolhang_gt192h  mf-60465876 36f7f3fec0dc3147  (memory 120000; goal-blind twin trained in 3 h 04 min)
     TRAIN_OK 12:12 (3 h 40 min, val act 0.253, val zstd 0.106); goal-conditioned full-traj eval submitted:
     tcgc_ev_tc_toolhang_gt192h_s42 mf-a68c4bc6 39909d72d589f03d.
+    RESULT (2026-09-05, reactive JFTCGC, N=50): seed 42 = 70.0 (13:42), seed 0 = 80.0 (15:02); mean-of-2 = 75.0.
+    SEED 1 NOT RUN: the job was KILLED ~15:20 by the 3 h low-util wall (started 12:20, each seed ~80 min, 3 seeds
+    ~4 h > 3 h). The risk flagged at submit materialised. Per-seed logs persisted (ckpts/jointflow_tc/
+    ev_tc_toolhang_gt192h_s42_e{42,0}.log), so 42/0 are safe; NO lock/claim guard survived the kill, so a re-run is
+    not blocked. But jf_tcgc_ev_96618d4.sh hardcodes `for ES in 42 0 1` with no skip-if-done and no seed override,
+    so a naive resubmit re-runs 42/0 and re-crosses the wall. Seed 1 needs a seed-only variant or a skip-if-log
+    guard on the entry. NOT LAUNCHED, awaiting owner go.
+    FINDING (2 seeds): the goal-terminal head (75.0 at 192) underperforms goal-blind 86.7 (192) by ~12, same
+    direction as goal-token (60.0 < goal-blind 80.7 at 384) and as pusht GR (head < token). Goal conditioning via
+    the head does not help on toolhang TC; the 2-seed gap already exceeds what a third seed could close.
+    INFRA LESSON: the cube GR evals survived because sharded one-mode-per-job (6 jobs each < 3 h); this eval ran 3
+    long seeds in ONE job (~4 h) and died at the wall. Eval entries with >2 long seeds need per-seed skip-if-done
+    or seed-sharding to clear the 3 h kill. [[merlin-ops]]
   CUBE GOAL-CONDITIONED TC (gcf2 entry, 192, 75 ep, 200 GB raw cache mmap, resume chain): TRAIN_OK 2026-09-05
   08:23 (ep 75/75, val act 0.386, val zstd 0.184; 10.9 min/epoch measured). The entry's chained eval died in
   15 s on every seed: FileNotFoundError datasets/ogbench/cube_single_expert.h5 -- the cube eval config reads
