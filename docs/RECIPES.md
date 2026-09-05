@@ -832,6 +832,26 @@ beside each checkpoint.
     1-state planner matched because n_clean=fs=5). Reactive/best-of-K/random call the sampler with the full block,
     so they pass. Not a supervision-signal issue -- a planner path that assumes n_clean=fs. FIX = feed imagine_step
     the full 25-action block (or add a single-block imagine mode). NOT fixed; offered to owner.
+  OWNER GO (2026-09-05, "Yes on all 3"): toolhang TC board evals, JFGRAD fix + grad re-run, goal-terminal seed 1.
+  FIX 966463b (motflow.imagine_step): accepts a single block (fs actions), zero-padded to n_clean. Inert for state
+    token 0 under the causal map (it attends only to its own block) = the token every planner reads; the gradient
+    still flows through the block. CPU-verified mse+flow: single-block == full-block on token 0 (dz 0.00e+00),
+    grad through the block 0.46/0.56. Tarball lewam_jointflow_966463b.tar.gz (mirrors 96618d4 minus the inert
+    .gitignore); GR eval entry jf_grev_966463b.sh built on it.
+  EVAL ENTRIES HARDENED (jf_tc_ev_96618d4.sh, jf_tcgc_ev_96618d4.sh): EV_SEEDS env overrides the seed list; a
+    seed whose persisted ev_<arm>_e<seed>.log already carries a success_rate is skipped, so a kill is resumable by
+    resubmit and long evals shard under the 3 h wall. Stager refusal guard: will not submit against an entry
+    lacking EV_SEEDS, nor without the checkpoint. A fresh run of either entry is behaviourally unchanged.
+  LAUNCHED (7 jobs, research-guarantee H100 [10 free at submit], memory 120000, Evaluation):
+    toolhang board eval (full_traj ~80 min/seed) sharded (42,0)+(1) per arm:
+      ev_s5m192_s42_0 mf-c1052bd8 4ece4613b950a271    ev_s5m192_s1 mf-a564b254 31381c5f18da314a
+      ev_s5f192_s42_0 mf-caddc222 347a518110b42f53    ev_s5f192_s1 mf-a281f23f 27bb6d867bebc8f4
+    goal-terminal seed 1 (42/0 persisted; the guard skips them): ev_gt192h_s1 mf-0e55d920 1b412f5dd0dee2b3
+    pusht JFGRAD re-run on the fixed tarball (grev, 3 seeds per job; pusht grad is short, clears the wall):
+      grad_s5m192 mf-540401d2 918320652dec9335    grad_s5f192 mf-9939914c e3b709833be36ff0
+    Results: ckpts/jointflow_tc/hb_ev_tc_toolhang_{s5m192,s5f192,gt192h}_s42.log (both shards of an arm append
+    to the same file) and ckpts/jf_grev/hb_pusht_{s5m192,s5f192}.log. Read the persisted per-seed logs, not a
+    watcher, for the numbers.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
