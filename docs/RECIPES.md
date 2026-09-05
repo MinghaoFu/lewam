@@ -727,6 +727,12 @@ beside each checkpoint.
   planner still walks 13 units off the warm start and collapses. So on GR the head recovers less than
   the regularizer + policy view did (80.0) and neither reaches goal-blind; the goal-image cost on the
   TC protocol (toolhang 60.0) remains the untested target.
+  RESULT pusht GR gh192 (TRAIN_OK 10:45, 5 h 30 min = the token wall; val act 0.353 vs 0.365, zstd 0.15; chained
+  3 x 50): reactive 66.0 {58,78,62} | best-of-K 72.7 {66,80,72} | gradient 78.7 {72,88,76} | random candidates
+  39.3 {38,46,34}; gradient drift 2.4-2.6 = token's. Token: 70.0 / 80.7 / 86.7 / 39.3. The head costs pusht
+  4 (noise) / 8 / 8 points -- the one GR cell where the goal is essential is the one the head hurts, while the
+  random-candidate floor is untouched (the world model is the same). Across the three GR cells: toolhang =,
+  transport +8 reactive only, pusht -8 on both planners; the head is not a GR improvement.
   GOAL-TERMINAL TC WITH THE HEAD (owner 2026-09-05: "only toolhang I wanted with goal-cond TC", "Don't need
   arm2, just 1"): toolhang on the TC protocol that produced the goal-image failure (raw consecutive-frame
   cache, goal = the demo's terminal frame, horizon 0; eval = jointflow_gc + full_traj on tool_hang_ev, 3 x 50,
