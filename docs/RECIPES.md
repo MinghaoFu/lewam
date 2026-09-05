@@ -762,6 +762,28 @@ beside each checkpoint.
   under datasets/ogbench + the eval split, full_traj protocol; memory 120000):
     gc 47e905a4b07dfd60  plan 4f927f60213eb8fc  grad 5bedb5226d7cf562  rand af1812c319f2fc78
     cemp 2699663f2310d8f1  cemz 617dec6593c16fbc
+- **5-STATE / 25-ACTION ARMS (Minghao's ask via the owner, 2026-09-05; "Rather A and B. Both PushT GR and
+  Toolhang TC"; "For consistency we should go as is").** Questions: does a flow head predicting 5 states
+  learn meaningful dynamics without SIGReg; does 5-state mse bridge the planning gap; are 25 actions needed.
+  CODE FACTS: with num_states_pred 5 and fs 5 the trainer forces num_actions_pred >= 25 (state token q
+  attends to the CLEAN actions up to q*fs, the first 25 entries of the policy's target tensor) -- 25 actions
+  are coupled to 5 states by construction, not by joint denoising (MoT has none); the reactive protocol
+  executes one block (5 actions) per replan whatever the chunk length; the planner's _imagine uses only the
+  FIRST state token per pass (multi-block imagination = a planner change, not written yet); both caches
+  support 5 state targets. Smoke-tested on CPU (58 tokens, 16.86M params, state tokens 1-4 ignore block-5
+  actions, token 5 responds; AdaLN-Zero makes every block the identity at init, so the wiring test needs
+  randomised gates). Batch 16 / history 1 from the suggested command NOT carried over (owner: MoT predicts
+  one anchor per sample, batch 16 is a mistake; history 2 keeps the velocity cue).
+  BATCH-SIZE CONVENTION SURFACED (owner: "Was toolhang always bs64? First I'm hearing this"): every TC arm on
+  record (28 toolhang + drawer/transport/cube) trains at batch 64, lr 1e-4, 120 ep, warmup 10 (the jf_tc entry
+  inherited it from the toolhang r2 noreg recipe); every GR arm at batch 128, lr 1.5e-4, 50 ep, warmup 5.
+  Kept as is for comparability (owner's call). Launched, 192 throughout, noreg, history 2, seed 42, memory
+  120000, `--num_states_pred 5 --num_actions_pred 25`; B adds `--mot_state_head flow --state_prior gauss
+  --state_param v`:
+    gr_pusht_s5m192    mf-328e15fa f43ebc45c5f587ac   (GR recipe; chained gc/plan/grad/rand; ref 70.0/80.7/86.7/39.3)
+    gr_pusht_s5f192    mf-b92508e8 98805bc4f2b9e1f9   (flow; the 384 flow head planned 72/70 at 1 state)
+    tc_toolhang_s5m192 mf-442d0bb8 e89070d6f0fc7e39   (TC recipe, train-only; board reactive eval via jf_tc_ev_96618d4.sh; ref 86.7)
+    tc_toolhang_s5f192 mf-dc94a415 a3c413eb7272a685   (flow; the 384 flow head was 86.0 vs mse 80.7 reactive)
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
