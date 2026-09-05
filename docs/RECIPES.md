@@ -755,6 +755,13 @@ beside each checkpoint.
   RESULT: cube goal-conditioned TC, MoT mse+noreg 192 throughout (16.9M), 75 ep: 96.0 {94,98,96} (eval 08:50-09:08,
   ~9 min per 50 episodes). Matches the jointflow-class 95.3; the final wave's TC side is complete: toolhang 86.7,
   drawer 68.7, transport 84.7 (goal-blind), cube 96.0 (goal-conditioned).
+  CUBE AS GR (final wave, grtc_cube_nm192 30b7bb9071f875c9): TRAIN_OK 2026-09-04 19:21 (50 ep, val act 0.545,
+  val zstd 0.207) but its GR evals were never submitted -- the trigger fired while the wave watcher was pointed at
+  the cube TC heartbeat (found 2026-09-05 12:20 when the owner asked what was left). Submitted as the scheduled
+  continuation of the approved wave, one mode per job through jf_grev_96618d4.sh (cube case fixed: dataset link
+  under datasets/ogbench + the eval split, full_traj protocol; memory 120000):
+    gc 47e905a4b07dfd60  plan 4f927f60213eb8fc  grad 5bedb5226d7cf562  rand af1812c319f2fc78
+    cemp 2699663f2310d8f1  cemz 617dec6593c16fbc
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
