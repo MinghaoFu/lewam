@@ -852,6 +852,11 @@ beside each checkpoint.
     Results: ckpts/jointflow_tc/hb_ev_tc_toolhang_{s5m192,s5f192,gt192h}_s42.log (both shards of an arm append
     to the same file) and ckpts/jf_grev/hb_pusht_{s5m192,s5f192}.log. Read the persisted per-seed logs, not a
     watcher, for the numbers.
+  JFGRAD s5m192 RE-RUN (fixed code 966463b): 82/84/78 = 81.3, ALL_DONE, 97-229 s per seed. The fix holds on GPU
+    (3/3 seeds succeed where 3/3 failed before). vs 1-state grad 86.7: -5.4, matching the best-of-K gap (76.7 vs
+    80.7). Planner ordering preserved for the 5-state mse trunk: grad 81.3 > best-of-K 76.7 > reactive 71.3 >
+    random 42.7. Full pusht GR 5-state mse row: 71.3 / 76.7 / 81.3 / 42.7 vs 1-state 70.0 / 80.7 / 86.7 / 39.3 --
+    neutral on reactive, ~4-5 down on both planners. The state-chunk target improves the pusht GR trunk on no method.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
