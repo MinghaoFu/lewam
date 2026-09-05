@@ -857,6 +857,19 @@ beside each checkpoint.
     80.7). Planner ordering preserved for the 5-state mse trunk: grad 81.3 > best-of-K 76.7 > reactive 71.3 >
     random 42.7. Full pusht GR 5-state mse row: 71.3 / 76.7 / 81.3 / 42.7 vs 1-state 70.0 / 80.7 / 86.7 / 39.3 --
     neutral on reactive, ~4-5 down on both planners. The state-chunk target improves the pusht GR trunk on no method.
+  JFGRAD s5f192 RE-RUN (fixed code): 60/66/54 = 60.0, ALL_DONE, 248-351 s per seed.
+  PUSHT GR 5-STATE COMPLETE (both arms, 4 methods, 3 seeds / N=50 each):
+                   reactive  best-of-K   grad   random
+    1-state ref      70.0      80.7      86.7    39.3
+    s5 mse           71.3      76.7      81.3    42.7
+    s5 flow          66.7      64.7      60.0    20.7
+    mse: planner ordering NORMAL (grad > best-of-K > reactive) -- planning still pays; neutral on reactive, -4/-5
+    on the planners vs 1-state. flow: planner ordering INVERTED (reactive 66.7 > best-of-K 64.7 > grad 60.0) --
+    every planner lands BELOW acting reactively, i.e. the flow head's dynamics are not exploitable by search and
+    planning through them degrades. With random-candidate 20.7 this is the cleanest evidence the flow state head
+    does not learn useful dynamics (owner's question, does a flow head predicting 5 states learn meaningful
+    dynamics without SIGReg: NO on pusht GR). flow < mse on all 4 metrics. VERDICT pusht GR: the 5-state target
+    helps nothing; mse is the head to keep; flow is harmful. Toolhang TC (the other half) pending, 5 evals running.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
