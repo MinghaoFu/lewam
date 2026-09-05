@@ -880,6 +880,26 @@ beside each checkpoint.
     toolhang TC reactive number on record. The OPPOSITE of pusht GR (flow 66.7, harmful): the flow state head is
     CELL-DEPENDENT -- it helps the toolhang TC trunk and hurts the pusht GR trunk. mse (86/88, seed 0 pending)
     is tracking ~87 = neutral.
+  TOOLHANG TC 5-STATE MSE COMPLETE (2026-09-06 02:09, both shards ALL_DONE, 6/6 per-seed logs persisted for both
+    arms): 86/88/74 = 82.7 vs goal-blind 86.7 -> -4.0; one weak seed (74) drives it, the other two sit at/above
+    baseline. Seed spread on this cell: baseline {84,92,84}, mse {86,88,74}, flow {86,92,94}; 4-point gaps sit at
+    the edge of 3x50 resolution, the flow>mse direction is the robust part (flow wins 2 of 3 paired seeds, ties 1).
+  === 5-STATE / 25-ACTION EXPERIMENT COMPLETE (all 4 arms, every eval, 3 seeds / N=50) ===
+    PUSHT GR        reactive  best-of-K   grad   random      TOOLHANG TC    reactive (board)
+    1-state          70.0      80.7      86.7    39.3        1-state        86.7 {84,92,84}
+    s5 mse           71.3      76.7      81.3    42.7        s5 mse         82.7 {86,88,74}   -4.0
+    s5 flow          66.7      64.7      60.0    20.7        s5 flow        90.7 {86,92,94}   +4.0
+    ANSWERS. (1) flow head learning meaningful dynamics without SIGReg: CELL-DEPENDENT. pusht GR: no -- planner
+    ordering inverted, random-candidate 20.7, search cannot exploit it. toolhang TC: it produced the best reactive
+    number on record (90.7, +4) -- a trunk effect; the reactive protocol does not exercise the dynamics under
+    search and no planner eval exists on toolhang. (2) 5-state mse bridging the planning gap: NO -- pusht planners
+    went DOWN (-4/-5), toolhang reactive -4. (3) 25 actions needed: untested, structurally coupled to 5 states.
+    VERDICT: the 5-state target is not a general improvement for the mse trunk on either cell. The flow head is
+    harmful on pusht GR and the toolhang TC winner. RECOMMENDATION (owner's call, not decided): mse stays the
+    default head (never catastrophic); flow as a toolhang-class TC option; the 5-state target is not a default.
+    INFRA that made this land: imagine_step single-block fix 966463b (grad 6/6 where 6/6 failed), EV_SEEDS +
+    skip-if-done eval entries (5 sharded toolhang evals + goal-terminal seed 1: zero re-runs, zero wall kills),
+    job-status pollers replacing the START-timing watcher.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
