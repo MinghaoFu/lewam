@@ -757,6 +757,10 @@ beside each checkpoint.
     INFRA LESSON: the cube GR evals survived because sharded one-mode-per-job (6 jobs each < 3 h); this eval ran 3
     long seeds in ONE job (~4 h) and died at the wall. Eval entries with >2 long seeds need per-seed skip-if-done
     or seed-sharding to clear the 3 h kill. [[merlin-ops]]
+    SEED 1 COMPLETED (2026-09-06 01:04; resubmit with EV_SEEDS=1 once the entry had the guard): 76.0, ALL_DONE,
+    per-seed log persisted. FINAL (3 seeds, N=50): 70/80/76 = 75.3 vs goal-blind 86.7 (192) -> -11.4. The 2-seed
+    read (75.0) held. Goal conditioning via the terminal head does not help on toolhang TC: it costs ~11 against
+    the goal-blind trunk, the same direction as goal-token (60.0 < 80.7 at 384) and pusht GR (head < token). CLOSED.
   CUBE GOAL-CONDITIONED TC (gcf2 entry, 192, 75 ep, 200 GB raw cache mmap, resume chain): TRAIN_OK 2026-09-05
   08:23 (ep 75/75, val act 0.386, val zstd 0.184; 10.9 min/epoch measured). The entry's chained eval died in
   15 s on every seed: FileNotFoundError datasets/ogbench/cube_single_expert.h5 -- the cube eval config reads
