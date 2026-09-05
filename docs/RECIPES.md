@@ -874,6 +874,12 @@ beside each checkpoint.
     does not learn useful dynamics (owner's question, does a flow head predicting 5 states learn meaningful
     dynamics without SIGReg: NO on pusht GR). flow < mse on all 4 metrics. VERDICT pusht GR: the 5-state target
     helps nothing; mse is the head to keep; flow is harmful. Toolhang TC (the other half) pending, 5 evals running.
+  TOOLHANG TC 5-STATE FLOW COMPLETE (2026-09-06, reactive board protocol JFTC, 3 seeds / N=50, both shards
+    ALL_DONE; the (42,0) shard finished 02:02 with seed 0 at 01:59 = 2 h 25 min after start, inside the wall):
+    86/92/94 = 90.7 vs goal-blind 1-state 86.7 -> +4.0; also above the 384-width flow head (86.0). The best
+    toolhang TC reactive number on record. The OPPOSITE of pusht GR (flow 66.7, harmful): the flow state head is
+    CELL-DEPENDENT -- it helps the toolhang TC trunk and hurts the pusht GR trunk. mse (86/88, seed 0 pending)
+    is tracking ~87 = neutral.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
