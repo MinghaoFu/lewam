@@ -413,9 +413,15 @@ class MoTFlow(nn.Module):
     def imagine_step(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
         """The MoT's one dynamics primitive, gradients enabled: the state token(s) one block ahead
         of the history from the CLEAN actions of that block (the first n_clean of `actions`).
-        Differentiable in `actions` (gradient planning) and in the history latents."""
-        return self._state_phase(z_history, history_pad, actions[:, :self.n_clean], noise_state,
-                                 None, z_goal, h_norm)
+        Differentiable in `actions` (gradient planning) and in the history latents.
+        Accepts a single block (fs actions) as well as the full n_clean: a short input is zero-padded
+        to n_clean, which is inert for the first state token (under the causal map it attends only to
+        its own block's fs clean actions) and that token is what the planners read."""
+        clean = actions[:, :self.n_clean]
+        if clean.shape[1] < self.n_clean:
+            pad = clean.new_zeros(clean.shape[0], self.n_clean - clean.shape[1], clean.shape[2])
+            clean = torch.cat([clean, pad], dim=1)
+        return self._state_phase(z_history, history_pad, clean, noise_state, None, z_goal, h_norm)
 
     @torch.no_grad()
     def predict_state(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
