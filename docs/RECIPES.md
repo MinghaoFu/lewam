@@ -727,6 +727,15 @@ beside each checkpoint.
   planner still walks 13 units off the warm start and collapses. So on GR the head recovers less than
   the regularizer + policy view did (80.0) and neither reaches goal-blind; the goal-image cost on the
   TC protocol (toolhang 60.0) remains the untested target.
+  GOAL-TERMINAL TC WITH THE HEAD (owner 2026-09-05: "only toolhang I wanted with goal-cond TC", "Don't need
+  arm2, just 1"): toolhang on the TC protocol that produced the goal-image failure (raw consecutive-frame
+  cache, goal = the demo's terminal frame, horizon 0; eval = jointflow_gc + full_traj on tool_hang_ev, 3 x 50,
+  the g_nm 60.0 / goal-blind 80.7 protocol). Recipe = the goal-blind nm192 TC arm (jf_tc entry rebuilt on
+  96618d4: 120 ep, warmup 10, batch 64, lr 1e-4, fp32, mse, noreg, 192 throughout, seed 42, zstd floor
+  0.005) + --goal_conditioning --goal_terminal --goal_cond head; train-only, eval from jf_tcgc_ev_96618d4.sh
+  (jf_tc_ev with the mode switched to goal-conditioned full-traj) on TRAIN_OK. No token control at 192
+  (owner's call): the head number is read against goal-blind 86.7 (192) / 80.7 (384) and token 60.0 (384).
+    tc_toolhang_gt192h  mf-60465876 36f7f3fec0dc3147  (memory 120000; goal-blind twin trained in 3 h 04 min)
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
