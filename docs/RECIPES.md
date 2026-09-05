@@ -742,6 +742,8 @@ beside each checkpoint.
   (jf_tc_ev with the mode switched to goal-conditioned full-traj) on TRAIN_OK. No token control at 192
   (owner's call): the head number is read against goal-blind 86.7 (192) / 80.7 (384) and token 60.0 (384).
     tc_toolhang_gt192h  mf-60465876 36f7f3fec0dc3147  (memory 120000; goal-blind twin trained in 3 h 04 min)
+    TRAIN_OK 12:12 (3 h 40 min, val act 0.253, val zstd 0.106); goal-conditioned full-traj eval submitted:
+    tcgc_ev_tc_toolhang_gt192h_s42 mf-a68c4bc6 39909d72d589f03d.
   CUBE GOAL-CONDITIONED TC (gcf2 entry, 192, 75 ep, 200 GB raw cache mmap, resume chain): TRAIN_OK 2026-09-05
   08:23 (ep 75/75, val act 0.386, val zstd 0.184; 10.9 min/epoch measured). The entry's chained eval died in
   15 s on every seed: FileNotFoundError datasets/ogbench/cube_single_expert.h5 -- the cube eval config reads
