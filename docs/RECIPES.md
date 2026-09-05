@@ -767,7 +767,12 @@ beside each checkpoint.
   learn meaningful dynamics without SIGReg; does 5-state mse bridge the planning gap; are 25 actions needed.
   CODE FACTS: with num_states_pred 5 and fs 5 the trainer forces num_actions_pred >= 25 (state token q
   attends to the CLEAN actions up to q*fs, the first 25 entries of the policy's target tensor) -- 25 actions
-  are coupled to 5 states by construction, not by joint denoising (MoT has none); the reactive protocol
+  are coupled to 5 states by construction, not by joint denoising (MoT denoises the action stream then the state stream in SEPARATE phases); but WITHIN the
+  state pass each future latent attends causally to the earlier state tokens (allow[r, st[:q+1]], motflow.py:230), the
+  mirror of action chunking's own causal self-attention among action tokens (allow[r, ny[:j+1]], :241) -- so state
+  prediction is single-pass CHUNKED JOINT prediction with a causal horizon chain, NOT per-horizon feedforward and NOT
+  commit-and-re-encode autoregressive rollout. token k = the latent fs*k action-steps ahead, so 5 tokens = horizons
+  5/10/15/20/25 (one per action block). the reactive protocol
   executes one block (5 actions) per replan whatever the chunk length; the planner's _imagine uses only the
   FIRST state token per pass (multi-block imagination = a planner change, not written yet); both caches
   support 5 state targets. Smoke-tested on CPU (58 tokens, 16.86M params, state tokens 1-4 ignore block-5
@@ -777,7 +782,13 @@ beside each checkpoint.
   BATCH-SIZE CONVENTION SURFACED (owner: "Was toolhang always bs64? First I'm hearing this"): every TC arm on
   record (28 toolhang + drawer/transport/cube) trains at batch 64, lr 1e-4, 120 ep, warmup 10 (the jf_tc entry
   inherited it from the toolhang r2 noreg recipe); every GR arm at batch 128, lr 1.5e-4, 50 ep, warmup 5.
-  Kept as is for comparability (owner's call). Launched, 192 throughout, noreg, history 2, seed 42, memory
+  Kept as is for comparability (owner's call). DECISION (owner 2026-09-05, "not ... a way to replace autoregressive rollout ... a supervision signal like action
+  chunking but for states"): the 5 states are a SUPERVISION signal, not a planning mechanism -- the multi-block
+  imagination planner is NOT being written. the planner keeps consuming only the first predicted latent (horizon fs)
+  per replan, so these arms eval by the SAME mechanism as 1-state and isolate whether the state-chunk target sharpens
+  the shared trunk that also produces the actions. whether a trained model routes through the state-to-state edge vs
+  leans on the action prefix is empirical (perturb one state token, watch downstream) -- not needed for the decision.
+  Launched, 192 throughout, noreg, history 2, seed 42, memory
   120000, `--num_states_pred 5 --num_actions_pred 25`; B adds `--mot_state_head flow --state_prior gauss
   --state_param v`:
     gr_pusht_s5m192    mf-328e15fa f43ebc45c5f587ac   (GR recipe; chained gc/plan/grad/rand; ref 70.0/80.7/86.7/39.3)
