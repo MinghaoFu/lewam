@@ -762,6 +762,14 @@ beside each checkpoint.
   under datasets/ogbench + the eval split, full_traj protocol; memory 120000):
     gc 47e905a4b07dfd60  plan 4f927f60213eb8fc  grad 5bedb5226d7cf562  rand af1812c319f2fc78
     cemp 2699663f2310d8f1  cemz 617dec6593c16fbc
+  RESULT (2026-09-05, all 6 jobs ALL_DONE; 3 seeds 42/0/1, N=50 each; cross-verified heartbeat vs 18 per-seed logs):
+    JFGC 98/98/98 (98.0)   JFROLL 100/100/98 (99.3)   JFGRAD 100/98/96 (98.0)   JFCEM-pol 100/100/98 (99.3)
+    JFROLLRAND 4/8/4 (5.3)   JFCEMZ 2/8/4 (4.7).
+    The four informative planners saturate at 98-99.3 (cube goal-cond TC was 96.0), so cube-as-GR = cube-as-TC:
+    a solved cell either way. The two UNINFORMED controls collapse to ~5 -- random candidates and zero-init CEM
+    strip the learned prior, so the ~99 is the goal-conditioned policy prior, NOT the search machinery. This is the
+    control that makes the planner rows interpretable. Naming (tarball 96618d4): rand job tags JFROLLRAND, zero-init
+    CEM tags JFCEMZ. Results live ONLY in ckpts/jf_grev/{hb_cube_nm192.log, ev_cube_nm192_<mode>_e<seed>.log} (no json).
 - **5-STATE / 25-ACTION ARMS (Minghao's ask via the owner, 2026-09-05; "Rather A and B. Both PushT GR and
   Toolhang TC"; "For consistency we should go as is").** Questions: does a flow head predicting 5 states
   learn meaningful dynamics without SIGReg; does 5-state mse bridge the planning gap; are 25 actions needed.
