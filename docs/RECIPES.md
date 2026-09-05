@@ -719,6 +719,14 @@ beside each checkpoint.
   does not matter for toolhang. NOTE (owner, same morning): the goal-image failure to test against is
   the goal-TERMINAL TC arm (toolhang g_nm 60.0 vs goal-blind 80.7 at 384), not GR -- transport never had
   a goal-conditioned TC arm; proposal for the TC-protocol head test pending the owner's go.
+  RESULT transport-as-GR gh192 (TRAIN_OK 06:21, 68 min, val zstd 0.12; 3 x 50, one mode per job):
+  reactive 76.7 {72,82,76} | best-of-K 73.3 {68,70,82} | gradient 45.3 {40,46,50}, drift 13.0-13.5
+  (token 68.7 {66,70,70} / 69.3 / 42.0, drift 13; pw_zp 80.0 / 77.3 / 54.7; goal-blind TC 84.7).
+  The head lifts transport's goal-conditioned reactive row by +8 (at the edge of the noise band, all
+  three seeds above the token mean) and leaves best-of-K and the gradient planner where they were; the
+  planner still walks 13 units off the warm start and collapses. So on GR the head recovers less than
+  the regularizer + policy view did (80.0) and neither reaches goal-blind; the goal-image cost on the
+  TC protocol (toolhang 60.0) remains the untested target.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
