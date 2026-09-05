@@ -912,9 +912,16 @@ beside each checkpoint.
   under hindsight goals E[a | s, g] IS state-dependent (the actions that happened to move toward g), a legitimate
   reaching action that an MSE head regresses directly with no noise term, while a flow SAMPLE from that broad
   conditional is mostly noise. Owner's hypothesis: this is flow matching's problem on reacher relative to a pure
-  MSE policy. Proposed arm: the collapsed mse-noreg reacher recipe (384 throughout = the trainer defaults; it set
-  no width flags) with the policy head swapped to mse. Reference points on reacher at 384: flow policy + noreg =
-  collapse by ep 10; flow policy + SIGReg (R1) = reactive 92.0 alive.
+  MSE policy. OWNER CORRECTIONS (2026-09-06, "Completely wrong"): (1) the mse ACTION head must MIRROR the mse
+  state head -- a learned action_query in the noisy slots (as state_query fills the state slots), the loss
+  branching only on the TARGET (the chunk itself vs the velocity), one pass at tau one at inference. My first
+  version fed zeros through action_in and branched the tau/noise construction: wrong, replaced (action_query is
+  registered only under the mse head so every flow ckpt keeps its layout; behaviour identical). (2) 192
+  THROUGHOUT, not 384: a collapse is NOT a reference, and 384 broke the final wave's consistency. The reference
+  is R2 (192, flow policy + SIGReg): reactive 28.7 {28,28,30} = the dead policy, best-of-K 99.3, grad 100,
+  random 99.3; R2 pace 4 h 46 min / 50 ep. Proposed arm: the collapsed mse-noreg reacher recipe at 192 (SMALL
+  flags) with --mot_action_head mse + --zstd_floor 0.005. Loss readout: the mse floor is the z-scored marginal
+  variance 1.0, so act < 1.0 by ep 10 = learning E[a | s, g] (R2's flow act sat at 1.51-1.52 = its floor).
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
