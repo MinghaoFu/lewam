@@ -80,6 +80,10 @@ def parse_args():
     ap.add_argument("--mot_state_head", default="flow", choices=["flow", "mse"],
                     help="motflow: objective on the next-state tokens (flow = rectified flow on a "
                          "noisy token; mse = regression from a learned query, clean-action-conditioned)")
+    ap.add_argument("--mot_action_head", default="flow", choices=["flow", "mse"],
+                    help="motflow: objective on the action chunk (flow = rectified flow, sampled; mse = "
+                         "one-pass regression from a zero input at tau 1, deterministic: the policy returns "
+                         "the conditional MEAN action -- for random-policy data such as reacher)")
     ap.add_argument("--state_detach", action="store_true",
                     help="twinflow: stop-grad the encoder for the state branch (its history memory "
                          "and target), so the state flow cannot collapse or reshape the encoder")
@@ -420,6 +424,7 @@ def main():
                state_target_norm=bool(args.state_target_norm), model=args.model,
                state_detach=bool(args.state_detach), state_depth=int(args.state_depth),
                state_ctx_actions=int(args.frameskip * args.num_states_pred),
+               action_head=args.mot_action_head,
                state_head=args.mot_state_head, state_prior=args.state_prior,
                state_prior_sigma=float(args.state_prior_sigma), state_param=args.state_param,
                state_x_eps=float(args.state_x_eps),

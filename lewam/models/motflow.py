@@ -122,6 +122,10 @@ class MoTFlow(nn.Module):
         self.sigreg_proj_dim = int(cfg.get("sigreg_proj_dim", 0))
         self.state_head = str(cfg.get("state_head", "flow"))
         assert self.state_head in ("flow", "mse")
+        # action chunk objective: flow = rectified flow (sampled); mse = one-pass regression from a zero
+        # input at tau 1 (deterministic, returns the conditional mean). No extra parameters either way.
+        self.action_head = str(cfg.get("action_head", "flow"))
+        assert self.action_head in ("flow", "mse")
         self.rollout_only = True        # planning = autoregressive rollout over predict_state, nothing else
         self.state_residual = bool(cfg.get("state_residual", False))
         # state_prior: "gauss" (x_0 ~ N(0, I)) or "prev" (x_0 = z_t, the current latent: the flow
@@ -320,10 +324,15 @@ class MoTFlow(nn.Module):
              z_goal=None, h_norm=None, goal_keep=None):
         B = action_target.shape[0]
         dev = action_target.device
-        tau_a = torch.rand(B, device=dev) ** (1.0 / self.tau_alpha)
         tau_s = self._draw_tau_state(B, dev)
-        noise_a = torch.randn_like(action_target)
-        noisy_a = torch.lerp(noise_a, action_target, tau_a[:, None, None].to(action_target.dtype))
+        if self.action_head == "mse":          # regress the chunk from a zero input at tau 1: no noise term
+            tau_a = torch.ones(B, device=dev)
+            noise_a = None
+            noisy_a = torch.zeros_like(action_target)
+        else:
+            tau_a = torch.rand(B, device=dev) ** (1.0 / self.tau_alpha)
+            noise_a = torch.randn_like(action_target)
+            noisy_a = torch.lerp(noise_a, action_target, tau_a[:, None, None].to(action_target.dtype))
         clean_a = action_target[:, :self.n_clean]
         if self.state_prior == "prev":
             noise_s = z_history[:, -1:].expand_as(state_target).to(state_target.dtype)     # x_0 = z_t
@@ -334,7 +343,8 @@ class MoTFlow(nn.Module):
         noisy_s = torch.lerp(noise_s, state_target, tau_s[:, None, None].to(state_target.dtype))
         v_a, out_s = self.forward_tokens(z_history, history_pad, clean_a, noisy_a, noisy_s,
                                          tau_a, tau_s, z_goal, h_norm, goal_keep)
-        loss_action = self._masked_mse(v_a, action_target - noise_a, action_valid)
+        loss_action = self._masked_mse(v_a, action_target if noise_a is None else action_target - noise_a,
+                                       action_valid)
         if self.num_states == 0:
             return loss_action, loss_action.new_zeros(())
         if self.state_head == "mse":
@@ -396,10 +406,14 @@ class MoTFlow(nn.Module):
         dummy_c = torch.zeros(B, self.n_clean, self.action_raw_dim, device=dev, dtype=action.dtype)
         dummy_s = torch.zeros(B, self.num_states, self.z_dim, device=dev, dtype=z_history.dtype)
         one = torch.ones(B, device=dev)
-        for i in range(self.n_flow_steps):                      # phase 1: the policy flow
-            tau = torch.full((B,), i / self.n_flow_steps, device=dev)
-            v_a, _ = self.forward_tokens(z_history, history_pad, dummy_c, action, dummy_s, tau, one, z_goal, h_norm)
-            action = action + v_a / self.n_flow_steps
+        if self.action_head == "mse":                            # phase 1 (mse): one deterministic regression pass
+            action, _ = self.forward_tokens(z_history, history_pad, dummy_c, torch.zeros_like(action), dummy_s,
+                                            one, one, z_goal, h_norm)
+        else:
+            for i in range(self.n_flow_steps):                  # phase 1: the policy flow
+                tau = torch.full((B,), i / self.n_flow_steps, device=dev)
+                v_a, _ = self.forward_tokens(z_history, history_pad, dummy_c, action, dummy_s, tau, one, z_goal, h_norm)
+                action = action + v_a / self.n_flow_steps
         if self.num_states == 0:
             return action, action.new_zeros(B, 0, self.z_dim)
         state = self._state_phase(z_history, history_pad, action[:, :self.n_clean], noise_state,
