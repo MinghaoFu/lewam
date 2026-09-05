@@ -900,6 +900,21 @@ beside each checkpoint.
     INFRA that made this land: imagine_step single-block fix 966463b (grad 6/6 where 6/6 failed), EV_SEEDS +
     skip-if-done eval entries (5 sharded toolhang evals + goal-terminal seed 1: zero re-runs, zero wall kills),
     job-status pollers replacing the START-timing watcher.
+- **REACHER DATA = A PURE RANDOM POLICY (verified 2026-09-06 on our reacher.h5; Minghao's GitHub-issue lead).**
+  10,000 episodes x 201 steps = 2,010,000; one NaN action row per episode (boundary marker, 0.50%). Both action
+  dims on 100k rows: min -1 / max +1, mean 0.00, std 0.577 (= 1/sqrt(3), the std of U(-1,1)), 10-bin histogram
+  exactly [0.1]x10 (uniformity 1.00); lag-1 autocorrelation within episodes +0.004 / -0.003; max |corr(action,
+  any qpos/qvel component)| 0.003 / 0.002. The actions are i.i.d. uniform on [-1,1]^2 at every step, independent
+  of state AND time: a random policy exactly, not "roughly". READS: (a) the marginal p(a) carries no policy to
+  imitate, which is why random-candidate search already scores 95-99 on reacher and the policy adds ~5; (b) the
+  mse-noreg collapse's "act flat at 1.52" is the flow velocity loss at its floor (the target a - eps has no
+  conditional structure once the latent is dead, and its noise term dominates the gradient before that); (c)
+  under hindsight goals E[a | s, g] IS state-dependent (the actions that happened to move toward g), a legitimate
+  reaching action that an MSE head regresses directly with no noise term, while a flow SAMPLE from that broad
+  conditional is mostly noise. Owner's hypothesis: this is flow matching's problem on reacher relative to a pure
+  MSE policy. Proposed arm: the collapsed mse-noreg reacher recipe (384 throughout = the trainer defaults; it set
+  no width flags) with the policy head swapped to mse. Reference points on reacher at 384: flow policy + noreg =
+  collapse by ep 10; flow policy + SIGReg (R1) = reactive 92.0 alive.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
