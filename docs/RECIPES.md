@@ -816,6 +816,22 @@ beside each checkpoint.
     gr_pusht_s5f192    mf-b92508e8 98805bc4f2b9e1f9   (flow; the 384 flow head planned 72/70 at 1 state)
     tc_toolhang_s5m192 mf-442d0bb8 e89070d6f0fc7e39   (TC recipe, train-only; board reactive eval via jf_tc_ev_96618d4.sh; ref 86.7)
     tc_toolhang_s5f192 mf-dc94a415 a3c413eb7272a685   (flow; the 384 flow head was 86.0 vs mse 80.7 reactive)
+  RESULT pusht GR (2026-09-05, 3 seeds/N=50; JFGC/JFROLL/JFROLLRAND = reactive/best-of-K/random-candidate):
+    s5m192 (mse):  JFGC 70/78/66 = 71.3   JFROLL 72/86/72 = 76.7   JFGRAD <eval bug>   JFROLLRAND 40/50/38 = 42.7
+    s5f192 (flow): JFGC 64/72/64 = 66.7   JFROLL 64/68/62 = 64.7   JFGRAD <eval bug>   JFROLLRAND 22/18/22 = 20.7
+    CLEAN INTERNAL READ (both arms identical but the state head): flow < mse on EVERY working metric --
+    reactive 66.7<71.3, best-of-K 64.7<76.7, random 20.7<42.7 (the low random = flow degraded the dynamics/action
+    prior). vs the 1-state baseline (~70.0 reactive): mse 71.3 = NEUTRAL (state-chunk supervision neither helps nor
+    hurts the mse trunk on pusht GR), flow 66.7 = HURTS. So on pusht GR the 5-state target does not improve the
+    trunk, and mse is the head to keep. Matches the toolhang TC training proxy (flow val act 0.334 >> mse 0.277).
+  BOTH TC TOOLHANG ARMS TRAIN_OK (mse val act 0.277 / state 0.00095, flow val act 0.334 / state 0.0127; 1-state
+    goal-blind was ~0.253). Board eval PENDING owner go, wall-safe shard required (full_traj ~80min/seed x3 > 3h).
+  JFGRAD FAILED all 6 (both arms x 3 seeds), NOT stochastic: RuntimeError at motflow.py:300 forward_tokens,
+    'a (5) must match b (25) at dim 1'. The gradient planner _rollout_cost_grad -> imagine_step (gip.py:2015) hands
+    imagine_step fs=5 clean actions, but num_states=5 makes n_clean=25 (num_states*fs). num_states>1 specific (the
+    1-state planner matched because n_clean=fs=5). Reactive/best-of-K/random call the sampler with the full block,
+    so they pass. Not a supervision-signal issue -- a planner path that assumes n_clean=fs. FIX = feed imagine_step
+    the full 25-action block (or add a single-block imagine mode). NOT fixed; offered to owner.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
