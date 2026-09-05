@@ -744,6 +744,9 @@ beside each checkpoint.
   goal-conditioned eval on the synced checkpoint through jf_tcgc_ev_96618d4.sh (jointflow_gc + full_traj on
   the cube eval split, 3 x 50 -- the 95.3 protocol; mkdir fix added): tcgc_ev_tc_cube_gcf_nm192_s42
   mf-39fc73be 7421b9461bb9facf. References: jointflow-class gcf 95.3 {96,96,94}; cube DP unmeasured (GC todo).
+  RESULT: cube goal-conditioned TC, MoT mse+noreg 192 throughout (16.9M), 75 ep: 96.0 {94,98,96} (eval 08:50-09:08,
+  ~9 min per 50 episodes). Matches the jointflow-class 95.3; the final wave's TC side is complete: toolhang 86.7,
+  drawer 68.7, transport 84.7 (goal-blind), cube 96.0 (goal-conditioned).
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
