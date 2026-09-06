@@ -979,6 +979,22 @@ byte_ad_audit preload_cache, eval reads wf8/train/<cell>.h5). [[cell-protocol-ma
     the entry jf_gr_reacher_msehead_63d58f5.sh (disk guard + DISK_T sampling + fail-fast), progress_watch.sh.
     When the new reacher.h5 lands: rebuild its preload cache first (the fp16 fs5 strided cache is dataset-
     specific), re-probe the action distribution, then re-propose the arm against a same-width reference.
+  FIXED REACHER DATA LANDED (2026-09-06; Minghao's handoff commit 49079aa = swm/ReacherVisibleTargetDMControl-v0 +
+  configs/eval/reacher_policy.yaml, registered in eval.py/eval_gip.py; data wf8/train/reacher_policy.h5 75.6 GB at
+  03:46; cache preload_cache/reacher_policy/reacher_policy_fs5_i224.* built 11:48-12:27 by the workspace worker:
+  506,632 frames / 489,128 samples / 17,504 episodes, 152.5 GB fp16; the trainer resolves --dataset_name
+  reacher_policy.h5 to exactly that path). RE-PROBED (100k rows): 17,504 episodes of 64-350 steps (mean 143),
+  success-terminated (n_eps_no_success 0); action std 0.47/0.46, center-peaked histogram (old: 0.577 = U(-1,1),
+  flat); lag-1 autocorr +0.97 (old 0.00); max |corr(action, qpos/qvel)| 0.90/0.81 (old 0.00); target_pos = one fixed
+  visible target per episode. A REAL policy: the random-policy problem is gone, and the flow-vs-mse policy-head
+  question loses its original motivation. PROTOCOL: the new config keeps the SAME constants as reacher (num_eval
+  50, goal_offset 25, eval_budget 50, action_block 5; goals drawn from the policy dataset itself); it changes only
+  the env (the DMC target geom is kept visible and restored per episode from target_pos via a set_task_target_pos
+  callable; the official qpos_match predicate is unchanged) -- Minghao's note: a CEM run on the new data through
+  the old hidden-target env scored GR 16.7 because every live frame after step 1 left the dataset's visual
+  domain. So the redone row IS protocol-comparable to the old reacher rows; the data and the env differ. Not yet
+  on disk: an a2f copy (not needed by jobs) and a wf8/eval split (the reacher entries link the train file for
+  eval, as before). Redo unblocked pending the owner's go.
 - **FAILURE/SUCCESS VIDEOS, transport + drawer AS GR (owner 2026-09-06: "Just go reactive for now"; "give a couple
   samples of success too (they could be from degenerate goals) -- not only assess our policy, but whether GR makes
   sense even for these datasets").** Provenance of the table rows: grev jobs tagged nm192a (reactive / best-of-K /
