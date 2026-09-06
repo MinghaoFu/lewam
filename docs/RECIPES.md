@@ -119,7 +119,13 @@ specifically, replace them with pure sigreg (no projected)")
   `train_jointflow.py:436-438`), launched once the noreg arms were verified training (owner's conditional go):
     th_fx_msig192 (mse, pw_zp)   job 68eae863917763ce  caption mf-a38edabb   submitted 17:08 (toolhang noreg at ep 11, val zstd 0.17 / 0.055)
     th_fx_mflsig192 (flow, pw_zp) job a08082cbb2c709a4  caption mf-000f1c4f   submitted 17:08
-    pusht pw_zp pair: after the pusht noreg arms show healthy epochs (TRAIN_BEGIN 17:05, 71G u8 preload first).
+    pu_fx_sig192 (mse, pw_zp)    job f2f74cfcf94bbf0b  caption mf-ae6704c0   submitted 17:42 (pusht noreg at ep 4/50, 21 H100 free)
+    pu_fx_flsig192 (flow, pw_zp) job 0e140cc23b34c43d  caption mf-c6607e1b   submitted 17:42
+  Wave 1 = 8/8 arms launched by 17:42. Pusht noreg pace 6.4 min/epoch (TRAIN_OK ~22:40); toolhang noreg 89 s/epoch
+  (~19:45), toolhang pw_zp 111-117 s/epoch (~21:00). Early trend (epoch 4, pusht): mse-noreg act 0.741 / val 0.683,
+  val zstd 0.241, no train/val gap; flow-noreg act 0.822 / val 1.349, state 0.044 / val 0.395, val zstd 0.056 --
+  the SAME early pattern the old (pre-fix) pusht flow arm s5f192 showed (val act 1.3-1.6 vs train 0.8-1.0, val state
+  0.5-2.0), i.e. the flow state head's known behaviour on pusht's small latent, not something the fix introduced.
   Ranking assumed (owner): noreg > pw_zp (guaranteed no collapse) > plain SIGReg. Collapse fallback = a noreg arm
   that trips the zstd floor (COLLAPSE_KILL) is resubmitted as plain SIGReg `--w_reg 0.04 --sigreg_proj_dim 0` (no
   projection, no policy view; identity at `train_jointflow.py:524`); the pw_zp arms run regardless.
