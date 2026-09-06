@@ -68,18 +68,28 @@ def collect(ckpts_root, arm_prefix):
     sources = {}          # (cell, arm, tag) -> [file:line]
     timings = {}          # (cell, arm, tag) -> [timing dict]
     gr_dir_identity = {}  # GR dir -> (cell, arm), learned from its result lines
-    log_dirs = sorted(ckpts_root.glob("jointflow_gr_*")) + [ckpts_root / "jointflow_tc"]
+    grev_identity = {}    # standalone-eval (jf_grev) "<cell>_<tag>" -> (cell, arm), learned from its result lines
+    log_dirs = sorted(ckpts_root.glob("jointflow_gr_*")) + [ckpts_root / "jointflow_tc", ckpts_root / "jf_grev"]
     for log_dir in log_dirs:
         if not log_dir.is_dir():
             continue
         in_tc_dir = log_dir.name == "jointflow_tc"
+        in_grev_dir = log_dir.name == "jf_grev"
         for log_path in sorted(log_dir.glob("hb_*.log")):
             for line_no, line in enumerate(log_path.read_text(errors="replace").splitlines(), 1):
                 match = RESULT_LINE.match(line)
                 if not match:
                     continue
                 tag, seed, value = match["tag"], int(match["seed"]), float(match["value"])
-                if in_tc_dir:
+                if in_grev_dir:
+                    # standalone GR eval entry: who = grev-<cell>-<ckpt tag>, ckpt tag = <arm>_s<train seed>
+                    who = match["who"].split("-")
+                    cell = who[1] if len(who) == 3 and who[0] == "grev" else None
+                    ckpt_tag = match["arm_or_cell"]
+                    arm = re.sub(r"_s\d+$", "", ckpt_tag)
+                    if cell is not None:
+                        grev_identity[f"{cell}_{ckpt_tag}"] = (cell, arm)
+                elif in_tc_dir:
                     cell = match["arm_or_cell"]
                     arm = tc_arm_from_log_name(log_path.name, cell)
                 else:
@@ -100,7 +110,12 @@ def collect(ckpts_root, arm_prefix):
                     timing = json.loads(line[len(TIMING_LINE):])
                 except json.JSONDecodeError:
                     continue
-                if in_tc_dir:
+                if in_grev_dir:
+                    # ev_<cell>_<ckpt tag>_<mode>_e<seed>.log: match the longest known "<cell>_<ckpt tag>" prefix
+                    known = sorted(grev_identity, key=len, reverse=True)
+                    key_hit = next((k for k in known if log_path.name.startswith(f"ev_{k}_")), None)
+                    cell, arm = grev_identity.get(key_hit, (None, None))
+                elif in_tc_dir:
                     cell = next((c for c in TC_CELLS if log_path.name.startswith(f"ev_tc_{c}_")), None)
                     arm = tc_arm_from_log_name(log_path.name, cell) if cell else None
                 else:

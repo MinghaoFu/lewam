@@ -49,6 +49,10 @@ _ENV_MODULES = {
 }
 
 
+# eval-config callables that push the GOAL into the env; everything else sets the episode's real start state.
+GOAL_METHODS = {"_set_goal_state", "_set_goal_proprio", "set_target_qpos", "set_target_pos", "set_goal_effector"}
+
+
 class GetActionTimer:
     """Planning-time measurement (protocol item 5, design verified 2026-09-06). Wraps policy.get_action.
     Every adapter keeps per-env deques `_action_buffer` and replans, in one batched call, exactly the envs
@@ -343,8 +347,7 @@ def run(cfg: DictConfig):
         _cbs = OmegaConf.to_container(cfg.eval.get("callables"), resolve=True) or []
         # goal-setting callables consume goal_* columns; everything else sets the INIT (task-agnostic:
         # pusht/tworoom use _set_state, reacher/cube use set_state(qpos,qvel)).
-        _GOAL_METHODS = {"_set_goal_state", "set_target_qpos", "set_target_pos"}
-        _init_cbs = [c for c in _cbs if c.get("method") not in _GOAL_METHODS]
+        _init_cbs = [c for c in _cbs if c.get("method") not in GOAL_METHODS]
         _cols = [c for c in dataset.column_names if not str(c).startswith("goal")]
         # Generate random actions the same way the policy does -> un-z-score N(0,1) with the model's
         # action_mean/std. The raw dataset action column can live in a different (larger) space than the
@@ -540,6 +543,18 @@ def run(cfg: DictConfig):
     results_path = Path(swm.data.utils.get_cache_dir(), "gip_eval", mode, cfg.policy)
     results_path.mkdir(parents=True, exist_ok=True)
 
+    # task-completion protocol (owner 2026-09-07): +gip_eval.task_only=true runs each eval-split episode start to
+    # finish (full_traj) and sets NO goal in the env, so the TC wrappers take their no-goal branch and terminate on
+    # the env's own task predicate only (robomimic_gc_env.py:247, dexmimicgen_env.py:302); the harness latch keeps
+    # "ever succeeded". Without the flag the goal callables run as before (goal-match OR task).
+    task_only = bool(cfg.get("gip_eval", {}).get("task_only", False))
+    callables = OmegaConf.to_container(cfg.eval.get("callables"), resolve=True) or []
+    if task_only:
+        assert goal_offsets is not None, "task_only is the start-to-finish protocol: needs +gip_eval.full_traj=true"
+        callables = [c for c in callables if c.get("method") not in GOAL_METHODS]
+        print(f"[GIP] task_only: no goal set in the env -> success = env.is_success()['task'] only; "
+              f"callables {[c.get('method') for c in callables]}", flush=True)
+
     world.set_policy(policy)
     t0 = time.time()
     metrics = world.evaluate(
@@ -549,7 +564,7 @@ def run(cfg: DictConfig):
                      else cfg.eval.goal_offset_steps),
         eval_budget=cfg.eval.eval_budget,
         episodes_idx=episodes,
-        callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
+        callables=callables,
         video=results_path,
     )
     dt = time.time() - t0

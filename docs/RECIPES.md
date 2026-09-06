@@ -175,6 +175,31 @@ files docs/results/wave1/board_wave1_2026-09-06.{md,json})
   Cards: 8 x H100 for ~7 h (16:46 -> 23:57) incl. 8 toolhang eval jobs; nothing collapsed; the plain-SIGReg fallback
   was not needed.
 
+### Wave 2 (owner 2026-09-07 00:30-01:00), same pods/queue/tarball as wave 1, H_max 10 everywhere
+  Decisions: grad_tr 1e-2 for the planner re-run (larger grad_tr = LESS slack; the old grid: pusht free 86.7 >
+  tr 1e-2 84.7, manipulation cells tr only recovers the warm start, saturates by 1e-2); vanilla SIGReg
+  = `--w_reg 0.04 --sigreg_proj_dim 0` (SIGReg on z, no projection, no policy view; smoked on both recipes);
+  transport/drawer at the verbatim 120 epochs (old runs: transport 368 s/epoch = 12.3 h for 4.4x toolhang's
+  frames, drawer 9 h -- compute-bound, the cache is in RAM; val act at ep 60 is +5% vs 120); reacher on the NEW data
+  (reacher_policy, 17,504 real-policy traj) with the two mse arms, fallback if mse-noreg fails = ONE arm, mse state
+  head + mse action head + noreg; if that fails too, leave reacher. tworoom / pointmaze / cube deferred (95-100 SR).
+  NEW TC PROTOCOL (owner + Minghao): start to finish AND the env's own success only -- `+gip_eval.full_traj=true
+  +gip_eval.task_only=true` (eval_gip.py: no goal callables -> the wrappers' no-goal branch, terminated = task_ok
+  only; harness latch = ever succeeded). Applies to toolhang (re-eval of the wave-1 arms), transport, drawer and the
+  DP rows on those cells. The old +50-random-start protocol on transport/drawer had no recorded reason (only
+  toolhang got the full-traj upgrade); the old toolhang numbers counted goal-match OR task.
+  Launched 00:32 (6 x 1 H100): pu_fx_vsig192 ab33b695cd0d9796 mf-048be92c | th_fx_mvsig192 b5694e604619bc21
+  mf-4c31e415 | tr_fx_mnm192 6e59582a023b607a mf-d1093362 | tr_fx_msig192 ec1d77cdcbf6b6d7 mf-eccd6e0e |
+  dr_fx_mnm192 ba7707bdda10ce91 mf-12959844 | dr_fx_msig192 74fc1d50588d395f mf-2e43b669 (all verified running).
+  Reacher pair (rp_fx_nm192 / rp_fx_sig192 on jf_gr_67e20e1b.sh = the GR entry + a reacher_policy cell: u8 cache
+  preload_cache_u8/reacher_policy 76G, eval config reacher_policy with the new h5 linked as reacher.h5) follows
+  the u8 conversion (the first HDFS write died: fuse "Transport endpoint is not connected"; redone via /tmp).
+  Planner re-run (design verified): jf_grev_5cca99f.sh = the standalone GR eval entry on 5cca99f + `steer` mode
+  (Adam 20 x lr 0.02, rho 0.3, K 32) + `gradtr` defaulting to 1e-2 with the plain tag JFGRADTR; ONE job runs the
+  four wave-1 pusht checkpoints in sequence, modes gc,plan,grad,gradtr,steer,cemp,rand, 3 seeds x 50, timing on:
+  job 37ba18c1eeea2d18 mf-fa9d16e1 (00:55). Results land in ckpts/jf_grev/hb_pusht_<arm>_s42.log; the collector
+  reads that dir as its third case.
+
 ### Protocol additions 3 and 5 (design verified by the owner 2026-09-06 "Agree"; implemented the same day)
 - Planning time (item 5): `GetActionTimer` in `scripts/eval_gip.py`, installed on every policy right after
   `build_policy` (before the random-goal clip wrapper). Definitions: `t_call` = wall seconds of one `get_action`
