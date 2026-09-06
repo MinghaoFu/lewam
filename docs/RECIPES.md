@@ -947,6 +947,21 @@ beside each checkpoint.
     TMPDIR, train/eval logs, pip temp and STABLEWM_HOME moved under $WORK on /opt/tiger (where the tarball
     extracted fine); pip --no-cache-dir + cache purge. Results:
     ckpts/jointflow_gr_reacher/hb_gr_reacher_motnm_mse192v2_s42.log.
+  DIAGNOSIS CORRECTED by v2's START diagnostics (same host n124-139-220, fresh container): /, /tmp and /opt/tiger
+    are ONE overlay, 984G with 126G free; /dev/shm 88G free; /tmp held a few hundred KB of platform files. So the
+    host-persistent-/tmp theory was WRONG and the TMPDIR relocation moot. The loader (train_jointflow.py:201-206)
+    is np.load of the whole fp16 .npy into RAM without --cache_mmap (R2 identical): our code writes no local copy.
+    The cache is 410000 x 3x224x224 x fp16 = ~123G, read through the fuse mount; v1 exhausted a 126G-free overlay
+    during exactly that read (a read-through block cache is the obvious mechanism, unproven from the devbox; R2's
+    host simply had more room). v2 carried no disk sampling during the load, so it was killed rather than left to
+    reproduce v1 blind. UNDETECTED-HANG FAILURE (owner, 2026-09-06): v1 sat hung 2 h at 0% GPU with 32 tracebacks
+    in train.log (copied to HDFS every 60 s) while my pollers waited for ep 10 under a 4 h ceiling against a
+    72 min ETA; the owner had to ask. Fix = progress_watch.sh: alarm within 5 min on any Traceback in train.log,
+    on a missed ETA, or on death. [[merlin-ops]]
+  v3 RELAUNCH: gr_reacher_motnm_mse192v3  mf-6f5ffb90  011f2974f8dc2204, same entry in place: MOUNTS (fuse
+    options) at START; FAIL-FAST exit 4 with DISK_TOO_SMALL if the overlay has < 160G free; DISK_T free-disk
+    sample every 5 min during the load; training flags unchanged. Last relaunch: if the guard trips twice, stop
+    and bring the numbers to the owner. Results: ckpts/jointflow_gr_reacher/hb_gr_reacher_motnm_mse192v3_s42.log.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
