@@ -922,6 +922,15 @@ beside each checkpoint.
   random 99.3; R2 pace 4 h 46 min / 50 ep. Proposed arm: the collapsed mse-noreg reacher recipe at 192 (SMALL
   flags) with --mot_action_head mse + --zstd_floor 0.005. Loss readout: the mse floor is the z-scored marginal
   variance 1.0, so act < 1.0 by ep 10 = learning E[a | s, g] (R2's flow act sat at 1.51-1.52 = its floor).
+  LAUNCHED (owner "Go" 2026-09-06): gr_reacher_motnm_mse192  mf-21f8d882  a05ec4ca7a5208bb. Entry
+    jf_gr_reacher_msehead_63d58f5.sh = the nm_c299ee7 entry verbatim + --mot_action_head mse, --zstd_floor 0.005,
+    the 192 flags (z 192 / proj_hidden 384 / d 192 / depth 4 / heads 4), and the rand eval mode; tarball
+    lewam_jointflow_63d58f5.tar.gz; YAML = the R1 reacher pod verbatim (memory 200000, Train, research-guarantee;
+    20 H100 free at submit); seed 42; chained gc/plan/grad/rand x 3 eval seeds x 50 (dm_control 1.0.43). Results:
+    ckpts/jointflow_gr_reacher/hb_gr_reacher_motnm_mse192_s42.log. Expected from R2's pace: ~72 min to ep 10 (the
+    readout: act < 1.0 = learning; TRAIN_COLLAPSED = the latent died under noreg, via the trainer's zstd_floor
+    marker), ~4 h 46 min to TRAIN_OK, evals after. A deterministic policy makes JFROLL == JFGC by construction;
+    read reactive (vs R2 28.7), grad, rand.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
