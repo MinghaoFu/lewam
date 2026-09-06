@@ -79,6 +79,41 @@ class ReacherVisibleTargetDMControlWrapper(ReacherDMControlWrapper):
         physics.named.model.geom_pos["target", ["x", "y"]] = target_pos
         self._set_target_visible(True)
         physics.forward()
+        self._install_wrapped_qpos_match()
+
+    def _install_wrapped_qpos_match(self):
+        """Angle-correct the qpos_match success predicate (2026-09-06 metric fix).
+
+        The stock ``ReacherQPosMatchTask.get_termination`` compares raw qpos. The reacher
+        shoulder is an UNLIMITED hinge and the policy-collected data winds it up to ~3.7 full
+        turns (32.6% of frames beyond +-pi), so an agent that reaches the goal pose the other
+        way round differs by 2*pi*k in qpos and is scored as a failure forever. Fix: wrap the
+        per-joint difference to [-pi, pi] for unlimited joints only; limited joints (the wrist,
+        +-2.95 rad, physically unable to cross +-pi) keep the raw difference, since wrapping
+        them would count opposite-limit poses as matches. Threshold and everything else are
+        unchanged. Installed on the task object of THIS env only -- the legacy hidden-target
+        reacher cell keeps the stock predicate.
+        """
+        task = self.env.task
+        if getattr(task, "_wrapped_qpos_patched", False):
+            return
+        if not hasattr(task, "qpos_threshold"):
+            return  # not the qpos_match task ('easy'/'hard'): nothing to fix
+        threshold = task.qpos_threshold
+
+        def get_termination(physics, _task=task, _thr=threshold):
+            if _task.target_qpos is None:
+                return None
+            limited = np.asarray(physics.model.jnt_limited, dtype=bool)
+            raw = np.abs(np.asarray(physics.data.qpos) - _task.target_qpos)
+            wrapped = np.abs(np.remainder(raw + np.pi, 2.0 * np.pi) - np.pi)
+            diff = np.where(limited, raw, wrapped)
+            if np.all(diff < _thr):
+                return 0.0
+            return None
+
+        task.get_termination = get_termination
+        task._wrapped_qpos_patched = True
 
 
 if ENV_ID not in gym.registry:
