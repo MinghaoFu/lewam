@@ -22,6 +22,99 @@ HARD RULE from the same day (memory design-before-code): no implementation witho
 pseudocode verified first -- the pseudocode review caught a second mismatch (per-stream conditioning would
 have modulated the clean-action tokens) before it shipped.
 
+## Post-fix retrain wave 1 (2026-09-06, tarball 67e20e1) -- launch record and the audits behind it
+
+### Protocol audit (owner TODOs 1-2; read from code, file:line)
+GM = goal-state match against the dataset frame at start+offset; TP = the env's own task predicate.
+- Success is LATCHED on every cell: `stable_worldmodel/world/world.py:543` (`episode_successes |= terminateds`);
+  a succeeded env freezes (`reset_mode='wait'`, `world.py:443`). No cell judges the final frame; no hold
+  requirement (`GOAL_HOLD_K=1` everywhere). Overshooting the goal after reaching it never costs a success.
+- pusht GM: 4-D norm over (agent xy, block xy) < 20 px AND |dangle| < pi/9 (`envs/pusht/env.py:347-355`; the
+  agent pose is inside the rule; `+gip_eval.success=strict` = block only, unused by any jf_* entry). tworoom GM:
+  agent < 16 (`two_room/env.py:272`). pointmaze_large GM: xy < 1.0 (`lewam/envs/pointmaze_env.py:129-139`).
+  reacher / reacher_policy GM: all |qpos - goal qpos| < 0.05 rad (`custom_tasks/reacher.py:27-33`; arm joints only).
+  cube-as-GR GM on the cube only: <= 0.04 m (`cube_env.py:1318-1344`); the end-effector term EXISTS but is inert
+  (`CUBE_EEF_THRESHOLD` defaults to inf, no jf_* entry sets it; `lewam/envs/cube_env.py:33-56`).
+  toolhang / transport / drawer: GM OR TP (`lewam/envs/robomimic_gc_env.py:242-253`, `dexmimicgen_env.py:277-306`),
+  thresholds 0.04 objects / 0.04 eef (toolhang, drawer), 0.04 / 0.10 (transport); the eef is inside the GM term;
+  drawer's eef1 slice is the known-wrong one (`dexmimicgen_env.py:39-44`).
+- "TC" is NOT goal-blind at the env: the goal callables are passed for every gip_eval.mode (`eval_gip.py:490-499`),
+  so a goal-blind policy is scored against a goal it never saw. transport / drawer: goal = +50 raw steps from a
+  random start, so those numbers are mostly a 50-step goal-reach OR task. toolhang (full_traj): goal = terminal
+  frame, so GM ~= TP.
+- GR cells (pusht / tworoom / pointmaze / reacher) are evaluated on the TRAIN h5 (`jf_grev_966463b.sh:35-39`);
+  `--train_split 0.9` holds out decision points, not trajectories. Inherited from the LeWM protocol; say so in the paper.
+- Budgets: 50 raw steps (pusht / tworoom / reacher), 100 (pointmaze / transport / drawer), 2 x (len-1) per episode
+  under full_traj; 50 episodes x eval seeds 42 / 0 / 1; default start sampling is row-uniform over the h5.
+
+### Train/eval audit (owner OQ1): no bug found
+- Pixels: trainer `_IMG_MEAN/_IMG_STD` = ImageNet = eval `img_transform` (`lewam/models/gip.py:40-48`); the goal
+  frame takes the same transform (`eval_gip.py:241`).
+- Actions: z-scored at cache build (`scripts/make_preload_cache.py:162-198`), stats dumped into the checkpoint
+  config (`train_jointflow.py:212, 441`), un-z-scored on the execution path (`gip.py:970-971, 1202`).
+- History padding: repeat-edge + attention mask in training (`train_jointflow.py:258-265`); the adapter left-pads
+  the same way (`gip.py:1196-1200`).
+- Loss masking: action blocks valid while inside the episode (`train_jointflow.py:267-271`); `_masked_mse` divides
+  by the valid count (`motflow.py:366-368`). There is NO goal-relative mask: at h = 1 the second action block is
+  supervised by the demo's continuation past the goal (the overshoot in the videos). Since success is latched the
+  overshoot is free; masking past-goal actions is a design decision, deferred until the wave-1 numbers.
+- HORIZON UNITS (the owner's question): `H_max` is counted in fs-states (anchors), never raw steps, by all three
+  trainers (`train_lewam_gc.py:157`, `train_lewam_unified.py:144-157`, `train_jointflow.py:282-284`) and by the
+  adapters (`gip.py:513-516, 1206, 1353-1355`), so `--H_max 50` = 250 raw steps at fs 5, including for the headline
+  lewam_gc numbers (`train_lewam_gc.py:81-83` keeps one frame per frameskip; `train_lewam_unified.py:197-211`
+  counts prediction steps under both anchor rates; the crossattn/split trainer feeds horizon = 0 and a terminal
+  goal, `train_crossattn.py:184, 297`; the GCIDM / split / unified adapters divide the raw goal offset by the
+  frameskip, `gip.py:852-855, 942-943, 1013-1025`). The owner remembers raw steps ("otherwise the recipe would
+  make no sense"); if so it was the L40S le-wm-repro lineage, unreadable from this machine. The owner meant 50 RAW
+  steps (= 10 fs-states). Measured on the pusht u8 cache index: episodes
+  have 10..50 anchors (mean 25.4, median 25), the tail clamp `h = min(U[1,50], tail)` binds at 100% of decision
+  points, 74% of training samples had the goal ON THE TERMINAL FRAME, effective h median 10 anchors, h >= 25 in 7%,
+  while eval asks for 5 anchors (25 raw) or 10 (50 raw) counting down to 1. toolhang-strided: 27% terminal, mean
+  tail 49.8. Decision: pass `--H_max 10` (fs 5) = 50 raw; no code change -- the flag overrides the entry's
+  `--H_max 50` (argparse last wins) and lands in the checkpoint config, which the adapters read (`gip.py:964`).
+  tworoom would be `--H_max 5`. Draw stays uniform-then-clamped; a uniform-over-the-feasible-range draw was
+  proposed (one line at `train_jointflow.py:282`) and not approved yet.
+
+### Width facts (dumped configs on HDFS)
+pusht board arm `jointflow_gr_pusht_nm192` = 192 throughout (z 192 / proj 384 / d 192 / depth 4 / heads 4).
+toolhang TC `jointflow_tc/tc_toolhang_nm192_s42` = 192 throughout (zstd floor 0.005, 120 ep, batch 64, lr 1e-4,
+warmup 10, 3.1 h on H100); `tc_toolhang_mnm192_s42` = d 192 with z 384 / proj 768 (its launch string never set
+--z_dim). The retrain uses 192 throughout on both cells.
+
+### Wave 1 (owner 2026-09-06: "launch flow noreg and mse noreg directly on pusht, toolhang first (4 arms). If
+they are for sure training and resources allow, stage sigreg flow and mse. If the first 4 fail due to collapse
+specifically, replace them with pure sigreg (no projected)")
+- Code: `code/lewam_jointflow_67e20e1.tar.gz` (git archive of 67e20e1, md5 91235be9f18235863505564a52808f36; vs the
+  63d58f5 tarball: __pycache__ gone, + configs/eval/reacher_policy.yaml, lewam/envs/reacher_visible_target_env.py,
+  .gitignore). Entries `jf_gr_67e20e1.sh` / `jf_tc_67e20e1.sh` / `jf_tc_ev_67e20e1.sh` = the 96618d4 entries
+  verbatim except the tarball line (+ one header line), chmod 444.
+- Verified before submit: the real `train_jointflow.py` CLI on CPU on 2-episode slices of the real toolhang caches
+  (strided GR cache + raw TC cache) x {mse, flow} x {noreg, pw_zp} + a resume run: 9/9 rc 0, finite losses, every
+  checkpoint file written; the toolhang recipe re-smoked at 192 throughout: 2/2; the eval-side loader
+  (`gip.load_jointflow_model` strict load, `encode` on real frames, `sample`, `imagine_step`): 8/8 finite.
+- Pods: 1 x H100, cpu 16, memory 120000, bi_research `compute-23-aliyun.va-cloudnative-aigcp-bi.research-guarantee`
+  (10 H100 free at launch; A100 = 0 in both groups). YAMLs `~/lewam_project/jobs/fix_wave/`, staged by
+  `stage_fix_wave.py` (scratch), submitted through submit_guard.sh.
+- toolhang TC (jf_tc entry: raw cache, 120 ep, batch 64, warmup 10, lr 1e-4, `--w_reg 0 --fp32`, train-only,
+  ckpt `ckpts/jointflow_tc/tc_toolhang_fx_<arm>_s42`), EXTRA = `--model motflow --grad_probe_every 250
+  --zstd_floor 0.005 --z_dim 192 --proj_hidden 384 --d_model 192 --depth 4 --n_heads 4 --mot_state_head {mse|flow}`:
+    th_fx_mnm192 (mse)  job acc3c8e66c52c1a7  caption mf-74825ef5   START 16:46 n124-136-240 H100 (verified)
+    th_fx_mfl192 (flow) job 38216e5ecfaa0682  caption mf-133b6087   START 16:47 n124-112-071 H100 (verified)
+  Evals follow on `jf_tc_ev_67e20e1.sh toolhang tool_hang.h5 toolhang tc_toolhang_fx_<arm>_s42` (board protocol:
+  mode jointflow_policy, full_traj on the eval split), two jobs per arm (`EV_SEEDS="42 0"` then `"1"`; ~80 min per
+  seed; the 3 h util wall cut the board's 3-seed job after two seeds).
+- pusht GR (jf_gr entry: the nm192 recipe + chained gc / best-of-K 32 / grad 50 x 0.05 / random-candidates evals,
+  3 eval seeds x 50; ckpt `ckpts/jointflow_gr_pusht_fx_<arm>/fx_<arm>_s42`): HELD pending the owner's word on
+  `--H_max 10`. EXTRA = `[--mot_state_head flow] --w_reg 0 --H_max 10 --zstd_floor 0.005 --z_dim 192
+  --proj_hidden 384 --d_model 192 --depth 4 --n_heads 4`.
+- SIGReg arms (pw_zp = `--w_reg 0.04 --sep_policy_state`; the projection is automatic at w_reg > 0,
+  `train_jointflow.py:436-438`): staged once the four noreg arms are verified training. Collapse fallback = plain
+  SIGReg `--w_reg 0.04 --sigreg_proj_dim 0` (no projection, no policy view; identity at `train_jointflow.py:524`).
+- Not in wave 1 (sequenced after): the per-get_action timing json, the mean +- std collector, the gradient-TR /
+  SteerMPC / CEM-policy planner rows (they go into the standalone eval entries), goal-relative loss masking,
+  reacher_policy, the other cells.
+- ETA: toolhang 3.1 h train + ~2.7 h eval; pusht 5.5 h train + 17 min chained evals.
+
 ## Dataset scale — trajectories per training set (read from ep_len 2026-09-06; paper-relevant)
 The trainer's --train_split 0.9 partitions DECISION POINTS (randperm of n_starts), NOT trajectories, so every
 episode is trained on; the 10% val holdout is start-points. "Trajectories trained" = the full episode count:
