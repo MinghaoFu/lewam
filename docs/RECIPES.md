@@ -125,6 +125,11 @@ specifically, replace them with pure sigreg (no projected)")
   `train_jointflow.py:436-438`), launched once the noreg arms were verified training (owner's conditional go):
     th_fx_msig192 (mse, pw_zp)   job 68eae863917763ce  caption mf-a38edabb   submitted 17:08 (toolhang noreg at ep 11, val zstd 0.17 / 0.055)
     th_fx_mflsig192 (flow, pw_zp) job a08082cbb2c709a4  caption mf-000f1c4f   submitted 17:08
+        TRAIN_OK mse-pw_zp 20:47: act 0.285 / val 0.271, state 0.0029, reg 1.04, val zstd 0.174 (noreg: 0.094).
+        TRAIN_OK flow-pw_zp 20:47: act 0.343 / val 0.337, state 0.0198, reg 2.47, val zstd 0.068 (noreg: 0.024).
+        No toolhang arm collapsed -> the plain-SIGReg fallback is not needed on toolhang. Evals (20:50-20:52):
+        mse-pw_zp a 36ac9874e8ee30e1 mf-6afffc39, b 09a6a508cf6bd145 mf-df3311dc;
+        flow-pw_zp a f483de8e850e5ebf mf-5ccaadc5, b 551e82a0e51ed5e1 mf-9e1a70eb.
     pu_fx_sig192 (mse, pw_zp)    job f2f74cfcf94bbf0b  caption mf-ae6704c0   submitted 17:42 (pusht noreg at ep 4/50, 21 H100 free)
     pu_fx_flsig192 (flow, pw_zp) job 0e140cc23b34c43d  caption mf-c6607e1b   submitted 17:42
   Wave 1 = 8/8 arms launched by 17:42. Pusht noreg pace 6.4 min/epoch (TRAIN_OK ~22:40); toolhang noreg 89 s/epoch
