@@ -65,7 +65,12 @@ GM = goal-state match against the dataset frame at start+offset; TP = the env's 
   counts prediction steps under both anchor rates; the crossattn/split trainer feeds horizon = 0 and a terminal
   goal, `train_crossattn.py:184, 297`; the GCIDM / split / unified adapters divide the raw goal offset by the
   frameskip, `gip.py:852-855, 942-943, 1013-1025`). The owner remembers raw steps ("otherwise the recipe would
-  make no sense"); if so it was the L40S le-wm-repro lineage, unreadable from this machine. The owner meant 50 RAW
+  make no sense"); if so it was the L40S le-wm-repro lineage, unreadable from this machine. Checked against the
+  counter-hypothesis "obs-step = raw step / h_max // fs somewhere": no occurrence of h_max/H_max in either trainer
+  divides by frameskip (all listed above), and a ROW of their frame tensor is one observation = frameskip raw steps
+  (preloads keep `frames[:n_obs+1]`, `n_obs = L // frameskip`, actions grouped into blocks of frameskip per row).
+  Empirical, on the toolhang caches: strided row k == raw row 5k to |diff| 2e-4 (vs
+  0.2-0.5 against raw row k) for k in {1,2,3,10,20,50}; first episode 136 strided rows vs 676 raw (ratio 4.97). The owner meant 50 RAW
   steps (= 10 fs-states). Measured on the pusht u8 cache index: episodes
   have 10..50 anchors (mean 25.4, median 25), the tail clamp `h = min(U[1,50], tail)` binds at 100% of decision
   points, 74% of training samples had the goal ON THE TERMINAL FRAME, effective h median 10 anchors, h >= 25 in 7%,
