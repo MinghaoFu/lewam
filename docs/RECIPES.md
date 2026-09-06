@@ -962,6 +962,13 @@ beside each checkpoint.
     options) at START; FAIL-FAST exit 4 with DISK_TOO_SMALL if the overlay has < 160G free; DISK_T free-disk
     sample every 5 min during the load; training flags unchanged. Last relaunch: if the guard trips twice, stop
     and bring the numbers to the owner. Results: ckpts/jointflow_gr_reacher/hb_gr_reacher_motnm_mse192v3_s42.log.
+  CANCELLED (owner 2026-09-06 ~10:50, "Minghao says kill. He is fixing reacher data itself"): v3 killed via
+    merlin-cli after passing the disk guard on n124-112-071 (344G free). The reacher.h5 on record is a pure random
+    policy (see REACHER DATA above); Minghao is replacing the data, so no reacher arm runs on the current file.
+    KEPT for the fixed data: the mse ACTION head (63d58f5, --mot_action_head mse, mirror of the mse state head),
+    the entry jf_gr_reacher_msehead_63d58f5.sh (disk guard + DISK_T sampling + fail-fast), progress_watch.sh.
+    When the new reacher.h5 lands: rebuild its preload cache first (the fp16 fs5 strided cache is dataset-
+    specific), re-probe the action distribution, then re-propose the arm against a same-width reference.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
