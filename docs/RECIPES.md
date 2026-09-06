@@ -108,6 +108,9 @@ specifically, replace them with pure sigreg (no projected)")
         (the pre-fix nm192 ended at act 0.277 / state 0.0014). Evals (jf_tc_ev_5cca99f.sh, timing json on):
         a (EV_SEEDS "42 0") job 27185eecece7becd mf-bd9034ab; b (EV_SEEDS "1") job 194c4927eea2db7d mf-186fbd34, 20:01.
     th_fx_mfl192 (flow) job 38216e5ecfaa0682  caption mf-133b6087   START 16:47 n124-112-071 H100 (verified)
+        TRAIN_OK 20:09: ep 120/120 train act 0.318 state 0.0174 zstd 0.025 | val act 0.309 state 0.0153 zstd 0.024
+        (latent scale drifted 0.055 -> 0.024 over training, 5x the 0.005 floor; no collapse kill). Evals:
+        a (EV_SEEDS "42 0") job 825f2f3607e3ed99 mf-bcaf046e; b (EV_SEEDS "1") job 2f1a82e3b1f27dfa mf-3623c2b2, 20:11.
   Evals follow on `jf_tc_ev_67e20e1.sh toolhang tool_hang.h5 toolhang tc_toolhang_fx_<arm>_s42` (board protocol:
   mode jointflow_policy, full_traj on the eval split), two jobs per arm (`EV_SEEDS="42 0"` then `"1"`; ~80 min per
   seed; the 3 h util wall cut the board's 3-seed job after two seeds).
