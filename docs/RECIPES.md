@@ -979,6 +979,21 @@ byte_ad_audit preload_cache, eval reads wf8/train/<cell>.h5). [[cell-protocol-ma
     the entry jf_gr_reacher_msehead_63d58f5.sh (disk guard + DISK_T sampling + fail-fast), progress_watch.sh.
     When the new reacher.h5 lands: rebuild its preload cache first (the fp16 fs5 strided cache is dataset-
     specific), re-probe the action distribution, then re-propose the arm against a same-width reference.
+- **FAILURE/SUCCESS VIDEOS, transport + drawer AS GR (owner 2026-09-06: "Just go reactive for now"; "give a couple
+  samples of success too (they could be from degenerate goals) -- not only assess our policy, but whether GR makes
+  sense even for these datasets").** Provenance of the table rows: grev jobs tagged nm192a (reactive / best-of-K /
+  gradient) and nm192b (random / CEM), heartbeats ckpts/jf_grev/hb_{transport,drawer}_nm192{a,b}.log, weights
+  ckpts/jointflow_gr_<cell>_nm192/nm192_s42; seed-42 reactive = transport 66.0, drawer 40.0. NOTE for the owner's
+  table: transport gradient = 42.0 {38,38,50} on 3 seeds (the 38 in the row is seed 42 alone). Those grev runs
+  already rendered the panel videos (agent | dataset | goal; env_{i}.mp4, one per episode; the 25-29 min per seed
+  includes rendering) and never copied them off the pod; eval_gip prints the episode_successes array to the log, so
+  failures are selectable with no code change. Entry jf_grvid_63d58f5.sh = the grev wiring verbatim (sim stack,
+  DexMG vars, EVAL-split DSARG, staging) + copy all 50 env_*.mp4 and the eval log per cell to
+  ckpts/jointflow_gr_<cell>_nm192/videos_gc_s42/, parse the printed array into failures.json, live-copy the eval
+  log every 60 s (crash visibility), DISK line at START. Job grvid_transport_drawer_nm192 mf-5185dbd2
+  7b1ad614466ec5c7 (Evaluation, memory 120000, research-guarantee, 25 H100 free). Delivery: failure clips + a few
+  successes per cell, plus a per-episode goal-displacement proxy (|start frame - goal panel|) to flag degenerate
+  goals.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
