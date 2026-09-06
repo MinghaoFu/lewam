@@ -107,6 +107,10 @@ specifically, replace them with pure sigreg (no projected)")
         TRAIN_OK 19:59: ep 120/120 train act 0.276 state 0.00128 zstd 0.093 | val act 0.267 state 0.00114 zstd 0.094
         (the pre-fix nm192 ended at act 0.277 / state 0.0014). Evals (jf_tc_ev_5cca99f.sh, timing json on):
         a (EV_SEEDS "42 0") job 27185eecece7becd mf-bd9034ab; b (EV_SEEDS "1") job 194c4927eea2db7d mf-186fbd34, 20:01.
+        FIRST POST-FIX NUMBER 21:16: JFTC toolhang evseed_1 success_rate 88.0 (job b, 70 min; invalidated nm192 row: 86.7).
+        Timing (H100, reactive, 50 envs, full_traj budget 1482): block 6.5 ms amortized (call 76 ms over ~24 envs),
+        episode total 0.96 +- 1.24 s per env, 103.6 replans/env (~518 raw steps), 215 replan calls; eval wall
+        4055 s -> the policy is ~1% of a toolhang eval, the rest is MuJoCo + rendering.
     th_fx_mfl192 (flow) job 38216e5ecfaa0682  caption mf-133b6087   START 16:47 n124-112-071 H100 (verified)
         TRAIN_OK 20:09: ep 120/120 train act 0.318 state 0.0174 zstd 0.025 | val act 0.309 state 0.0153 zstd 0.024
         (latent scale drifted 0.055 -> 0.024 over training, 5x the 0.005 floor; no collapse kill). Evals:
