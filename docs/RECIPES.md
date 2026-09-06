@@ -1,3 +1,13 @@
+## Dataset scale — trajectories per training set (read from ep_len 2026-09-06; paper-relevant)
+The trainer's --train_split 0.9 partitions DECISION POINTS (randperm of n_starts), NOT trajectories, so every
+episode is trained on; the 10% val holdout is start-points. "Trajectories trained" = the full episode count:
+  pusht    18,685 traj  2,336,736 steps (~125/traj)  pusht_expert_train.h5 46GB
+  tworoom  10,000 traj    920,809 steps (~92/traj)   tworoom.h5 13GB
+  reacher  10,000 traj  2,010,000 steps (201/traj)   reacher.h5 99GB (random-policy file, being replaced)
+  cube     10,000 traj  2,010,000 steps (201/traj)   cube_single_expert.h5 102GB (ogbench single-expert)
+Files on the a2f SSD /mnt/hdfs/bi_algo_a2f/minghao.fu/lewam/data/ (devbox-only; training reads the derived
+byte_ad_audit preload_cache, eval reads wf8/train/<cell>.h5). [[cell-protocol-map]]
+
 # Canonical training recipes (set in stone)
 
 Every number on the board traces to one of these recipes. Cite the recipe name when
