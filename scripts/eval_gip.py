@@ -637,6 +637,7 @@ def run(cfg: DictConfig):
                       model_num_actions_pred=getattr(getattr(policy, "model", None), "_jointflow_cfg",
                                                      {}).get("num_actions_pred"),     # the training value
                       eval_budget=int(cfg.eval.eval_budget), full_traj=bool(goal_offsets is not None),
+                      task_only=bool(task_only),
                       gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
                       wall_total_s=float(dt), success_rate=float(metrics.get("success_rate", float("nan"))),
                       note="batched over num_envs; amortized = call seconds / envs served in that call",

@@ -24,14 +24,16 @@ TIMING_LINE = "[timing-json] "
 TC_CELLS = ("toolhang", "transport", "drawer", "cube")
 MODE_LABEL = {"JFGC": "reactive (goal-conditioned)", "JFROLL": "best-of-K", "JFGRAD": "gradient",
               "JFGRADTR": "gradient-TR", "JFSTEER": "SteerMPC", "JFCEM": "CEM", "JFROLLRAND": "random-candidates",
-              "JFTC": "reactive TC (goal-blind)", "JFTCGC": "goal-conditioned TC", "DP": "diffusion policy"}
+              "JFTC": "reactive TC (goal-match OR task; old protocol)", "JFTCTASK": "TC: env success only, start to finish",
+              "JFTCGC": "goal-conditioned TC", "DP": "diffusion policy (old protocol)",
+              "DPTASK": "diffusion policy: env success only, start to finish"}
 TIMING_FIELDS = ("t_block_amortized_mean_s", "t_call_mean_s", "n_replanned_mean", "t_episode_mean_s",
                  "t_episode_std_s", "replans_per_env_mean", "wall_total_s")
 
 
 def tc_arm_from_log_name(log_name, cell):
-    """hb_ev_tc_<cell>_<arm>_s<seed>.log / hb_tc_<cell>_<arm>_s<seed>.log / ev_tc_<cell>_<arm>_s<seed>_e<es>.log -> arm"""
-    name = re.sub(r"^(hb_ev_|hb_|ev_)", "", Path(log_name).stem)
+    """hb_ev_tc_<cell>_<arm>_s<seed>.log / hb_evtask_... (task protocol) / hb_tc_... / ev_tc_..._e<es>.log / evtask_... -> arm"""
+    name = re.sub(r"^(hb_evtask_|hb_ev_|hb_|evtask_|ev_)", "", Path(log_name).stem)
     name = re.sub(r"_e\d+$", "", name)
     name = re.sub(r"[_-]s\d+$", "", name)
     prefix = f"tc_{cell}_"
@@ -51,9 +53,9 @@ def tag_from_timing(timing, in_tc_dir):
     if mode == "jointflow_gc":
         return "JFTCGC" if in_tc_dir else "JFGC"
     if mode == "jointflow_policy":
-        return "JFTC"
+        return "JFTCTASK" if timing.get("task_only") else "JFTC"
     if mode == "dp_policy":
-        return "DP"
+        return "DPTASK" if timing.get("task_only") else "DP"
     if mode == "jointflow_plan":
         if plan_mode == "best_of_k":
             return "JFROLLRAND" if timing.get("plan_random_candidates") else "JFROLL"
@@ -102,7 +104,7 @@ def collect(ckpts_root, arm_prefix):
                 key = (cell, arm, tag)
                 results.setdefault(key, {})[seed] = value          # last line per seed wins
                 sources.setdefault(key, []).append(f"{log_path.name}:{line_no}")
-        for log_path in sorted(log_dir.glob("ev_*.log")):
+        for log_path in sorted(list(log_dir.glob("ev_*.log")) + list(log_dir.glob("evtask_*.log"))):
             for line in log_path.read_text(errors="replace").splitlines():
                 if not line.startswith(TIMING_LINE):
                     continue
@@ -116,7 +118,7 @@ def collect(ckpts_root, arm_prefix):
                     key_hit = next((k for k in known if log_path.name.startswith(f"ev_{k}_")), None)
                     cell, arm = grev_identity.get(key_hit, (None, None))
                 elif in_tc_dir:
-                    cell = next((c for c in TC_CELLS if log_path.name.startswith(f"ev_tc_{c}_")), None)
+                    cell = next((c for c in TC_CELLS if log_path.name.startswith((f"ev_tc_{c}_", f"evtask_tc_{c}_"))), None)
                     arm = tc_arm_from_log_name(log_path.name, cell) if cell else None
                 else:
                     cell, arm = gr_dir_identity.get(log_dir.name, (None, None))
