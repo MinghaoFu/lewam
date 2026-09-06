@@ -5,6 +5,23 @@ launching; deviations must be listed explicitly in the run's config note. Source
 trainer argparse defaults, the launch entries on HDFS `code/`, and the dumped configs
 beside each checkpoint.
 
+## BOARD INVALIDATED 2026-09-06 -- read before citing any number below
+The mse dynamics head (every arm on the board: state_head mse) was trained with its state tokens
+AdaLN-modulated on tau_s ~ U(0,1) and queried at tau_s = 1 at inference (imagine_step / sample); the context
+tokens (history, clean actions, goal) were modulated by a constant tau = 1 in both. Owner: "ALL THE RESULTS
+ARE INVALID." Every planner row (best-of-K, gradient, CEM, random-candidates) ran on that mismatched readout;
+every mse-head checkpoint is a model that was not the one designed. DP rows are unaffected (different model).
+FIX (commit 67e20e1, spec by the owner): tau only for a flow branch, on that branch's slots; the horizon on the
+action slots whenever goal-reaching, regardless of head; NO conditioning on history / goal / clean actions --
+a plain pre-LN transformer everywhere except the conditioned slots (classic AdaLN-Zero there). Guards: block ==
+hand-written reference bit-for-bit; mse readouts independent of every tau; attention mask / layout identical
+through the renames. Old checkpoints do not load on 67e20e1 (module and key names changed); old tarballs remain
+for reading old checkpoints. EVERYTHING on the board is to be retrained on 67e20e1+ before any number is
+cited; the tables below are the historical record of the invalid runs until then.
+HARD RULE from the same day (memory design-before-code): no implementation without the exact design and
+pseudocode verified first -- the pseudocode review caught a second mismatch (per-stream conditioning would
+have modulated the clean-action tokens) before it shipped.
+
 ## Dataset scale — trajectories per training set (read from ep_len 2026-09-06; paper-relevant)
 The trainer's --train_split 0.9 partitions DECISION POINTS (randperm of n_starts), NOT trajectories, so every
 episode is trained on; the 10% val holdout is start-points. "Trajectories trained" = the full episode count:
