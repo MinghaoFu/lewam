@@ -116,11 +116,49 @@ specifically, replace them with pure sigreg (no projected)")
     pu_fx_nm192 (mse)  job a4c959015467f38d  caption mf-d1d52bca
     pu_fx_fl192 (flow) job 260ef01f66b8053b  caption mf-9e11cf78
 - SIGReg arms (pw_zp = `--w_reg 0.04 --sep_policy_state`; the projection is automatic at w_reg > 0,
-  `train_jointflow.py:436-438`): staged once the four noreg arms are verified training. Collapse fallback = plain
-  SIGReg `--w_reg 0.04 --sigreg_proj_dim 0` (no projection, no policy view; identity at `train_jointflow.py:524`).
-- Not in wave 1 (sequenced after): the per-get_action timing json, the mean +- std collector, the gradient-TR /
-  SteerMPC / CEM-policy planner rows (they go into the standalone eval entries), goal-relative loss masking,
-  reacher_policy, the other cells.
+  `train_jointflow.py:436-438`), launched once the noreg arms were verified training (owner's conditional go):
+    th_fx_msig192 (mse, pw_zp)   job 68eae863917763ce  caption mf-a38edabb   submitted 17:08 (toolhang noreg at ep 11, val zstd 0.17 / 0.055)
+    th_fx_mflsig192 (flow, pw_zp) job a08082cbb2c709a4  caption mf-000f1c4f   submitted 17:08
+    pusht pw_zp pair: after the pusht noreg arms show healthy epochs (TRAIN_BEGIN 17:05, 71G u8 preload first).
+  Ranking assumed (owner): noreg > pw_zp (guaranteed no collapse) > plain SIGReg. Collapse fallback = a noreg arm
+  that trips the zstd floor (COLLAPSE_KILL) is resubmitted as plain SIGReg `--w_reg 0.04 --sigreg_proj_dim 0` (no
+  projection, no policy view; identity at `train_jointflow.py:524`); the pw_zp arms run regardless.
+  pusht START lines: fx_nm192 17:03 n124-136-221, fx_fl192 17:03 n124-139-220; TRAIN_BEGIN 17:05 both.
+- Not in the wave-1 TRAINING tarball (sequenced after): the gradient-TR / SteerMPC / CEM-policy planner rows (they
+  go into the standalone eval entries), goal-relative loss masking, reacher_policy, the other cells.
+
+### Protocol additions 3 and 5 (design verified by the owner 2026-09-06 "Agree"; implemented the same day)
+- Planning time (item 5): `GetActionTimer` in `scripts/eval_gip.py`, installed on every policy right after
+  `build_policy` (before the random-goal clip wrapper). Definitions: `t_call` = wall seconds of one `get_action`
+  call, CUDA-synchronized on both sides; block time = mean over replan calls of `t_call / n_replanned` (the
+  batch-amortized cost of one action block; the raw batch `t_call` and `n_replanned` are reported beside it);
+  episode total = per env the sum over its alive calls of `t_call / n_alive`, mean +- std over envs. Replan
+  detection reproduces the adapters' own rule BEFORE the call (deque empty and not terminated, or a harness
+  flush). Output after `world.evaluate`: `results_path/timing_<policy>_seed<seed>.json` (pod-local) and the same
+  json on one stdout line `[timing-json] {...}` plus a human line `[timing] block X ms amortized (call Y ms over
+  N envs) | episode total M +- S s` -- the entries already copy every eval log to HDFS, so no entry changes; the
+  dump is wrapped so a timing bug can never fail an eval. Fields: policy, mode, seed, num_envs, plan_mode, plan_k,
+  grad_steps, grad_lr, grad_tr, pm_K, plan_random_candidates, exec_actions, action_block, horizon_blocks,
+  num_actions_pred, eval_budget, full_traj, gpu, wall_total_s, success_rate, n_calls, n_replan_calls,
+  t_call_mean/std_s, n_replanned_mean, t_block_amortized_mean/std_s, t_episode_mean/std_s, replans_per_env_mean.
+- Mean +- std (item 3): `scripts/collect_board.py --ckpts <root> --arm_prefix fx_` parses the entries' heartbeat
+  result lines (`[stamp] [who] <TAG> <arm|cell> evseed_<s> success_rate: <x>`), keeps arms with the prefix
+  (fx_ = trained on 67e20e1 or later, so the invalidated board never leaks in), last line per seed wins, and
+  reduces each (cell, arm, mode) to per-seed values, n, mean, SAMPLE std (ddof = 1); `[timing-json]` lines from
+  the persisted `ev_*.log` files are averaged over seeds and joined. Writes board.json + board.md.
+- Verification: timer unit test on a fake adapter (first-call replan, refills every `take` steps, a flushed env,
+  a dead env; replan counts equal the adapter's own decisions on all 12 calls, attribution sums exactly, the
+  amortized block time equals the fake's 2 ms/env); collector parser check on the old board's logs reproduces the
+  known lines exactly (pusht nm192 reactive 62/78/70 -> 70.0 +- 8.0, best-of-K 80.7 +- 4.2, gradient 86.7 +- 6.1,
+  random-candidates 39.3 +- 5.0; TC rows parsed; 0 rows for fx_ without crashing); end-to-end CPU run of
+  eval_gip.py on the real pusht harness (2-episode u8 slice -> 2-epoch checkpoint at --H_max 10 -> reactive and
+  best-of-K evals with 2 envs, budget 50): reactive 50 calls / 10 replans, call 82 ms over 2 envs -> block 41.1 ms
+  amortized, episode total 0.44 s, 10 replans per env; best-of-K (K 4, horizon 5 blocks) call 386 ms -> block
+  193 ms, episode total 1.97 s; both `[timing-json]` lines and json files present. The first attempt caught a real
+  scope bug in the dump (`ge` undefined in main; the guard kept the evals alive and printed `[timing] unavailable`)
+  -- fixed before commit; the json's per-replan action count is named `adapter_num_actions` (25 for the planner,
+  10 reactive) beside `model_num_actions_pred` (the training value) so the two are never confused.
+  Both SIGReg toolhang jobs verified running (START heartbeats) by 17:20.
 - ETA: toolhang 3.1 h train + ~2.7 h eval; pusht 5.5 h train + 17 min chained evals.
 
 ## Dataset scale — trajectories per training set (read from ep_len 2026-09-06; paper-relevant)

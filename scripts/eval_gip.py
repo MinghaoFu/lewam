@@ -18,6 +18,7 @@ Example:
 """
 
 import stable_worldmodel.data.formats.hdf5  # HDF5 self-registers on import
+import json
 import os
 
 os.environ["MUJOCO_GL"] = "egl"
@@ -46,6 +47,59 @@ _ENV_MODULES = {
     "swm/RoboMimic-v0": "lewam.envs.robomimic_env",
     "swm/ReacherVisibleTargetDMControl-v0": "lewam.envs.reacher_visible_target_env",
 }
+
+
+class GetActionTimer:
+    """Planning-time measurement (protocol item 5, design verified 2026-09-06). Wraps policy.get_action.
+    Every adapter keeps per-env deques `_action_buffer` and replans, in one batched call, exactly the envs
+    whose deque is empty and are not terminated (or that the harness asked to flush); that rule is
+    reproduced here BEFORE the call to count `n_replanned`. Recorded per call: wall seconds (CUDA-synchronized
+    on both sides), alive envs, replanned envs. Attribution: each alive env gets seconds / n_alive of every
+    call (`time_per_env` = the per-episode total, one episode per env); the block time is seconds /
+    n_replanned over replan calls (batch-amortized cost of producing one action block)."""
+
+    def __init__(self, policy, num_envs, cuda):
+        self.policy, self.num_envs, self.cuda = policy, int(num_envs), bool(cuda)
+        self.calls = []                                        # (seconds, n_alive, n_replanned)
+        self.time_per_env = np.zeros(self.num_envs)
+        self.replans_per_env = np.zeros(self.num_envs, dtype=int)
+        self._orig_get_action = policy.get_action
+        policy.get_action = self.__call__
+
+    def __call__(self, info_dict, **kwargs):
+        terminated = info_dict.get("terminated")
+        dead = (np.asarray(terminated, dtype=bool).reshape(-1) if terminated is not None
+                else np.zeros(self.num_envs, dtype=bool))
+        flush = info_dict.get("_needs_flush")                  # peek only; the adapter pops it
+        buffers = getattr(self.policy, "_action_buffer", None)  # None before the first call: everyone replans
+        alive = [i for i in range(self.num_envs) if not dead[i]]
+        replan = [i for i in alive if buffers is None or len(buffers[i]) == 0
+                  or (flush is not None and bool(flush[i]))]
+        if self.cuda:
+            torch.cuda.synchronize()
+        t_start = time.perf_counter()
+        out = self._orig_get_action(info_dict, **kwargs)
+        if self.cuda:
+            torch.cuda.synchronize()
+        seconds = time.perf_counter() - t_start
+        self.calls.append((seconds, len(alive), len(replan)))
+        if alive:
+            self.time_per_env[alive] += seconds / len(alive)
+        self.replans_per_env[replan] += 1
+        return out
+
+    def summary(self):
+        calls = np.asarray(self.calls, dtype=float).reshape(-1, 3)
+        replan_calls = calls[calls[:, 2] > 0]
+        per_block = replan_calls[:, 0] / replan_calls[:, 2] if len(replan_calls) else np.zeros(0)
+        std = lambda x: float(np.std(x, ddof=1)) if len(x) > 1 else float("nan")
+        mean = lambda x: float(np.mean(x)) if len(x) else float("nan")
+        return dict(n_calls=int(len(calls)), n_replan_calls=int(len(replan_calls)),
+                    t_call_mean_s=mean(replan_calls[:, 0]), t_call_std_s=std(replan_calls[:, 0]),
+                    n_replanned_mean=mean(replan_calls[:, 2]),
+                    t_block_amortized_mean_s=mean(per_block), t_block_amortized_std_s=std(per_block),
+                    t_episode_mean_s=mean(self.time_per_env), t_episode_std_s=std(self.time_per_env),
+                    replans_per_env_mean=mean(self.replans_per_env))
 
 
 def _register_env(env_name):
@@ -469,6 +523,7 @@ def run(cfg: DictConfig):
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets,
                                   policy_kwargs=_policy_kwargs(cfg, dataset, episodes, starts))
     print(f"[GIP] eval mode={mode} policy={type(policy).__name__}")
+    timer = GetActionTimer(policy, world.num_envs, torch.cuda.is_available())
 
     # random-goal eval: a goal-conditioned policy fed an off-distribution goal can extrapolate to
     # out-of-box actions, which strict-checker envs (tworoom Box[-1,1]) reject -> crash (pusht clips, so
@@ -551,6 +606,34 @@ def run(cfg: DictConfig):
             print(f"[GIP] final-step decomposition unavailable: {_ex}")
     print(f"==== GIP {mode} RESULTS ====")
     print(metrics)
+
+    # planning time (protocol item 5): one json per (policy, seed) beside the videos, and the same json on one
+    # stdout line -- the entries persist this log to HDFS, the results_path is pod-local. Never fatal.
+    try:
+        gip_eval = cfg.get("gip_eval", {})
+        timing = dict(policy=str(cfg.policy), mode=str(mode), seed=int(cfg.seed), num_envs=int(world.num_envs),
+                      plan_mode=gip_eval.get("plan_mode"), plan_k=gip_eval.get("plan_k"),
+                      grad_steps=gip_eval.get("grad_steps"), grad_lr=gip_eval.get("grad_lr"),
+                      grad_tr=gip_eval.get("grad_tr"), pm_K=gip_eval.get("pm_K"),
+                      plan_random_candidates=bool(gip_eval.get("plan_random_candidates", False)),
+                      exec_actions=gip_eval.get("exec_actions"), action_block=int(cfg.plan_config.action_block),
+                      horizon_blocks=getattr(policy, "plan_rollout", None),
+                      adapter_num_actions=getattr(policy, "num_actions", None),      # actions produced per replan
+                      model_num_actions_pred=getattr(getattr(policy, "model", None), "_jointflow_cfg",
+                                                     {}).get("num_actions_pred"),     # the training value
+                      eval_budget=int(cfg.eval.eval_budget), full_traj=bool(goal_offsets is not None),
+                      gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
+                      wall_total_s=float(dt), success_rate=float(metrics.get("success_rate", float("nan"))),
+                      note="batched over num_envs; amortized = call seconds / envs served in that call",
+                      **timer.summary())
+        (results_path / f"timing_{cfg.policy}_seed{int(cfg.seed)}.json").write_text(json.dumps(timing, indent=1))
+        print("[timing-json] " + json.dumps(timing), flush=True)
+        print(f"[timing] block {1e3 * timing['t_block_amortized_mean_s']:.1f} ms amortized "
+              f"(call {1e3 * timing['t_call_mean_s']:.0f} ms over {timing['n_replanned_mean']:.0f} envs) | "
+              f"episode total {timing['t_episode_mean_s']:.2f} +- {timing['t_episode_std_s']:.2f} s | "
+              f"n_envs {timing['num_envs']} replans/env {timing['replans_per_env_mean']:.1f}", flush=True)
+    except Exception as timing_exc:
+        print(f"[timing] unavailable: {timing_exc}", flush=True)
 
     # Dump this shard's successes; a merge step pools them into the global SR.
     if shard_count > 1:
