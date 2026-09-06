@@ -994,6 +994,29 @@ byte_ad_audit preload_cache, eval reads wf8/train/<cell>.h5). [[cell-protocol-ma
   7b1ad614466ec5c7 (Evaluation, memory 120000, research-guarantee, 25 H100 free). Delivery: failure clips + a few
   successes per cell, plus a per-episode goal-displacement proxy (|start frame - goal panel|) to flag degenerate
   goals.
+  RESULT (job 7b1ad614466ec5c7, 11:57-12:54; transport 1517 s, drawer 1786 s; 50/50 clips per cell on HDFS under
+  ckpts/jointflow_gr_<cell>_nm192/videos_gc_s42/ + failures.json + eval log): reproduction EXACT -- transport 66.0
+  (17 failures), drawer 40.0 (30 failures) = the nm192a seed-42 values. Panel geometry (layout_check.png): 736x288,
+  three 224 px panels at x=16+240k, y=16..240, labels below; order agent | dataset | goal. Every episode is exactly
+  100 frames (eval_budget 100); success is LATCHED (ever reached), so a success's last frame need not match the
+  goal. Pixel-proxy metrics per episode (mean |diff| on the panel; agent-vs-h5 comparisons carry a ~12-15 rendering
+  baseline, demo-motion and agent-motion do not); analysis + sheets in
+  /home/tiger/.claude/jobs/5f788414/tmp/vid/<cell>/ (episodes.json, contact_<cell>.png, analyze_vids.py).
+  TRANSPORT: SR by demo-motion tercile = low(<=6.0) 29% | mid 75% | high(>9.3) 94% (n~17 each). 17/50 eval segments
+  are NEAR-STATIC (demo motion < 6: the goal is the start within the tight positional threshold); SR within them
+  29%, EXCLUDING them 85% (n=33). 4/33 successes (12%) are the agent standing still on a static segment (degenerate:
+  ep 40/41/23 +1); 12 failures are static segments where a small precise change is required and the policy holds
+  still (ep 48/28/32) or drifts (ep 24). Motion-segment failures (ep 33/38) are real: the object is carried to the
+  wrong place. corr(demo motion, agent motion) 0.74. READ: the 68.7 row mixes real reaching (85-94 on motion
+  segments) with a thresholded hold-still test on a static third -- GR on transport needs a minimum-displacement
+  filter on the eval segments to measure reaching.
+  DRAWER: SR by tercile = 47 | 31 | 41 (flat; only 5/50 segments near-static -- NOT the static artifact). Failures
+  are real policy failures on multi-stage windows: grasp the mug and lift, never place it in the drawer (ep 21/8);
+  a different configuration (ep 22); spurious motion on a static segment (ep 47: agent 21 vs demo 4). 3/20
+  successes (15%) degenerate (agent static: ep 4/32/34); high-motion successes (ep 36/38) latched mid-episode =
+  genuine. corr 0.57. READ: drawer's goals are diverse and non-trivial (demo motion 1.7-54); 42.7 is a real
+  measure of a weak grasp-and-place policy on partial windows. Delivered: both contact sheets, 10 curated clips,
+  episodes.json. One seed, 50 episodes, pixel proxies: indicative, not the criterion.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
