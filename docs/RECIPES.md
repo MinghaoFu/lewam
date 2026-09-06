@@ -931,6 +931,22 @@ beside each checkpoint.
     readout: act < 1.0 = learning; TRAIN_COLLAPSED = the latent died under noreg, via the trainer's zstd_floor
     marker), ~4 h 46 min to TRAIN_OK, evals after. A deterministic policy makes JFROLL == JFGC by construction;
     read reactive (vs R2 28.7), grad, rand.
+  FAILED AT START (2026-09-06 08:20-10:28, a05ec4ca7a5208bb): ZERO epochs. Startup was line-for-line R2's (same
+    prints, same 8-worker fork), then 32 tracebacks multiprocessing DupFd -> resource_sharer -> mkdtemp ->
+    "OSError: [Errno 28] No space left on device: /tmp/pymp-*": the pod's /tmp had zero bytes when the DataLoader
+    workers' fd-sharing sockets needed a temp dir. Our code stages nothing locally (the cache is read straight from
+    the HDFS preload dir); both entries set TMPDIR=/tmp and num_workers 8; R2's identical path worked. The cause is
+    on the pod side and not visible from the devbox (host n124-139-220 also ran a cube eval yesterday, which
+    installs a sim stack under /tmp: host-persistent /tmp is a HYPOTHESIS, not verified). The main process HUNG on
+    the dead workers (train.log kept being copied) at 0% GPU; killed via merlin-cli runs stop (status killed)
+    instead of waiting for the 3 h util kill. The collapse question was never asked.
+  v2 RELAUNCH (failed-job carve-out; training flags unchanged): gr_reacher_motnm_mse192v2  mf-fded5552
+    f3f6ee996dc15f4b. Same entry edited in place (jf_gr_reacher_msehead_63d58f5.sh; own ARM name so its heartbeat
+    and ckpt dir are separate from the killed run): DISK / TMP_TOP heartbeat lines at START and after env (df of
+    /, /tmp, /opt/tiger, /dev/shm with fstype; top /tmp entries) so any next failure is explained within 3 min;
+    TMPDIR, train/eval logs, pip temp and STABLEWM_HOME moved under $WORK on /opt/tiger (where the tarball
+    extracted fine); pip --no-cache-dir + cache purge. Results:
+    ckpts/jointflow_gr_reacher/hb_gr_reacher_motnm_mse192v2_s42.log.
   TRUST-REGION GRADIENT PLANNING (owner 2026-09-05, "on manipulation the gradient planner becomes
   super exploitative"): the [grad] diagnostics confirm it -- on drawer/transport the refinement moves
   the plan by ||U-U0|| ~ 13 (z-scored, 25-step bimanual plan) and cuts the model cost 6x (0.012 ->
