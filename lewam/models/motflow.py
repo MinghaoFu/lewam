@@ -4,10 +4,10 @@ self-attention over all tokens with a designed mask, so the policy and the dynam
 information only where intended and never through a target.
 
 Tokens
-  state stream : z_hist (history latents, clean), z* (S noisy next-state tokens, or MSE queries),
+  state stream : z_hist (history latents, clean), z* (S state slots: the next-state prediction -- flow-noised tokens or MSE queries),
                  z_g (goal token, optional)
   action stream: a (clean a_1..a_{S*fs}: exactly the actions the state tokens depend on),
-                 a* (A noisy action tokens = the policy's flow)
+                 a* (A action slots: the next-action prediction -- flow-noised tokens or MSE queries)
 
 Attention map (row attends to columns)
   z_hist -> z_hist
@@ -44,44 +44,78 @@ from lewam.models.module import VisionEncoder, GCHeadMSE, sinusoid
 
 
 class MoTBlock(nn.Module):
-    """Two-stream transformer block: per-stream LN-free AdaLN-Zero, QKV, output projection and
-    MLP; a single masked self-attention over the union of tokens."""
+    """Two-stream transformer block with one joint masked self-attention over the union of tokens.
+    Token order: [history | state slots | goal | clean actions | action slots]. The first n_state tokens
+    are the state stream, the rest the action stream; each stream has its own QKV / output / MLP.
+    "Slots" are the tokens where a branch's prediction happens: the state slots hold the next-state
+    prediction, the action slots the next-action prediction. Conditioning is classic AdaLN-Zero (shift,
+    scale, gate for the attention and the MLP sub-layers) and reaches ONLY the slots of a branch that
+    has it: a flow branch's tau, and the horizon on the action slots under goal reaching. Every other
+    token -- history, goal, clean actions -- and every slot without conditioning is the plain pre-LN
+    block: LayerNorm, no shift, no scale, gate 1."""
 
-    def __init__(self, dim, n_heads, mlp_ratio=4, dropout=0.0):
+    def __init__(self, dim, n_heads, cond_state, cond_action, mlp_ratio=4, dropout=0.0):
         super().__init__()
-        self.dim, self.n_heads = dim, n_heads
+        self.dim, self.n_heads, self.attn_dropout = dim, n_heads, dropout
         self.norm_attn = nn.LayerNorm(dim, elementwise_affine=False)
         self.norm_mlp = nn.LayerNorm(dim, elementwise_affine=False)
-        self.qkv = nn.ModuleList([nn.Linear(dim, 3 * dim) for _ in range(2)])
-        self.out = nn.ModuleList([nn.Linear(dim, dim) for _ in range(2)])
-        self.mlp = nn.ModuleList([nn.Sequential(nn.Linear(dim, mlp_ratio * dim), nn.GELU(),
-                                                nn.Dropout(dropout), nn.Linear(mlp_ratio * dim, dim))
-                                  for _ in range(2)])
-        self.ada = nn.ModuleList([nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim)) for _ in range(2)])
-        for a in self.ada:
-            nn.init.zeros_(a[-1].weight)
-            nn.init.zeros_(a[-1].bias)
-        self.attn_dropout = dropout
+        self.qkv_state, self.qkv_action = nn.Linear(dim, 3 * dim), nn.Linear(dim, 3 * dim)
+        self.out_state, self.out_action = nn.Linear(dim, dim), nn.Linear(dim, dim)
+        self.mlp_state, self.mlp_action = self._mlp(dim, mlp_ratio, dropout), self._mlp(dim, mlp_ratio, dropout)
+        self.ada_state = self._adaln_zero(dim) if cond_state else None
+        self.ada_action = self._adaln_zero(dim) if cond_action else None
 
     @staticmethod
-    def _select(stream, out0, out1):
-        return torch.where(stream[None, :, None].bool(), out1, out0)
+    def _mlp(dim, mlp_ratio, dropout):
+        return nn.Sequential(nn.Linear(dim, mlp_ratio * dim), nn.GELU(), nn.Dropout(dropout),
+                             nn.Linear(mlp_ratio * dim, dim))
 
-    def forward(self, x, stream, cond, mask):
-        """x (B, n, dim); stream (n,) 0 = state stream, 1 = action stream; cond (B, n, dim);
-        mask (B, 1, n, n) additive (0 / -inf)."""
+    @staticmethod
+    def _adaln_zero(dim):
+        ada = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
+        nn.init.zeros_(ada[-1].weight)
+        nn.init.zeros_(ada[-1].bias)
+        return ada
+
+    @staticmethod
+    def _pre_norm(norm, x, shift, scale):
+        return norm(x) * (1 + scale) + shift
+
+    def _modulation(self, x, layout, cond_state, cond_action):
+        """The six (B, n, dim) AdaLN tensors -- shift, scale, gate for the attention, then for the mlp.
+        Identity on every token (shift 0, scale 0, gate 1); the slots of a conditioned branch are filled
+        from that branch's AdaLN, whose output is chunked in the same order."""
+        _, state_slots, action_slots = layout
+        shift_attn, scale_attn, gate_attn = torch.zeros_like(x), torch.zeros_like(x), torch.ones_like(x)
+        shift_mlp, scale_mlp, gate_mlp = torch.zeros_like(x), torch.zeros_like(x), torch.ones_like(x)
+        modulations = (shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp)
+        for cond, ada, slots in ((cond_state, self.ada_state, state_slots), (cond_action, self.ada_action, action_slots)):
+            if cond is None:
+                continue
+            for full, slot_values in zip(modulations, ada(cond)[:, None].chunk(6, dim=-1)):
+                full[:, slots] = slot_values
+        return modulations
+
+    @staticmethod
+    def _per_stream(x, n_state, f_state, f_action):
+        return torch.cat([f_state(x[:, :n_state]), f_action(x[:, n_state:])], dim=1)
+
+    def forward(self, x, mask, layout, cond_state, cond_action):
+        """x (B, n, dim); mask (B, 1, n, n) additive (0 / -inf); layout = (n_state, state_slots, action_slots);
+        cond_state / cond_action (B, dim) or None."""
         B, n, d = x.shape
-        gates = self._select(stream, self.ada[0](cond), self.ada[1](cond)).chunk(6, dim=-1)
-        sh_a, sc_a, g_a, sh_m, sc_m, g_m = gates
-        h = self.norm_attn(x) * (1 + sc_a) + sh_a
-        qkv = self._select(stream, self.qkv[0](h), self.qkv[1](h))
+        n_state = layout[0]
+        shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = \
+            self._modulation(x, layout, cond_state, cond_action)
+        h = self._pre_norm(self.norm_attn, x, shift_attn, scale_attn)
+        qkv = self._per_stream(h, n_state, self.qkv_state, self.qkv_action)
         q, k, v = qkv.reshape(B, n, 3, self.n_heads, d // self.n_heads).permute(2, 0, 3, 1, 4)
         att = F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
                                              dropout_p=self.attn_dropout if self.training else 0.0)
         att = att.transpose(1, 2).reshape(B, n, d)
-        x = x + g_a * self._select(stream, self.out[0](att), self.out[1](att))
-        h = self.norm_mlp(x) * (1 + sc_m) + sh_m
-        return x + g_m * self._select(stream, self.mlp[0](h), self.mlp[1](h))
+        x = x + gate_attn * self._per_stream(att, n_state, self.out_state, self.out_action)
+        h = self._pre_norm(self.norm_mlp, x, shift_mlp, scale_mlp)
+        return x + gate_mlp * self._per_stream(h, n_state, self.mlp_state, self.mlp_action)
 
 
 class MoTFlow(nn.Module):
@@ -97,7 +131,7 @@ class MoTFlow(nn.Module):
         self.n_flow_steps = cfg["n_flow_steps"]
         self.dim = cfg["d_model"]
         self.goal_conditioning = bool(cfg.get("goal_conditioning", False))
-        # goal_cond: "token" = goal token in the trunk + horizon AdaLN on the noisy action tokens
+        # goal_cond: "token" = goal token in the trunk + horizon AdaLN on the action slots
         # (the design above); "head" = the trunk never sees goal or horizon, both condition only
         # the GCHeadMSE action readout (owner 2026-09-05). Old checkpoints lack the key -> token.
         self.goal_cond = str(cfg.get("goal_cond", "token"))
@@ -122,7 +156,7 @@ class MoTFlow(nn.Module):
         self.sigreg_proj_dim = int(cfg.get("sigreg_proj_dim", 0))
         self.state_head = str(cfg.get("state_head", "flow"))
         assert self.state_head in ("flow", "mse")
-        # action chunk objective, the mirror of state_head: flow = rectified flow on the noisy slots (sampled);
+        # action chunk objective, the mirror of state_head: flow = rectified flow on the action slots (sampled);
         # mse = regression from a learned query (action_query) read out in one pass at tau one (deterministic,
         # the conditional mean).
         self.action_head = str(cfg.get("action_head", "flow"))
@@ -148,7 +182,7 @@ class MoTFlow(nn.Module):
             "state_prior=prev already anchors the flow at z_t; state_residual is the other way to do that"
         self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
         self.tau_alpha_state = float(cfg.get("tau_alpha_state", 0) or self.tau_alpha)
-        self.n_clean = self.num_states * self.fs
+        self.n_clean_actions = self.num_states * self.fs
 
         self.encoder = VisionEncoder(size=cfg["encoder_size"], output_type="cls",
                                      output_dim=self.z_dim, img_size=cfg["img_size"],
@@ -189,17 +223,19 @@ class MoTFlow(nn.Module):
                 else:
                     nn.init.orthogonal_(self.sigreg_proj.weight)
         self.state_type = nn.Embedding(3, d)                 # 0 history, 1 next-state, 2 goal
-        # action stream embeddings (shared projection for clean and noisy; type tells them apart)
+        # action stream embeddings (shared projection for the clean actions and the action slots; the type embedding tells them apart)
         self.action_in = nn.Linear(self.action_raw_dim, d)
         self.action_pos = nn.Parameter(torch.zeros(1, self.num_actions, d))
         if self.action_head == "mse":       # mirror of state_query; registered only under the mse head so that
             self.action_query = nn.Parameter(torch.randn(1, self.num_actions, d) * 0.02)   # every flow ckpt keeps its layout
-        self.action_type = nn.Embedding(2, d)                # 0 clean, 1 noisy
+        self.action_type = nn.Embedding(2, d)                # 0 clean actions (context), 1 action slots
         # conditioning
         self.tau_in = nn.Linear(d, d)
         if self.goal_cond == "token":
             self.h_in = nn.Linear(d, d)
-        self.blocks = nn.ModuleList(MoTBlock(d, cfg["n_heads"], dropout=cfg["dropout"])
+        self.blocks = nn.ModuleList(MoTBlock(d, cfg["n_heads"], cond_state=(self.state_head == "flow"),
+                                             cond_action=(self.action_head == "flow" or self.goal_token),
+                                             dropout=cfg["dropout"])
                                     for _ in range(cfg["depth"]))
         if self.goal_conditioning and self.goal_cond == "head":
             # jointflow's readout: per-token feature ++ goal latent -> 3 AdaLN-Zero MLP layers
@@ -210,43 +246,47 @@ class MoTFlow(nn.Module):
         self.state_out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, self.z_dim))
 
         # ---- token layout and the attention map (fixed) ----
-        H, S, C, A = self.history_len, self.num_states, self.n_clean, self.num_actions
+        n_hist, n_state_slots = self.history_len, self.num_states
+        n_clean_actions, n_action_slots = self.n_clean_actions, self.num_actions
         idx = {}
-        o = 0
-        idx["hist"] = list(range(o, o + H)); o += H
-        idx["phist"] = list(range(o, o + H)) if self.sep_policy_state else []; o += len(idx["phist"])
-        idx["state"] = list(range(o, o + S)); o += S
-        idx["goal"] = list(range(o, o + 1)) if self.goal_token else []; o += len(idx["goal"])
-        idx["clean"] = list(range(o, o + C)); o += C
-        idx["noisy"] = list(range(o, o + A)); o += A
-        self.n_tokens = o
+        offset = 0
+        idx["hist"] = list(range(offset, offset + n_hist)); offset += n_hist
+        idx["policy_hist"] = list(range(offset, offset + n_hist)) if self.sep_policy_state else []; offset += len(idx["policy_hist"])
+        idx["state_slots"] = list(range(offset, offset + n_state_slots)); offset += n_state_slots
+        idx["goal"] = list(range(offset, offset + 1)) if self.goal_token else []; offset += len(idx["goal"])
+        idx["clean_actions"] = list(range(offset, offset + n_clean_actions)); offset += n_clean_actions
+        idx["action_slots"] = list(range(offset, offset + n_action_slots)); offset += n_action_slots
+        self.n_tokens = offset
         self.idx = idx
-        stream = torch.zeros(o, dtype=torch.long)
-        stream[idx["clean"] + idx["noisy"]] = 1
-        self.register_buffer("stream", stream)
-        allow = torch.zeros(o, o, dtype=torch.bool)
-        hist, st, gl, cl, ny = idx["hist"], idx["state"], idx["goal"], idx["clean"], idx["noisy"]
-        ph = idx["phist"]
-        pol_ctx = ph if self.sep_policy_state else hist    # the history the action branch reads
-        for r in hist:
-            allow[r, hist] = True
-        for r in ph:
-            allow[r, ph] = True
-        for q, r in enumerate(st):
-            allow[r, hist] = True
-            allow[r, st[:q + 1]] = True
-            allow[r, cl[:(q + 1) * self.fs]] = True
-        for r in gl:
-            allow[r, pol_ctx] = True
-            allow[r, gl] = True
-        for j, r in enumerate(cl):
-            allow[r, pol_ctx] = True
-            allow[r, cl[:j + 1]] = True
-        for j, r in enumerate(ny):
-            allow[r, pol_ctx] = True
-            allow[r, gl] = True
-            allow[r, ny[:j + 1]] = True
-        self.register_buffer("allow", allow)
+        # block layout: the state stream is the first n_state tokens; the slots (where each branch's
+        # prediction happens) are the only tokens that can be conditioned
+        state_rows, action_rows = idx["state_slots"], idx["action_slots"]
+        self.layout = ((idx["clean_actions"] + idx["action_slots"])[0],
+                       slice(state_rows[0], state_rows[-1] + 1) if state_rows else slice(0, 0),
+                       slice(action_rows[0], action_rows[-1] + 1))
+        attends = torch.zeros(self.n_tokens, self.n_tokens, dtype=torch.bool)      # attends[row, columns]
+        hist, policy_hist, goal = idx["hist"], idx["policy_hist"], idx["goal"]
+        state_slots, clean_actions, action_slots = idx["state_slots"], idx["clean_actions"], idx["action_slots"]
+        policy_context = policy_hist if self.sep_policy_state else hist    # the history the action branch reads
+        for row in hist:
+            attends[row, hist] = True
+        for row in policy_hist:
+            attends[row, policy_hist] = True
+        for slot_idx, row in enumerate(state_slots):
+            attends[row, hist] = True
+            attends[row, state_slots[:slot_idx + 1]] = True
+            attends[row, clean_actions[:(slot_idx + 1) * self.fs]] = True
+        for row in goal:
+            attends[row, policy_context] = True
+            attends[row, goal] = True
+        for action_idx, row in enumerate(clean_actions):
+            attends[row, policy_context] = True
+            attends[row, clean_actions[:action_idx + 1]] = True
+        for action_idx, row in enumerate(action_slots):
+            attends[row, policy_context] = True
+            attends[row, goal] = True
+            attends[row, action_slots[:action_idx + 1]] = True
+        self.register_buffer("attends", attends)
 
     # ---------------------------------------------------------------- helpers
     def encode(self, pixels):
@@ -255,71 +295,72 @@ class MoTFlow(nn.Module):
     def _mask(self, history_pad):
         """(B, 1, n, n) additive mask: the fixed map, with padded history keys removed."""
         B = history_pad.shape[0]
-        allow = self.allow[None].expand(B, -1, -1).clone()
+        attends = self.attends[None].expand(B, -1, -1).clone()
         if history_pad.any():
             key_pad = torch.zeros(B, self.n_tokens, dtype=torch.bool, device=history_pad.device)
             key_pad[:, self.idx["hist"]] = history_pad
-            if self.idx["phist"]:
-                key_pad[:, self.idx["phist"]] = history_pad
-            allow = allow & ~key_pad[:, None, :]
+            if self.idx["policy_hist"]:
+                key_pad[:, self.idx["policy_hist"]] = history_pad
+            attends = attends & ~key_pad[:, None, :]
         mask = torch.zeros(B, self.n_tokens, self.n_tokens, device=history_pad.device)
-        mask[~allow] = float("-inf")
+        mask[~attends] = float("-inf")
         return mask[:, None]
 
-    def _cond(self, B, tau_a, tau_s, h_norm, device):
+    def _slot_conditioning(self, tau_a, tau_s, h_norm, B, device):
+        """Per-branch conditioning vectors, (B, dim) or None. A tau exists only for a flow branch: tau_s on
+        the state slots, tau_a on the action slots. The horizon conditions the action slots whenever the
+        model is goal reaching (token variant; 0 when no horizon is given). Nothing else is conditioned."""
         d = self.dim
-        one = torch.ones(B, device=device)
-        c_clean = self.tau_in(sinusoid(one, d))
-        cond = c_clean[:, None].expand(B, self.n_tokens, d).clone()
-        cond[:, self.idx["state"]] = self.tau_in(sinusoid(tau_s, d))[:, None]
-        c_noisy = self.tau_in(sinusoid(tau_a, d))
+        cond_state = self.tau_in(sinusoid(tau_s, d)) if self.state_head == "flow" else None
+        cond_action = self.tau_in(sinusoid(tau_a, d)) if self.action_head == "flow" else None
         if self.goal_token:
-            hn = h_norm if h_norm is not None else torch.zeros(B, device=device)
-            c_noisy = c_noisy + self.h_in(sinusoid(hn, d))
-        cond[:, self.idx["noisy"]] = c_noisy[:, None]
-        return cond
+            horizon = h_norm if h_norm is not None else torch.zeros(B, device=device)
+            h = self.h_in(sinusoid(horizon, d))
+            cond_action = h if cond_action is None else cond_action + h
+        return cond_state, cond_action
 
     def forward_tokens(self, z_history, history_pad, clean_actions, noisy_actions, noisy_state,
                        tau_a, tau_s, z_goal=None, h_norm=None, goal_keep=None):
-        """One pass of the stack. clean_actions (B, n_clean, adim) z-scored; noisy_actions
+        """One pass of the stack. clean_actions (B, n_clean_actions, adim) z-scored; noisy_actions
         (B, A, adim) (ignored under the mse action head: a learned query fills the slots);
         noisy_state (B, S, z_dim) (ignored under the mse state head, likewise). Returns
-        (v_action (B, A, adim), state_out (B, S, z_dim))."""
+        (action_pred (B, A, adim), state_pred (B, S, z_dim)): each is the flow velocity under a flow
+        head and the prediction itself under an mse head."""
         B = z_history.shape[0]
         d = self.dim
         x = z_history.new_zeros(B, self.n_tokens, d)
-        st_type = self.state_type.weight
-        x[:, self.idx["hist"]] = self.frame_in(z_history) + self.frame_pos + st_type[0]
+        state_type_embed = self.state_type.weight
+        x[:, self.idx["hist"]] = self.frame_in(z_history) + self.frame_pos + state_type_embed[0]
         if self.sep_policy_state:
-            x[:, self.idx["phist"]] = self.frame_in(self.policy_proj(z_history)) \
-                + self.frame_pos + st_type[0]
+            x[:, self.idx["policy_hist"]] = self.frame_in(self.policy_proj(z_history)) \
+                + self.frame_pos + state_type_embed[0]
         if self.state_head == "mse":
-            x[:, self.idx["state"]] = self.state_query.expand(B, -1, -1) + self.state_pos + st_type[1]
+            x[:, self.idx["state_slots"]] = self.state_query.expand(B, -1, -1) + self.state_pos + state_type_embed[1]
         else:
-            x[:, self.idx["state"]] = self.state_in(noisy_state) + self.state_pos + st_type[1]
+            x[:, self.idx["state_slots"]] = self.state_in(noisy_state) + self.state_pos + state_type_embed[1]
         if self.goal_conditioning and z_goal is not None and self.sep_policy_state:
             z_goal = self.policy_proj(z_goal)          # the policy's view of the goal (both modes)
         if self.goal_token:
-            g = self.goal_in(z_goal)[:, None] if z_goal is not None else self.null_goal.expand(B, -1, -1)
+            goal_embed = self.goal_in(z_goal)[:, None] if z_goal is not None else self.null_goal.expand(B, -1, -1)
             if goal_keep is not None:
-                g = torch.where(goal_keep.view(B, 1, 1), g, self.null_goal.expand(B, -1, -1))
-            x[:, self.idx["goal"]] = g + st_type[2]
-        a_type = self.action_type.weight
-        x[:, self.idx["clean"]] = self.action_in(clean_actions) + self.action_pos[:, :self.n_clean] + a_type[0]
+                goal_embed = torch.where(goal_keep.view(B, 1, 1), goal_embed, self.null_goal.expand(B, -1, -1))
+            x[:, self.idx["goal"]] = goal_embed + state_type_embed[2]
+        action_type_embed = self.action_type.weight
+        x[:, self.idx["clean_actions"]] = self.action_in(clean_actions) + self.action_pos[:, :self.n_clean_actions] + action_type_embed[0]
         if self.action_head == "mse":
-            x[:, self.idx["noisy"]] = self.action_query.expand(B, -1, -1) + self.action_pos + a_type[1]
+            x[:, self.idx["action_slots"]] = self.action_query.expand(B, -1, -1) + self.action_pos + action_type_embed[1]
         else:
-            x[:, self.idx["noisy"]] = self.action_in(noisy_actions) + self.action_pos + a_type[1]
-        cond = self._cond(B, tau_a, tau_s, h_norm, z_history.device)
+            x[:, self.idx["action_slots"]] = self.action_in(noisy_actions) + self.action_pos + action_type_embed[1]
+        cond_state, cond_action = self._slot_conditioning(tau_a, tau_s, h_norm, B, z_history.device)
         mask = self._mask(history_pad)
         for block in self.blocks:
-            x = block(x, self.stream, cond, mask)
-        feat = x[:, self.idx["noisy"]]
+            x = block(x, mask, self.layout, cond_state, cond_action)
+        action_slot_feats = x[:, self.idx["action_slots"]]
         if self.goal_conditioning and self.goal_cond == "head":
-            v_a = self.action_out(feat, z_goal, h_norm, goal_keep)     # goal + horizon enter here only
+            action_pred = self.action_out(action_slot_feats, z_goal, h_norm, goal_keep)     # goal + horizon enter here only
         else:
-            v_a = self.action_out(feat)
-        return v_a, self.state_out(x[:, self.idx["state"]])
+            action_pred = self.action_out(action_slot_feats)
+        return action_pred, self.state_out(x[:, self.idx["state_slots"]])
 
     @staticmethod
     def _masked_mse(pred, target, valid):
@@ -331,31 +372,37 @@ class MoTFlow(nn.Module):
              z_goal=None, h_norm=None, goal_keep=None):
         B = action_target.shape[0]
         dev = action_target.device
-        tau_a = torch.rand(B, device=dev) ** (1.0 / self.tau_alpha)
-        tau_s = self._draw_tau_state(B, dev)
-        noise_a = torch.randn_like(action_target)
-        noisy_a = torch.lerp(noise_a, action_target, tau_a[:, None, None].to(action_target.dtype))
-        clean_a = action_target[:, :self.n_clean]
-        if self.state_prior == "prev":
-            noise_s = z_history[:, -1:].expand_as(state_target).to(state_target.dtype)     # x_0 = z_t
-            if self.state_prior_sigma > 0:
-                noise_s = noise_s + self._prior_scale(z_history) * torch.randn_like(state_target)
+        clean_actions = action_target[:, :self.n_clean_actions]
+        if self.action_head == "flow":                 # a tau and a noisy input exist only for a flow branch
+            tau_a = torch.rand(B, device=dev) ** (1.0 / self.tau_alpha)
+            noise_a = torch.randn_like(action_target)
+            noisy_a = torch.lerp(noise_a, action_target, tau_a[:, None, None].to(action_target.dtype))
         else:
-            noise_s = torch.randn_like(state_target)
-        noisy_s = torch.lerp(noise_s, state_target, tau_s[:, None, None].to(state_target.dtype))
-        v_a, out_s = self.forward_tokens(z_history, history_pad, clean_a, noisy_a, noisy_s,
+            tau_a = noise_a = noisy_a = None
+        if self.state_head == "flow":
+            tau_s = self._draw_tau_state(B, dev)
+            if self.state_prior == "prev":
+                noise_s = z_history[:, -1:].expand_as(state_target).to(state_target.dtype)     # x_0 = z_t
+                if self.state_prior_sigma > 0:
+                    noise_s = noise_s + self._prior_scale(z_history) * torch.randn_like(state_target)
+            else:
+                noise_s = torch.randn_like(state_target)
+            noisy_s = torch.lerp(noise_s, state_target, tau_s[:, None, None].to(state_target.dtype))
+        else:
+            tau_s = noise_s = noisy_s = None
+        action_pred, state_pred = self.forward_tokens(z_history, history_pad, clean_actions, noisy_a, noisy_s,
                                          tau_a, tau_s, z_goal, h_norm, goal_keep)
         if self.action_head == "mse":                       # mirror of the mse state head: regress the chunk itself
-            loss_action = self._masked_mse(v_a, action_target, action_valid)
+            loss_action = self._masked_mse(action_pred, action_target, action_valid)
         else:
-            loss_action = self._masked_mse(v_a, action_target - noise_a, action_valid)
+            loss_action = self._masked_mse(action_pred, action_target - noise_a, action_valid)
         if self.num_states == 0:
             return loss_action, loss_action.new_zeros(())
         if self.state_head == "mse":
-            return loss_action, self._masked_mse(out_s, state_target, state_valid)
+            return loss_action, self._masked_mse(state_pred, state_target, state_valid)
         if self.state_param == "x":
-            out_s = self._x_to_v(out_s, noisy_s, tau_s)
-        return loss_action, self._masked_mse(out_s, state_target - noise_s, state_valid)
+            state_pred = self._x_to_v(state_pred, noisy_s, tau_s)
+        return loss_action, self._masked_mse(state_pred, state_target - noise_s, state_valid)
 
     def _draw_tau_state(self, B, dev):
         if self.state_tau_logit is not None:
@@ -374,13 +421,13 @@ class MoTFlow(nn.Module):
         return (z_hat - x_tau) / denom
 
     # ---------------------------------------------------------------- inference
-    def _state_phase(self, z_history, history_pad, clean_a, noise_state, generator, z_goal, h_norm):
+    def _state_phase(self, z_history, history_pad, clean_actions, noise_state, generator, z_goal, h_norm):
         B = z_history.shape[0]
         dev = z_history.device
-        dummy_a = torch.zeros(B, self.num_actions, self.action_raw_dim, device=dev, dtype=clean_a.dtype)
+        zero_action_slots = torch.zeros(B, self.num_actions, self.action_raw_dim, device=dev, dtype=clean_actions.dtype)
         one = torch.ones(B, device=dev)
         if self.state_head == "mse":
-            _, state = self.forward_tokens(z_history, history_pad, clean_a, dummy_a, None, one, one, z_goal, h_norm)
+            _, state = self.forward_tokens(z_history, history_pad, clean_actions, zero_action_slots, None, one, one, z_goal, h_norm)
         else:
             if self.state_prior == "prev":
                 state = z_history[:, -1:].expand(B, self.num_states, self.z_dim)            # ODE starts at z_t
@@ -393,7 +440,7 @@ class MoTFlow(nn.Module):
                     torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
             for i in range(self.n_flow_steps):
                 tau = torch.full((B,), i / self.n_flow_steps, device=dev)
-                _, v_s = self.forward_tokens(z_history, history_pad, clean_a, dummy_a, state, one, tau, z_goal, h_norm)
+                _, v_s = self.forward_tokens(z_history, history_pad, clean_actions, zero_action_slots, state, one, tau, z_goal, h_norm)
                 if self.state_param == "x":
                     v_s = self._x_to_v(v_s, state, tau)
                 state = state + v_s / self.n_flow_steps
@@ -407,19 +454,19 @@ class MoTFlow(nn.Module):
         dev = z_history.device
         action = noise_action if noise_action is not None else \
             torch.randn(B, self.num_actions, self.action_raw_dim, device=dev, generator=generator)
-        dummy_c = torch.zeros(B, self.n_clean, self.action_raw_dim, device=dev, dtype=action.dtype)
-        dummy_s = torch.zeros(B, self.num_states, self.z_dim, device=dev, dtype=z_history.dtype)
+        zero_clean_actions = torch.zeros(B, self.n_clean_actions, self.action_raw_dim, device=dev, dtype=action.dtype)
+        zero_state_slots = torch.zeros(B, self.num_states, self.z_dim, device=dev, dtype=z_history.dtype)
         one = torch.ones(B, device=dev)
         if self.action_head == "mse":                            # mirror of the mse state head: one pass at tau one
-            action, _ = self.forward_tokens(z_history, history_pad, dummy_c, None, dummy_s, one, one, z_goal, h_norm)
+            action, _ = self.forward_tokens(z_history, history_pad, zero_clean_actions, None, zero_state_slots, one, one, z_goal, h_norm)
         else:
             for i in range(self.n_flow_steps):                  # phase 1: the policy flow
                 tau = torch.full((B,), i / self.n_flow_steps, device=dev)
-                v_a, _ = self.forward_tokens(z_history, history_pad, dummy_c, action, dummy_s, tau, one, z_goal, h_norm)
-                action = action + v_a / self.n_flow_steps
+                action_pred, _ = self.forward_tokens(z_history, history_pad, zero_clean_actions, action, zero_state_slots, tau, one, z_goal, h_norm)
+                action = action + action_pred / self.n_flow_steps
         if self.num_states == 0:
             return action, action.new_zeros(B, 0, self.z_dim)
-        state = self._state_phase(z_history, history_pad, action[:, :self.n_clean], noise_state,
+        state = self._state_phase(z_history, history_pad, action[:, :self.n_clean_actions], noise_state,
                                   generator, z_goal, h_norm)                       # phase 2
         return action, state
 
@@ -429,16 +476,17 @@ class MoTFlow(nn.Module):
 
     def imagine_step(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
         """The MoT's one dynamics primitive, gradients enabled: the state token(s) one block ahead
-        of the history from the CLEAN actions of that block (the first n_clean of `actions`).
+        of the history from the CLEAN actions of that block (the first n_clean_actions of `actions`).
         Differentiable in `actions` (gradient planning) and in the history latents.
-        Accepts a single block (fs actions) as well as the full n_clean: a short input is zero-padded
-        to n_clean, which is inert for the first state token (under the causal map it attends only to
+        Accepts a single block (fs actions) as well as the full n_clean_actions: a short input is zero-padded
+        to n_clean_actions, which is inert for the first state token (under the causal map it attends only to
         its own block's fs clean actions) and that token is what the planners read."""
-        clean = actions[:, :self.n_clean]
-        if clean.shape[1] < self.n_clean:
-            pad = clean.new_zeros(clean.shape[0], self.n_clean - clean.shape[1], clean.shape[2])
-            clean = torch.cat([clean, pad], dim=1)
-        return self._state_phase(z_history, history_pad, clean, noise_state, None, z_goal, h_norm)
+        clean_actions = actions[:, :self.n_clean_actions]
+        if clean_actions.shape[1] < self.n_clean_actions:
+            pad = clean_actions.new_zeros(clean_actions.shape[0], self.n_clean_actions - clean_actions.shape[1],
+                                          clean_actions.shape[2])
+            clean_actions = torch.cat([clean_actions, pad], dim=1)
+        return self._state_phase(z_history, history_pad, clean_actions, noise_state, None, z_goal, h_norm)
 
     @torch.no_grad()
     def predict_state(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
@@ -461,7 +509,7 @@ class MoTFlow(nn.Module):
             return "dynamics"
         if name.startswith("blocks."):
             parts = name.split(".")
-            if len(parts) > 3 and parts[2] in ("qkv", "out", "mlp", "ada") and parts[3] == "0":
+            if len(parts) > 2 and parts[2].endswith("_state"):       # blocks.<i>.<module>_state.*
                 return "dynamics"
         return "policy"
 
