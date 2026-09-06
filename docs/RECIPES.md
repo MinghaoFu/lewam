@@ -148,19 +148,32 @@ specifically, replace them with pure sigreg (no projected)")
 - Not in the wave-1 TRAINING tarball (sequenced after): the gradient-TR / SteerMPC / CEM-policy planner rows (they
   go into the standalone eval entries), goal-relative loss masking, reacher_policy, the other cells.
 
-### Wave-1 board, snapshot 2026-09-06 23:00 (collect_board.py --arm_prefix fx_; mean +- sample std over eval seeds
-42/0/1, 50 episodes each; the invalidated board's value in brackets, for reference only)
-  pusht  fx_nm192 (mse, noreg)   reactive 72.0 +- 5.3 {70,78,68} [70.0] | best-of-K 78.0 +- 2.0 {76,80,78} [80.7]
-                                 | gradient 84.0 +- 7.2 {78,92,82} [86.7] | random-candidates 38.0 +- 6.9 {34,46,34} [39.3]
-  pusht  fx_fl192 (flow, noreg)  reactive 66.0 +- 8.0 {58,74,66} | best-of-K 62.0 +- 6.9 {54,66,66} | gradient: seed 42 = 54 (running)
-  toolhang fx_mnm192 (mse, noreg)     reactive TC 84.7 +- 4.2 {86,80,88} [86.7]   timing: block 5.8 ms amortized, call 81 ms, episode 1.09 s
-  toolhang fx_mfl192 (flow, noreg)    reactive TC 82.0 +- 0.0 {82,82,82}          timing: block 7.8 ms, call 117 ms, episode 1.31 s
-  toolhang fx_msig192 (mse, pw_zp)    reactive TC 80.0 +- 8.5 {86,74} (seed 0 running)   timing: block 4.9 ms, call 80 ms, episode 1.07 s
-  toolhang fx_mflsig192 (flow, pw_zp) reactive TC 90.0 +- 5.7 {86,94} (seed 0 running)   timing: block 14.8 ms, call 122 ms, episode 1.24 s
-  Reads: the conditioning fix leaves the pusht mse-noreg planner ladder intact (72 -> 78 -> 84, random-candidates 38),
-  every cell within one std of the invalidated row; pusht flow-noreg still inverts the ladder (best-of-K < reactive);
-  on toolhang the pw_zp arms do NOT pay the SIGReg penalty the old board showed, and flow-pw_zp leads on two seeds.
-  Pusht timing comes with the eval re-run wave (the chained evals ran on the training tarball 67e20e1).
+### WAVE-1 BOARD, COMPLETE (2026-09-07 00:01; collect_board.py --arm_prefix fx_; mean +- sample std over eval seeds
+42/0/1, 50 episodes each; per-seed in {42,0,1} order; invalidated board's value in [brackets] for reference only;
+files docs/results/wave1/board_wave1_2026-09-06.{md,json})
+  pusht GR (reactive | best-of-K 32 | gradient 50x0.05 | random-candidates):
+    fx_nm192    mse  noreg   72.0 +- 5.3 {70,78,68} [70.0] | 78.0 +- 2.0 {76,80,78} [80.7] | 84.0 +- 7.2 {78,92,82} [86.7] | 38.0 +- 6.9 [39.3]
+    fx_sig192   mse  pw_zp   74.0 +- 9.2 {66,84,72}        | 78.0 +- 10.0 {68,88,78}       | 86.0 +- 9.2 {84,96,78}        | 42.0 +- 4.0
+    fx_fl192    flow noreg   66.0 +- 8.0 {58,74,66}        | 62.0 +- 6.9 {54,66,66}        | 62.0 +- 7.2 {54,64,68}        | 39.3 +- 6.4
+    fx_flsig192 flow pw_zp   74.0 +- 5.3 {68,76,78}        | 76.7 +- 4.2 {72,80,78}        | 72.0 +- 8.7 {62,78,76}        | 34.7 +- 2.3
+  toolhang TC reactive (goal-blind, full_traj on the eval split) + timing (H100, block ms amortized / call ms / episode s):
+    fx_mnm192    mse  noreg   84.7 +- 4.2 {86,80,88} [86.7]   5.8 / 81 / 1.09
+    fx_msig192   mse  pw_zp   82.7 +- 7.6 {86,88,74}          5.5 / 81 / 1.05
+    fx_mfl192    flow noreg   82.0 +- 0.0 {82,82,82}          7.8 / 117 / 1.31
+    fx_mflsig192 flow pw_zp   86.0 +- 8.0 {86,78,94}         12.2 / 121 / 1.25
+  READS (owner OQ2). (1) The conditioning fix did not move the pusht mse-noreg numbers: every cell within one std of
+  the invalidated row, planner ladder intact (72 -> 78 -> 84, random-candidates 38). (2) SIGReg no longer hurts:
+  pusht mse +2 reactive / +2 gradient, toolhang mse -2, flow +4 -- all inside the seed noise (the old board's -16 to
+  -26 was a property of the invalid conditioning). (3) Flow dynamics: flow-noreg is still the weak arm on pusht (66
+  reactive, planners 62/62 = no gain from search); flow + pw_zp recovers the ladder (74 -> 76.7 best-of-K) but the
+  gradient planner does not gain there (72). On toolhang all four arms are within one std (82.0-86.0); flow-pw_zp has
+  the top mean (86.0 +- 8.0) and the best single seed (94). (4) Random-candidates stay at 35-42 everywhere: the policy
+  proposals carry the planners. (5) Best planner on record: pusht mse-pw_zp gradient 86.0 +- 9.2 (seed 0 = 96).
+  (6) Timing (toolhang reactive): 5.5-7.8 ms per action block amortized over ~24 envs (12 ms for flow-pw_zp),
+  ~1.1-1.3 s of policy compute per episode; the sim + rendering dominate the eval wall time (~4000 s per seed).
+  Pusht timing comes with the eval re-run wave (the chained evals ran on the training tarball).
+  Cards: 8 x H100 for ~7 h (16:46 -> 23:57) incl. 8 toolhang eval jobs; nothing collapsed; the plain-SIGReg fallback
+  was not needed.
 
 ### Protocol additions 3 and 5 (design verified by the owner 2026-09-06 "Agree"; implemented the same day)
 - Planning time (item 5): `GetActionTimer` in `scripts/eval_gip.py`, installed on every policy right after
