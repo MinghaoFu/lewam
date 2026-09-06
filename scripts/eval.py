@@ -60,6 +60,7 @@ _ENV_MODULES = {
     "swm/DexMimicGen-v0": "lewam.envs.dexmimicgen_env",
     "swm/PointMaze-v0": "lewam.envs.pointmaze_env",
     "swm/RoboMimic-v0": "lewam.envs.robomimic_env",
+    "swm/ReacherVisibleTargetDMControl-v0": "lewam.envs.reacher_visible_target_env",
 }
 
 

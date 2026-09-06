@@ -1,0 +1,54 @@
+defaults:
+  - launcher: local
+  - solver: cem
+  - _self_
+
+world:
+  env_name: swm/ReacherVisibleTargetDMControl-v0
+  num_envs: ${eval.num_eval}
+  max_episode_steps: ??? # set by the evaluation entry point
+  task: qpos_match
+
+dataset:
+  stats: ${eval.dataset_name}
+  keys_to_cache:
+    - action
+
+seed: 42
+policy: random
+
+plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5
+
+# Policy-collected Reacher-hard evaluation.  The target marker is restored
+# from the initial HDF5 row; qpos_match remains the LeWM success metric.
+eval:
+  num_eval: 50
+  goal_offset_steps: 25
+  eval_budget: 50
+  img_size: 224
+  dataset_name: reacher
+  callables:
+    - method: set_state
+      args:
+        qpos:
+          value: qpos
+        qvel:
+          value: qvel
+
+    - method: set_task_target_pos
+      args:
+        target_pos:
+          value: target_pos
+        goal_target_pos:
+          value: goal_target_pos
+
+    - method: set_target_qpos
+      args:
+        target_qpos:
+          value: goal_qpos
+
+output:
+  filename: dmc_policy_results.txt
