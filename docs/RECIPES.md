@@ -109,9 +109,12 @@ specifically, replace them with pure sigreg (no projected)")
   mode jointflow_policy, full_traj on the eval split), two jobs per arm (`EV_SEEDS="42 0"` then `"1"`; ~80 min per
   seed; the 3 h util wall cut the board's 3-seed job after two seeds).
 - pusht GR (jf_gr entry: the nm192 recipe + chained gc / best-of-K 32 / grad 50 x 0.05 / random-candidates evals,
-  3 eval seeds x 50; ckpt `ckpts/jointflow_gr_pusht_fx_<arm>/fx_<arm>_s42`): HELD pending the owner's word on
-  `--H_max 10`. EXTRA = `[--mot_state_head flow] --w_reg 0 --H_max 10 --zstd_floor 0.005 --z_dim 192
-  --proj_hidden 384 --d_model 192 --depth 4 --n_heads 4`.
+  3 eval seeds x 50; ckpt `ckpts/jointflow_gr_pusht_fx_<arm>/fx_<arm>_s42`), EXTRA = `[--mot_state_head flow]
+  --w_reg 0 --H_max 10 --zstd_floor 0.005 --z_dim 192 --proj_hidden 384 --d_model 192 --depth 4 --n_heads 4`
+  (`--H_max 10` = the owner's stated cap, 50 raw steps = 10 fs-states; launched under the "4 noreg arms" go once the
+  unit question was settled with evidence, 2026-09-06 17:0x):
+    pu_fx_nm192 (mse)  job a4c959015467f38d  caption mf-d1d52bca
+    pu_fx_fl192 (flow) job 260ef01f66b8053b  caption mf-9e11cf78
 - SIGReg arms (pw_zp = `--w_reg 0.04 --sep_policy_state`; the projection is automatic at w_reg > 0,
   `train_jointflow.py:436-438`): staged once the four noreg arms are verified training. Collapse fallback = plain
   SIGReg `--w_reg 0.04 --sigreg_proj_dim 0` (no projection, no policy view; identity at `train_jointflow.py:524`).
