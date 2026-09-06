@@ -148,6 +148,20 @@ specifically, replace them with pure sigreg (no projected)")
 - Not in the wave-1 TRAINING tarball (sequenced after): the gradient-TR / SteerMPC / CEM-policy planner rows (they
   go into the standalone eval entries), goal-relative loss masking, reacher_policy, the other cells.
 
+### Wave-1 board, snapshot 2026-09-06 23:00 (collect_board.py --arm_prefix fx_; mean +- sample std over eval seeds
+42/0/1, 50 episodes each; the invalidated board's value in brackets, for reference only)
+  pusht  fx_nm192 (mse, noreg)   reactive 72.0 +- 5.3 {70,78,68} [70.0] | best-of-K 78.0 +- 2.0 {76,80,78} [80.7]
+                                 | gradient 84.0 +- 7.2 {78,92,82} [86.7] | random-candidates 38.0 +- 6.9 {34,46,34} [39.3]
+  pusht  fx_fl192 (flow, noreg)  reactive 66.0 +- 8.0 {58,74,66} | best-of-K 62.0 +- 6.9 {54,66,66} | gradient: seed 42 = 54 (running)
+  toolhang fx_mnm192 (mse, noreg)     reactive TC 84.7 +- 4.2 {86,80,88} [86.7]   timing: block 5.8 ms amortized, call 81 ms, episode 1.09 s
+  toolhang fx_mfl192 (flow, noreg)    reactive TC 82.0 +- 0.0 {82,82,82}          timing: block 7.8 ms, call 117 ms, episode 1.31 s
+  toolhang fx_msig192 (mse, pw_zp)    reactive TC 80.0 +- 8.5 {86,74} (seed 0 running)   timing: block 4.9 ms, call 80 ms, episode 1.07 s
+  toolhang fx_mflsig192 (flow, pw_zp) reactive TC 90.0 +- 5.7 {86,94} (seed 0 running)   timing: block 14.8 ms, call 122 ms, episode 1.24 s
+  Reads: the conditioning fix leaves the pusht mse-noreg planner ladder intact (72 -> 78 -> 84, random-candidates 38),
+  every cell within one std of the invalidated row; pusht flow-noreg still inverts the ladder (best-of-K < reactive);
+  on toolhang the pw_zp arms do NOT pay the SIGReg penalty the old board showed, and flow-pw_zp leads on two seeds.
+  Pusht timing comes with the eval re-run wave (the chained evals ran on the training tarball 67e20e1).
+
 ### Protocol additions 3 and 5 (design verified by the owner 2026-09-06 "Agree"; implemented the same day)
 - Planning time (item 5): `GetActionTimer` in `scripts/eval_gip.py`, installed on every policy right after
   `build_policy` (before the random-goal clip wrapper). Definitions: `t_call` = wall seconds of one `get_action`
