@@ -104,6 +104,9 @@ specifically, replace them with pure sigreg (no projected)")
   ckpt `ckpts/jointflow_tc/tc_toolhang_fx_<arm>_s42`), EXTRA = `--model motflow --grad_probe_every 250
   --zstd_floor 0.005 --z_dim 192 --proj_hidden 384 --d_model 192 --depth 4 --n_heads 4 --mot_state_head {mse|flow}`:
     th_fx_mnm192 (mse)  job acc3c8e66c52c1a7  caption mf-74825ef5   START 16:46 n124-136-240 H100 (verified)
+        TRAIN_OK 19:59: ep 120/120 train act 0.276 state 0.00128 zstd 0.093 | val act 0.267 state 0.00114 zstd 0.094
+        (the pre-fix nm192 ended at act 0.277 / state 0.0014). Evals (jf_tc_ev_5cca99f.sh, timing json on):
+        a (EV_SEEDS "42 0") job 27185eecece7becd mf-bd9034ab; b (EV_SEEDS "1") job 194c4927eea2db7d mf-186fbd34, 20:01.
     th_fx_mfl192 (flow) job 38216e5ecfaa0682  caption mf-133b6087   START 16:47 n124-112-071 H100 (verified)
   Evals follow on `jf_tc_ev_67e20e1.sh toolhang tool_hang.h5 toolhang tc_toolhang_fx_<arm>_s42` (board protocol:
   mode jointflow_policy, full_traj on the eval split), two jobs per arm (`EV_SEEDS="42 0"` then `"1"`; ~80 min per
