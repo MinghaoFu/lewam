@@ -228,7 +228,10 @@ class DexMimicGenEnv(gym.Env):
             global _EXPERT_CACHE
             if _EXPERT_CACHE is None:
                 with h5py.File(os.environ.get("DEXMG_DS", ""), "r") as f:
-                    _EXPERT_CACHE = (f["action"][:], f["ep_offset"][:])
+                    # the pod copies of the dexmg files carry ep_len, not ep_offset: derive the offsets
+                    ep_off = (f["ep_offset"][:] if "ep_offset" in f
+                              else np.concatenate([[0], np.cumsum(f["ep_len"][:-1])]))
+                    _EXPERT_CACHE = (f["action"][:], ep_off)
             acts, ep_off = _EXPERT_CACHE
             row = int(ep_off[self._ep_idx]) + self._start_step + self._nstep
             if 0 <= row < len(acts):
@@ -277,6 +280,12 @@ class DexMimicGenEnv(gym.Env):
     def step(self, action):
         self._proprio_cache = None          # the sim is about to move
         a = np.asarray(action, np.float64)
+        if _EXPERT_OVERRIDE:
+            # positive control: the demo's recorded action replaces the policy's BEFORE the drop-dims
+            # expansion, so a recorded action stored without the constant dims is expanded like any other
+            ea = self._expert_action()
+            if ea is not None:
+                a = ea
         if self._drop_dims and a.shape[-1] == self._full_adim - len(self._drop_dims):
             full = np.empty(self._full_adim, np.float64)
             keep = [i for i in range(self._full_adim) if i not in self._drop_dims]
@@ -284,10 +293,6 @@ class DexMimicGenEnv(gym.Env):
             for i in self._drop_dims:
                 full[i] = self._fill_val
             a = full
-        if _EXPERT_OVERRIDE:
-            ea = self._expert_action()
-            if ea is not None:
-                a = ea
         if _ACT_LOG:
             try:
                 with open(_ACT_LOG, "a") as fh:

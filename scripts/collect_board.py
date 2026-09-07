@@ -25,15 +25,33 @@ TC_CELLS = ("toolhang", "transport", "drawer", "cube")
 MODE_LABEL = {"JFGC": "reactive (goal-conditioned)", "JFROLL": "best-of-K", "JFGRAD": "gradient",
               "JFGRADTR": "gradient-TR", "JFSTEER": "SteerMPC", "JFCEM": "CEM", "JFROLLRAND": "random-candidates",
               "JFTC": "reactive TC (goal-match OR task; old protocol)", "JFTCTASK": "TC: env success only, start to finish",
-              "JFTCGC": "goal-conditioned TC", "DP": "diffusion policy (old protocol)",
+              "JFTCGC": "goal-conditioned TC (old protocol)", "JFTCGCTASK": "goal-conditioned TC: env success only, start to finish",
+              "DP": "diffusion policy (old protocol)",
               "DPTASK": "diffusion policy: env success only, start to finish"}
 TIMING_FIELDS = ("t_block_amortized_mean_s", "t_call_mean_s", "n_replanned_mean", "t_episode_mean_s",
                  "t_episode_std_s", "replans_per_env_mean", "wall_total_s")
+# owner rule (2026-09-07): every GR cell x arm reports the full planner ladder, 3 seeds, mean +- std
+LADDER = ("JFGC", "JFROLL", "JFGRAD", "JFGRADTR", "JFSTEER", "JFCEM", "JFROLLRAND")
+GR_CELLS = ("pusht", "tworoom", "pointmaze", "pointmaze_large", "reacher", "reacher_policy", "cube")
+N_SEEDS = 3
+
+
+def ladder_gaps(board):
+    """(cell, arm) -> list of 'TAG' (missing) or 'TAG(n=k)' (fewer than N_SEEDS seeds) for the GR cells."""
+    arms = sorted({(e["cell"], e["arm"]) for e in board.values() if e["cell"] in GR_CELLS})
+    have = {(e["cell"], e["arm"], e["tag"]): e["n"] for e in board.values()}
+    gaps = {}
+    for cell, arm in arms:
+        missing = [tag if (cell, arm, tag) not in have else f"{tag}(n={have[(cell, arm, tag)]})"
+                   for tag in LADDER if have.get((cell, arm, tag), 0) < N_SEEDS]
+        if missing:
+            gaps[(cell, arm)] = missing
+    return gaps
 
 
 def tc_arm_from_log_name(log_name, cell):
     """hb_ev_tc_<cell>_<arm>_s<seed>.log / hb_evtask_... (task protocol) / hb_tc_... / ev_tc_..._e<es>.log / evtask_... -> arm"""
-    name = re.sub(r"^(hb_evtask_|hb_ev_|hb_|evtask_|ev_)", "", Path(log_name).stem)
+    name = re.sub(r"^(hb_evtaskgc_|hb_evtask_|hb_ev_|hb_|evtaskgc_|evtask_|ev_)", "", Path(log_name).stem)
     name = re.sub(r"_e\d+$", "", name)
     name = re.sub(r"[_-]s\d+$", "", name)
     prefix = f"tc_{cell}_"
@@ -51,7 +69,9 @@ def gr_cell_from_dir(dir_name, arm):
 def tag_from_timing(timing, in_tc_dir):
     mode, plan_mode = timing.get("mode"), timing.get("plan_mode")
     if mode == "jointflow_gc":
-        return "JFTCGC" if in_tc_dir else "JFGC"
+        if in_tc_dir:
+            return "JFTCGCTASK" if timing.get("task_only") else "JFTCGC"
+        return "JFGC"
     if mode == "jointflow_policy":
         return "JFTCTASK" if timing.get("task_only") else "JFTC"
     if mode == "dp_policy":
@@ -104,7 +124,7 @@ def collect(ckpts_root, arm_prefix):
                 key = (cell, arm, tag)
                 results.setdefault(key, {})[seed] = value          # last line per seed wins
                 sources.setdefault(key, []).append(f"{log_path.name}:{line_no}")
-        for log_path in sorted(list(log_dir.glob("ev_*.log")) + list(log_dir.glob("evtask_*.log"))):
+        for log_path in sorted(list(log_dir.glob("ev_*.log")) + list(log_dir.glob("evtask_*.log")) + list(log_dir.glob("evtaskgc_*.log"))):
             for line in log_path.read_text(errors="replace").splitlines():
                 if not line.startswith(TIMING_LINE):
                     continue
@@ -118,7 +138,7 @@ def collect(ckpts_root, arm_prefix):
                     key_hit = next((k for k in known if log_path.name.startswith(f"ev_{k}_")), None)
                     cell, arm = grev_identity.get(key_hit, (None, None))
                 elif in_tc_dir:
-                    cell = next((c for c in TC_CELLS if log_path.name.startswith((f"ev_tc_{c}_", f"evtask_tc_{c}_"))), None)
+                    cell = next((c for c in TC_CELLS if log_path.name.startswith((f"ev_tc_{c}_", f"evtask_tc_{c}_", f"evtaskgc_tc_{c}_"))), None)
                     arm = tc_arm_from_log_name(log_path.name, cell) if cell else None
                 else:
                     cell, arm = gr_dir_identity.get(log_dir.name, (None, None))
@@ -167,6 +187,10 @@ def main():
     Path(args.out_json).write_text(json.dumps(board, indent=1))
     table = (f"Std = sample std over the eval seeds (ddof = 1); n = seeds. Arms with prefix '{args.arm_prefix}'.\n\n"
              + markdown_table(board))
+    gaps = ladder_gaps(board)
+    if gaps:
+        table += "\n\nINCOMPLETE ladders (GR cells; every arm needs " + ", ".join(LADDER) + f" at n={N_SEEDS}):\n"
+        table += "\n".join(f"- {cell} {arm}: {' '.join(missing)}" for (cell, arm), missing in gaps.items())
     Path(args.out_md).write_text(table + "\n")
     print(table)
     print(f"\n{len(board)} rows -> {args.out_json}, {args.out_md}")

@@ -197,8 +197,224 @@ files docs/results/wave1/board_wave1_2026-09-06.{md,json})
   Planner re-run (design verified): jf_grev_5cca99f.sh = the standalone GR eval entry on 5cca99f + `steer` mode
   (Adam 20 x lr 0.02, rho 0.3, K 32) + `gradtr` defaulting to 1e-2 with the plain tag JFGRADTR; ONE job runs the
   four wave-1 pusht checkpoints in sequence, modes gc,plan,grad,gradtr,steer,cemp,rand, 3 seeds x 50, timing on:
-  job 37ba18c1eeea2d18 mf-fa9d16e1 (00:55). Results land in ckpts/jf_grev/hb_pusht_<arm>_s42.log; the collector
-  reads that dir as its third case.
+  job 37ba18c1eeea2d18 mf-fa9d16e1 (00:55, started 01:05). Results land in ckpts/jf_grev/hb_pusht_<arm>_s42.log;
+  the collector reads that dir as its third case.
+  RE-RUN RESULTS, mse checkpoints (7 rows each, 3 seeds x 50; seconds per seed in parentheses):
+    fx_nm192  reactive 72.7 | best-of-K 78.0 | gradient 83.3 | gradient-TR(1e-2) 78.7 | SteerMPC 80.0 (~450 s) |
+              CEM-policy 80.7 | random 37.3  -- the free gradient planner stays the best row at ~85 s per seed
+    fx_sig192 reactive 74.0 | best-of-K 78.0 | gradient 86.0 | gradient-TR 80.7 | SteerMPC 82.7 | CEM 83.3 | random 40.7
+    (reactive / best-of-K / gradient reproduce the chained evals to +-2 under seeded flow noise)
+  Flow checkpoints: SteerMPC costs 3469 s PER SEED on fx_fl192 (48.0 on seed 42; the planner differentiates through
+  the flow state head's ODE rollout) -> job 37ba18c1eeea2d18 STOPPED at 04:06 via merlin-cli (reason recorded) and
+  the two flow checkpoints resubmitted WITHOUT steer (modes gc,plan,grad,gradtr,cemp,rand; done pairs skipped):
+  job f1b597a96bc3271f mf-2c81e7e9. SteerMPC on the flow checkpoints is available on request (~3 h per checkpoint).
+  RE-RUN COMPLETE 05:02 (docs/results/wave1/board_pusht_planners_2026-09-07.md; cost = policy time per action block
+  amortized over 50 envs, ms / per episode, s):
+    fx_fl192    reactive 66.0 | best-of-K 62.0 | gradient 61.3 | gradient-TR 62.7 | SteerMPC 48 (1 seed) | CEM 59.3 | random 38.0
+    fx_flsig192 reactive 74.7 | best-of-K 76.7 | gradient 72.0 | gradient-TR 76.0 | SteerMPC -- | CEM 76.7 | random 34.7
+    cost mse arms: reactive 5 / 0.05 | best-of-K 20 / 0.13 | gradient 150-340 / 0.6 | gradient-TR 150-190 / 0.6 |
+      SteerMPC 1300-1440 / 7-8 | CEM 30 / 0.17 | random 4;  flow arms: gradient 730-900 / 4.2, CEM 72-82 / 0.5,
+      SteerMPC 9150 / 68 (the planner differentiates through the flow head's ODE rollout).
+    READS: on the mse arms the free gradient planner is the best row (83.3 / 86.0); CEM-policy captures most of its
+    gain (80.7 / 83.3) at 1/6 of the cost; SteerMPC costs 7-9x the gradient planner for less (80.0 / 82.7); the
+    trust region trades points for slack (78.7 / 80.7). Flow arms: no search gain without SIGReg; with pw_zp only the
+    cheap planners help (+2). Random candidates 35-41 everywhere.
+  Reacher pair launched 01:07 on the u8 cache (76,262,301,824 bytes, sizes verified; converted on the devbox to /tmp
+  and copied in 742 s): rp_fx_nm192 857a09a749b98432 mf-8c5dd097 | rp_fx_sig192 27808d2677a9067b mf-cef246c4.
+  rp_fx_nm192 TRAIN_OK 07:01: act 0.695 / val 0.683, val zstd 0.350 (NO collapse on the real-policy data; the old
+  reacher.h5 noreg runs collapsed). Its CHAINED EVALS ALL FAILED in ~30 s: dm_control index.py
+  `AttributeError: 'MjModel' object has no attribute 'flex_bandwidth'` = the pod's dm_control / mujoco pair mismatch;
+  the old reacher entry pinned `dm_control==1.0.43 mujoco==3.10.0` before EVAL_BEGIN, the wave-1 GR entry defines
+  ENVPIN but never applies it, and the reacher_policy cell set none. Checkpoints intact. Evals re-run through the
+  standalone entry jf_grev_5cca99fr.sh (= 5cca99f + a reacher_policy cell with the pin and the reacher.h5 link),
+  one job for both reacher checkpoints once rp_fx_sig192 lands.
+  TASK-PROTOCOL EVALS (tarball b05a7f8 = 67e20e1 model code + the eval-side task_only flag; entries
+  jf_tc_ev_b05a7f8_task.sh (tag JFTCTASK, logs hb_evtask_/evtask_) and dp_ev_cell_b05a7f8_task.sh (tag DPTASK,
+  EV_SEEDS split; DP board artifacts: toolhang wf8_uni/toolhang_dp_noprop/snap_ep120.ckpt, transport
+  wf8_dp/transport/epoch=0120-train_loss=0.0476.ckpt, drawer wf8_dp/drawer/latest.ckpt)):
+    toolhang wave-1 arms, 01:00 (a = seeds 42 0, b = seed 1): mnm192 a43809b3e5c15dcb / b80f917ad9e3e8cd,
+    mfl192 839ef15831bcd788 / 58cbfb73cfafa8eb, msig192 7b7f3a7f86ee1f23 / 5570835175e3b464,
+    mflsig192 c47deeb7188ea09b / 7943691d6aeec37a (all started 01:04-01:05).
+    DP, 01:08: toolhang 04dbc7e870302abb / ec008f619af0c2e1, transport 4f1710828084de27 / 79d7cbde0f6d586c,
+    drawer 99ef84a19c140ec2 / d2bd9a81511374d5.
+    DP OUTCOME by 06:10: toolhang a FINISHED (seed 42 = 58.0, seed 0 = 70.0; 89 min per seed); toolhang b FAILED with
+    an empty heartbeat (never started) -> resubmitted dae3b37ced55042e; drawer b finished (seed 1 = 2.0), drawer a
+    KILLED at the 3 h wall after seed 42 = 4.0 (135 min per seed) -> seed 0 resubmitted alone 0ded4f73e25fa975
+    mf-82e0d743; transport a and b KILLED at the 3 h wall with NO result: one DP transport seed under the
+    start-to-finish protocol exceeds 3 h (816-step budgets, 8x the old protocol's 100, slow diffusion inference).
+    DP transport needs the harness's episode sharding (+gip_eval.shard_count/shard_idx, shard jsons pooled) in a
+    DP entry variant -- proposed, not built. Rule for all transport/drawer evals from here: ONE seed per job.
+    DP drawer start-to-finish COMPLETE 08:44: 4 / 0 / 2 -> 2.0 +- 2.0 (its old +50-protocol row: 52.7).
+    DP toolhang start-to-finish COMPLETE 07:37: 58 / 70 / 76 -> 68.0 +- 9.2 (old row 71.0).
+  TASK-PROTOCOL TOOLHANG ROWS (03:34-03:54; env success only, start to finish; old protocol in brackets):
+    mse-noreg 84.0 +- 4.0 {84,80,88} [84.7] | flow-noreg 80.0 +- 4.0 {80,76,84} [82.0] |
+    mse-pw_zp 80.7 +- 3.1 {84,80,78} [82.7] | flow-pw_zp 84.7 +- 9.5 {88,74,92} [86.0]
+    -> the goal-match term added ~1-2 points on toolhang for our policy (goal = terminal frame there); DP toolhang
+    seed 42 under the task protocol = 58.0 (its old-protocol board row 71.0; ~89 min per DP seed).
+  th_fx_mvsig192 (vanilla SIGReg) TRAIN_OK 03:57: act 0.295 / val 0.277, latent std 0.97; task-protocol evals
+    1db93ad403ef3072 mf-a80cc62c (seeds 42 0), 11d551e1661eb254 mf-3bcea4a6 (seed 1), 04:00. Seed 42 = 78.0; seed 0
+    DIED on that pod with `OSError: [Errno 28] No space left on device: '/tmp/...'` inside robosuite get_xml
+    (node n124-139-213's overlay full; the code path had just passed seed 42) -> seed 0 redone on a fresh pod,
+    job 89f6d1708ee03206 mf-326fe2fc (05:36; the entry's skip guard keeps seed 42). Eval pods with a full /tmp are
+    a retry, not a code failure. The seed-1 job 11d551e1661eb254 FAILED without ever writing a START line (silent
+    scheduling failure, same as the DP toolhang b job) -> seed 1 resubmitted 2a2ae3d081cdb978 mf-7cd188a3 (06:40).
+  PUSHT VANILLA SIGReg (pu_fx_vsig192: mse state head, --w_reg 0.04 --sigreg_proj_dim 0, no policy view; latent std
+  0.97 = unit variance) TRAIN_OK 06:16 (act 0.386 / val 0.366), chained evals 06:20-06:33:
+    reactive 80.0 +- 5.3 {76,86,78} | best-of-K 88.7 +- 3.1 {88,92,86} | gradient 94.0 +- 4.0 {94,98,90} |
+    random-candidates {48,56,..}
+    -> the best pusht row on record: +6 / +11 / +8 over pw_zp (74.0 / 78.0 / 86.0) and +8 / +11 / +10 over noreg;
+    random candidates 48-56 vs 35-42 elsewhere = the unit-variance latent makes the dynamics grade proposals well.
+    The projection and the policy view of pw_zp were the wrong "fix": SIGReg on z itself is what helps.
+  TOOLHANG VANILLA SIGReg, task protocol, complete 07:58: 78 / 84 / 78 -> 80.0 +- 3.5 (noreg 84.0, pw_zp 80.7,
+    flow-noreg 80.0, flow-pw_zp 84.7): the pusht gain does not show in the reactive TC number.
+  DP-T TOOLHANG, task protocol, complete 07:37: 58 / 70 / 76 -> 68.0 +- 9.2 (old-protocol row 71.0).
+  REACHER_POLICY (new data, standalone evals with the dm_control pin, job 0c82b4398e608ab5):
+    fx_nm192 (mse, noreg): reactive 90.0 +- 5.3 {86,96,88} | best-of-K 93.3 +- 4.2 {92,98,90} | gradient 92.0 {90,98,88}
+      | gradient-TR 92.0 {90,98,88} | SteerMPC 92.0 +- 7.2 {86,100,90} | CEM 92.7 {92,98,88} | random-candidates 64.7 {60,72,62}
+      -> no collapse, no fallback needed; random search no longer matches the policy (it scored 95-99 on the old
+      random-policy file, which is what exposed that file).
+    fx_sig192 (mse, pw_zp): reactive 91.3 +- 5.0 {86,96,92} | best-of-K 91.3 {88,98,88} | gradient 90.7 {86,98,88}
+      | gradient-TR 90.7 {86,98,88} | SteerMPC 90.7 +- 4.6 {88,96,88} | CEM 91.3 {88,98,88} | random-candidates 66.7 {64,74,62}   (complete 08:18)
+    -> both reacher arms ~90 reactive, planners +0-3, random 65: the new data behaves like a real policy dataset.
+    SteerMPC was left out of the first standalone job (my omission, owner caught it) and ran as its own job
+    26773f9a58785c79 (mf-1067b65f, 08:57-09:43, ~7 min per seed): level with the rest of the ladder on both arms.
+  PUSHT VANILLA planner re-run COMPLETE 08:10 (job af1319315f29ec59, all 7 modes, timing on):
+    reactive 80.0 {76,86,78} | best-of-K 89.3 {88,94,86} | gradient 94.0 {94,98,90} | gradient-TR 94.7 +- 4.2 {96,98,90}
+    | SteerMPC 92.7 +- 3.1 {92,96,90} | CEM 93.3 +- 4.2 {92,98,90} | random-candidates 50.7 {48,56,48}
+    -> every planner row 6-11 above the same row on pw_zp; the trust region costs nothing here; CEM matches the
+    gradient planner at ~1/6 of its cost (see the timing columns in docs/results/wave1/).
+  Queue note: at 00:55 the research queue showed 8 free H100 but 0 free memory and the re-run job sat queued ~10 min;
+  everything started once wave-2 pods settled. Toolhang vanilla-SIGReg at epoch 10: latent std 0.95 (pw_zp 0.35,
+  noreg 0.17) -- SIGReg on z itself pushes the latent to unit variance.
+  DRAWER BOTH ARMS TRAIN_OK (120 ep, ~9.5 h on 1 H100, 268-288 s/epoch): mse-noreg 10:11 (val act 0.230, state
+  0.00014, zstd 0.048), mse-pw_zp 10:13 (val act 0.228, state 0.00058, zstd 0.121). Task-protocol evals submitted
+  10:20, ONE SEED PER JOB (the 3 h util wall; jf_tc_ev_b05a7f8_task.sh, EV_SPLITS a/b/c = 42/0/1):
+    tc_drawer_fx_mnm192_s42: 1d558fd11bc2fefb mf-6b4b7428 (s42) | fa7ad9dd3c762e24 mf-d388bc05 (s0) | c66feb3fa96b0aa3 mf-afd18b90 (s1)
+    tc_drawer_fx_msig192_s42: d164b2b4d31819e8 mf-d08ef457 (s42) | 2b1cedea59c557d2 mf-5eb990bd (s0) | 1c323f6c5035ac72 mf-c9e5a3d5 (s1)
+    mnm192 s42 (1d558fd11bc2fefb, host n124-137-206) FAILED 10:43 with the known bad-host condition -- the pod's /tmp was
+    full, robosuite get_xml needs a TemporaryDirectory (`OSError: [Errno 28] No space left on device`), zero episodes;
+    resubmitted as 624ab207773261a3 mf-fd882435 (EV_SPLITS d=42) 10:48.
+  DRAWER TASK-PROTOCOL RESULTS (env success only, start to finish; ~136 min per 50-episode seed, same as DP's 135):
+    mse-pw_zp COMPLETE 12:46: 10 / 2 / 4 -> 5.3 +- 4.2      mse-noreg COMPLETE 13:22: 10 / 4 / 4 -> 6.0 +- 3.5
+    -> both jointflow arms sit at the DP floor (DP 2.0 +- 2.0); the old +50-step goal-reach rows (42.7 / 45.3) were a
+    50-step reach, not the cleanup task. Drawer start-to-finish is unsolved by every policy on the board.
+  Transport arms at epoch 80/120 (09:35 / 09:51, zstd 0.07 / 0.12): TRAIN_OK ~13:55 / ~14:20, same eval pattern then.
+  TRANSPORT mse-noreg TRAIN_OK 13:53 (13 h 11 min, 366-389 s/epoch; val act 0.457, state 0.00016, zstd 0.058).
+    Task-protocol evals submitted 14:04, one seed per job: 26fee192f16cb435 mf-5d5a8ba1 (s42) | 3298e87fa09bf9ac
+    mf-0db6d248 (s0) | 69678e9e3b0e7dd9 mf-b48e2a13 (s1). A DP transport seed exceeded the 3 h wall under this
+    protocol; jointflow inference is lighter (drawer: 136 min per seed, same as DP's 135) -- watch for the wall.
+  TRANSPORT mse-pw_zp TRAIN_FAIL 13:50 at epoch ~116/120: `OSError: [Errno 28] No space left on device` writing
+    grad_probe.jsonl under /opt/tiger (the pod's local disk; node-level disk pressure, the failure class seen on the
+    reacher mse-head pods). The synced jointflow_full.pt is intact (191.8 MB, epoch 114, model + optimizer + scheduler,
+    best_val 0.450; verified by loading it on the devbox). The TC entry seeds `$CK/jointflow_full.pt` into the run dir
+    and trains with --resume, so the same job was resubmitted 14:06 as a3ee78491537b259 (same YAML / caption
+    mf-eccd6e0e): resumes at epoch 115, ~50 min incl. the cache preload, then `done` + the three eval jobs.
+    RESUME OK: started 14:08 on another host, RESUME_SEEDED 14:10, TRAIN_OK 14:53 (val act 0.452, state 0.00057,
+    zstd 0.115); task-protocol evals submitted 14:58, one seed per job: 4e373f61cd8f08e1 mf-67200777 (s42) |
+    ff367b4907d64e9f mf-e10ebf33 (s0) | 6dcfbd7a3311b3e2 mf-ab7197c1 (s1).
+  OWNER ~14:55: (1) "Run diagnostics and give me sample vids of failures" (drawer); (2) "ensure results with tworoom and
+  pointmaze have std and you finish out the row (grad tr, cem policy, steermpc). Do this for every planning eval, this
+  is non-negotiable" -> STANDING RULE: every GR cell x arm gets the 7-mode ladder (gc, plan, grad, gradtr, steer, cemp,
+  rand), 3 seeds x 50, reported as mean +- sample std, timing on. Queued ~15:05 through a second launcher
+  (grev_launcher.sh, queue file grev_queue.txt, reserve 3, one job per checkpoint on the standalone entry): the drawer
+  failure-video job first (jf_tc_ev_b05a7f8_vid.sh = the task entry + the harness's env_<i>.mp4 panels copied to
+  ckpts/jointflow_tc/videos_<armdir>_e<seed>/, tag JFTCVID, seed 0 of mse-noreg), then tworoom nm/vsig, pointmaze_large
+  nm/vsig (jf_grev_5cca99f.sh, modes gradtr,steer,cemp ONLY -- owner ~15:10: "just do the ones you haven't reported";
+  the chained gc/plan/grad/rand rows stand, without timing columns), cube nm/vsig (jf_grev_5cca99fc.sh, full ladder,
+  at TRAIN_OK), reacher_policy vsig (r entry, full ladder, at TRAIN_OK). At 15:08 both queues showed 0 free H100;
+  at 15:13 the algorithm queue opened (8 free) and the video job went out: 994072edb8dfa95e mf-2238066f; then the
+  four ladder jobs 15:14-15:16 (all bi_algorithm maliva aigcp): tworoom nm 018c6ec88e80f1fe mf-c5a66d16, tworoom
+  vsig 35eb724caccdd2d8 mf-eca96d8b, pointmaze_large nm 4305729002ffc57d mf-64f1413d, pointmaze_large vsig
+  073160d979fb8afe mf-761a70b6; cube x2 and reacher vsig wait in the launcher for their TRAIN_OKs.
+  WHY THE CHAINED EVAL ONLY GAVE FOUR ROWS (owner question ~15:12): the GR training entry's post-training block is a
+  hard-coded `for MODE in gc plan grad rand` loop from the invalidated-board era; gradtr / steer / cemp were added
+  this morning only to the standalone eval entry (5cca99f) for the pusht re-runs and never folded back; the timing
+  json lives in the 5cca99f eval script while the training job evaluates with its own 67e20e1 tarball. Proposed fix
+  (design to the owner): a training entry variant whose chained block hands the synced checkpoint to the standalone
+  eval entry with EVAL_MODES (default = the full 7) and EVAL_ENTRY (default jf_grev_5cca99fc.sh) as parameters; plus
+  an INCOMPLETE line in the collector for any GR (cell, arm) missing one of the seven modes.
+  DRAWER DIAGNOSIS (from the code, ~14:45): success = mug in contact with the drawer-bottom geom AND drawer joint >
+  -0.01 (closed), reset puts the drawer at 0.0 (closed) -> open, place, close; the upright check is commented out
+  (two_arm_drawer_cleanup.py:332-351). Seed 0 log: 2/50 successes, mean env replanned 137x = ~685 of a 542-700 step
+  budget -> episodes run out the clock. The expert-replay positive control (DEXMG_EXPERT_OVERRIDE) was never wired:
+  no entry sets it, no config carries `_set_start_step`, `_expert_action` reads an `ep_offset` column the drawer file
+  lacks (it has ep_len), and the override runs AFTER the drop-dims expansion so a 22-D recorded action would reach
+  env.step un-expanded. Design for the fix proposed to the owner ~15:05 (wrapper: ep_len fallback + override before the
+  expansion; configs/eval/drawer_expert.yaml with `_set_start_step` = 0 for full_traj; entry exporting the switch and
+  DEXMG_DS; new tarball).
+
+### Wave 3 -- the full two-arm sweep (owner + Minghao 2026-09-07; go 10:30)
+Decision: "mse+sigreg deserves a full sweep as well" -- mse state head + flow action head, noreg vs VANILLA SIGReg
+(`--w_reg 0.04 --sigreg_proj_dim 0`), on every cell. pw_zp is not the recipe. Cube is a GR cell now ("Cube as GR is
+live, as TC is dropped") and "cube GR must use EEF too". Toolhang / transport / drawer AS GR are the least important
+and are held. Accounting at the go: pusht + toolhang complete for both arms; reacher_policy noreg complete (vanilla
+TODO); drawer + transport noreg trained (evals running), vanilla TODO; tworoom, pointmaze_large, cube TODO both arms.
+Launch design (proposed 09:55, verified by the owner "I'm good with the sweep. And your suggestion for cube is also
+correct"): 9 x (1 H100, cpu 16, memory 120000; cube 200000) --
+  dr_fx_mvsig192 / tr_fx_mvsig192: the TC entry with `MNM192 --mot_state_head mse --w_reg 0.04 --sigreg_proj_dim 0`,
+    120 ep, train-only (mirror of th_fx_mvsig192); task-protocol evals one seed per job on TRAIN_OK.
+  rp_fx_vsig192: GR entry b, reacher_policy, `--w_reg 0.04 --sigreg_proj_dim 0 --H_max 10 ...192 flags`, chained eval
+    skipped (no reacher pin in the train entry) -> standalone jf_grev_5cca99fr.sh, full ladder incl. steer.
+  tw_fx_nm192 / tw_fx_vsig192, pml_fx_nm192 / pml_fx_vsig192: GR entry b, `--H_max 10` (overrides the entry's 25 / 50:
+    argparse last wins, proven on the pusht configs), chained gc/plan/grad/rand evals in the job; fp16 strided caches
+    (57 G / 60 G) on 120 GB pods, as the pre-fix runs.
+  cu_fx_nm192 / cu_fx_vsig192: GR entry b, cube, `--H_max 10`, chained eval skipped (the cube eval config reads
+    ogbench/cube_single_expert, the train entry links at root), 123 G fp16 cache -> memory 200000 (5 h pre-fix).
+    Eval = NEW entry jf_grev_5cca99fc.sh: the 5cca99fr entry with ONE line changed -- the cube case exports
+    CUBE_EEF_THRESHOLD=0.04 and no longer forces full_traj -> configs/eval/cube.yaml as written (goal 25 raw steps
+    ahead of a uniform start, budget 50, callables set_state / set_target_pos / set_goal_effector); success = cube
+    within 0.04 m of the goal cube AND effector within 0.04 m of the goal effector, latched (lewam/envs/cube_env.py).
+    This is Minghao's Option A of 2026-08-30 for the baselines (cubeeff_entry.sh), whose eff-ON cube GR row is
+    gcidm 97.3 {96,96,100} | gcbc 86.0 {84,88,86} | frozen unified policy 67.3 | lewm planning 56.7 | dinowm10 62.7
+    (eff-OFF gcidm 100/100/100): the jf cube row becomes comparable to it. The pre-fix jf cube-as-GR (:1101) used
+    full_traj instead; a random-POLICY floor under the +25 protocol is not wired in the entry (deferred).
+  Placement (owner: "Launch according to freedom of H100s. Don't clog the cluster (leave at least 2-3 free), but
+  *constantly* poll ... and launch then if you couldn't at first"): scratch sweep_launcher.sh, 5-min polls of the two
+  verified H100 queues (bi_research aigcp groupIds 61; bi_algorithm maliva aigcp groupIds 62, clusterId 4 both),
+  keeps 3 cards free in total, requires the queue's free pod memory to cover the pod (the 00:55 "8 free / 0 memory"
+  trap), never adds a job while an earlier sweep job is still queued, order dr, tr, rp, tw x2, pml x2, cu x2, queue =
+  the one with more free cards. At 10:45: research 1 card (67 GB), algorithm 1 card -> nothing placed yet. At 10:59 the
+  research pool opened (33 free, 6.5 TB) and the launcher placed all nine in one round, 10:59-11:04, all bi_research:
+    dr_fx_mvsig192  4af0b9b385a7a196 mf-d01fba4f | tr_fx_mvsig192  9a302e169886c319 mf-9d285c73
+    rp_fx_vsig192   9eb9610c4299e987 mf-3edc3e67 | tw_fx_nm192     b1150d3e89f16916 mf-d02f996d | tw_fx_vsig192  e071469fd8943e83 mf-f34d1567
+    pml_fx_nm192    51d483be8f1e3f65 mf-b10cd046 | pml_fx_vsig192  56873ab46429d32a mf-c538bd78
+    cu_fx_nm192     e8f969667a0fb638 mf-c6ebae20 | cu_fx_vsig192   25cab9a106b943e5 mf-8e8e26e8   (memory 200000)
+  Expected: tworoom ~13:40, pointmaze_large ~13:50 (with chained evals), reacher ~17:00 + standalone ladder, cube
+  ~16:15 + standalone eval (jf_grev_5cca99fc.sh), drawer vanilla ~20:30 + task evals, transport vanilla ~00:30 + evals.
+  All nine wrote START within 3 min (11:02-11:07); the 9-job launcher exited SWEEP_ALL_PLACED 11:09.
+  VANILLA SIGReg "STUCK PHASE" ON THE MAZE CELLS (found 11:50 from the per-epoch train.log the entries sync):
+    pointmaze_large fx_vsig192 epochs 1-11: train act 1.28-1.49 (the untrained floor; noreg broke through at ep 4 to
+    0.92), state 0.50-0.55 (noreg 0.001), train zstd 0.70-0.74 but EVAL-MODE (val) zstd 0.02-0.03, val reg 90-115 vs
+    train 5.8-8.8. The encoder satisfies SIGReg through training-mode batch statistics without learning features; in
+    eval mode the latent is near-constant, so the arm is broken for evaluation as long as it stays there.
+    tworoom fx_vsig192 had the SAME numbers for epochs 1-3 (val zstd 0.02, val reg 100-106, state 0.5-0.59) and
+    escaped at epoch 4 (state 0.30 -> 0.04, zstd -> 1.00, val reg 7.9), then trained normally (ep 12: act 1.218,
+    zstd 0.99). pusht / reacher_policy / cube vanilla never enter the phase (zstd 0.88-0.95 at epoch 1). So it is a
+    maze-cell phenomenon (static scene, tiny agent); whether pointmaze_large escapes is open -- left running (owner
+    pinged 11:52; no kill without the owner), escape watch on its train.log.
+    ESCAPED at epoch 20 (12:10): train act 1.274 -> 1.085, state 0.554 -> 0.238, zstd 0.742 -> 0.853; val act 0.939,
+    val zstd 0.926, val reg 104 -> 6.7. Same transition as tworoom (ep 4), 16 epochs later, with the lr already at
+    1.12e-4 and decaying; 30 epochs left to converge (the noreg arm was at act 0.906 by epoch 10). Read the final
+    number with that late start in mind. By epoch 30 it had caught up (act 0.885 vs noreg 0.870; ep 40: 0.869 vs 0.860).
+  RESULTS (3 eval seeds x 50, chained in the training job, train h5, H_max 10):
+    TWOROOM mse-noreg (TRAIN_OK 13:29, 2 h 24 min, val act 1.185 / state 0.00010 / zstd 0.117):
+      reactive 98.0 +- 2.0 {96,98,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      | random-candidates 95.3 +- 3.1 {96,92,98}      (pre-fix H_max 25 row: 98.7 / 100 / 100 / 94.0)
+    TWOROOM mse-vanilla (TRAIN_OK 13:41, 2 h 36 min, val act 1.184 / state 0.0043 / zstd 0.992):
+      reactive 98.7 +- 2.3 {96,100,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      | random-candidates 84.0 +- 6.0 {84,78,90}
+      -> tworoom is saturated on every policy row for both arms; the only separation is the random-candidate row,
+         where vanilla is LOWER (84 vs 95) -- the opposite of pusht (51 vs 37). Not a recipe signal on this cell.
+    POINTMAZE_LARGE mse-noreg (TRAIN_OK 13:44, 2 h 38 min, val act 0.848 / state 0.00004 / zstd 0.269):
+      reactive 100 {100,100,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      | random-candidates 89.3 +- 2.3 {88,92,88}      (pre-fix H_max 50 row: 100 / 100 / 100 / 80.0)
+    POINTMAZE_LARGE mse-vanilla (TRAIN_OK 13:46, 2 h 40 min, val act 0.862 / state 0.0021 / zstd 0.997; stuck phase
+      epochs 1-19, escaped at 20):
+      reactive 100 {100,100,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      | random-candidates 59.3 +- 6.1 {58,66,54}
+      -> like tworoom: every policy row saturated on both arms; the random-candidate row is 30 points LOWER on vanilla
+         (59 vs 89). On the two maze cells the unit-variance latent grades random proposals WORSE; on pusht it graded
+         them better (51 vs 37). The late escape left no mark on the policy rows.
 
 ### Protocol additions 3 and 5 (design verified by the owner 2026-09-06 "Agree"; implemented the same day)
 - Planning time (item 5): `GetActionTimer` in `scripts/eval_gip.py`, installed on every policy right after
