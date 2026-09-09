@@ -88,9 +88,11 @@ def sample_eval_episodes(cfg, dataset):
 
     Each pair defines a start frame; the goal frame is goal_offset_steps ahead of it,
     except when cfg.gip_eval.to_end is set, in which case the goal is each episode's
-    last frame and only one start per episode qualifies. cfg.gip_eval.start_zero draws
-    episodes instead of frames and starts each at frame 0. Episodes too short to reach
-    the goal are excluded. Sampling is deterministic given cfg.seed.
+    last frame and only one start per episode qualifies. cfg.gip_eval.random_start=false
+    starts each picked episode at frame 0 (the draw is then over episodes, not frames).
+    cfg.gip_eval.min_episode_len keeps only episodes of at least that many frames, so one
+    seed picks the same episodes for every goal offset. Episodes too short to reach the
+    goal are excluded. Sampling is deterministic given cfg.seed.
 
     With cfg.gip_eval.full_traj, each pick starts at the episode's FIRST frame and the goal
     is its LAST frame, so the goal offset varies per episode and is returned as a third list
@@ -122,22 +124,20 @@ def sample_eval_episodes(cfg, dataset):
     max_start = lengths - cfg.eval.goal_offset_steps - 1
     max_start_by_ep = {e: max_start[i] for i, e in enumerate(ep_indices)}
     max_start_per_row = np.array([max_start_by_ep[e] for e in ep_idx])
-    start_zero = bool(cfg.get("gip_eval", {}).get("start_zero", False))
-    if start_zero:
-        # start every picked episode at its first frame, goal goal_offset_steps later; the draw is
-        # over episodes long enough for the offset, so one seed picks the same episodes for every
-        # offset they all allow (paired across goal distances)
-        first_frames = np.nonzero((step_idx == 0) & (max_start_per_row >= 0))[0]
-        g = np.random.default_rng(cfg.seed)
+    gip_eval = cfg.get("gip_eval", {})
+    # episodes eligible for the draw: long enough for the goal offset and at least min_episode_len
+    # frames; the same length bar for every goal offset makes one seed pick the same episodes for all
+    frames_per_row = lengths[np.searchsorted(ep_indices, ep_idx)]
+    eligible_row = (max_start_per_row >= 0) & (frames_per_row >= int(gip_eval.get("min_episode_len", 0)))
+    g = np.random.default_rng(cfg.seed)
+    if not bool(gip_eval.get("random_start", True)):
+        first_frames = np.nonzero((step_idx == 0) & eligible_row)[0]
         picks = np.sort(first_frames[g.choice(len(first_frames), size=cfg.eval.num_eval, replace=False)])
         return dataset.get_row_data(picks)[col].tolist(), [0] * len(picks), None
-    to_end = bool(cfg.get("gip_eval", {}).get("to_end", False))
-    if to_end:
-        valid = np.nonzero((step_idx == max_start_per_row) & (max_start_per_row >= 0))[0]
+    if bool(gip_eval.get("to_end", False)):
+        valid = np.nonzero((step_idx == max_start_per_row) & eligible_row)[0]
     else:
-        valid = np.nonzero(step_idx <= max_start_per_row)[0]
-
-    g = np.random.default_rng(cfg.seed)
+        valid = np.nonzero((step_idx <= max_start_per_row) & eligible_row)[0]
     picks = np.sort(valid[g.choice(len(valid) - 1, size=cfg.eval.num_eval, replace=False)])
     episodes = dataset.get_row_data(picks)[col]
     starts = dataset.get_row_data(picks)["step_idx"]

@@ -2356,3 +2356,26 @@ results below when they land.
   pre-rename default-cut job (fx_nm192cutdef_s42, same host as cutoff) flipped ONE best-of-K episode (34) vs four other
   runs of the same computation -> the run-to-run GPU noise floor reaches best-of-K too, about 1 episode in 50, rarely.
   Ready to commit on the owner's approval of the names (commit message drafted: tmp/commit_msg_rollout_cut.txt).
+
+LONG-HORIZON EVAL LAUNCH (owner 2026-09-09, protocol agreed with Minghao): 50 random episodes per seed, each started
+at frame 0 with the goal H in {25, 50, 75, 100} steps ahead; imagine the dynamics to the goal, planning cost at the
+goal, plan, execute 25 actions, replan; budget 2H. Code: commit 2a5acc5 (planners imagine only up to the goal
+horizon; +gip_eval.start_zero sampler: episodes drawn by rng(seed).choice over the episodes long enough, started at
+frame 0 -> one seed picks the same 50 episodes for every H on pusht since every episode has 109 frames; the pick is
+`np.random.default_rng(seed).choice(n_eligible_episodes, 50, replace=False)` sorted, for Minghao to replicate).
+Flags: ++gip_eval.exec_actions=25 +gip_eval.start_zero=true eval.goal_offset_steps=H eval.eval_budget=2H;
+plan_rollout = H/5 from the offset; plan_goal_time default (cost at the goal horizon). Modes plan (best-of-K) and
+gradtr; arms fx_nm192 and fx_vsig192; seeds 42/0/1; entry jf_grev_2a5acc5.sh; tags <arm>lh<H>_s42 (board arms
+fx_nm192lh25..lh100). Jobs: H=100 7aedeb12ce2a3056 (algorithm aigcp queue, 4 free at launch, reserve kept);
+H=75/50/25 placed by lh_launcher.sh as cards free (>= 4 free -> submit one). Reference rows: run A / ol25gt (random
+starts, H 25) and the closed-loop board rows.
+  CORRECTION (09:25): pusht episodes are 49-246 frames long (n<51: 101, n<76: 1818, n<101: 4848 of 18685), NOT all
+  109 -- the start_zero draw is over the episodes long enough for the current H, so the seed-42 picks share 0/50
+  episodes between any two H: the grid as launched is NOT paired across H, and H=100 draws only from demos of 101+
+  frames (a difficulty confound with demo length). Fix: +gip_eval.start_zero_min_frames=101 draws from the same
+  episodes for every H (the H=100 set); H=25/50/75 would need re-running (~30 min each) for a paired grid.
+  Goal-state check on the H=100 picks (goal_distance_check.py): by frame 75 the block is already at its frame-100
+  pose (block-only median 18.5 px, 5.7 deg) while the pooled agent+block distance is still 126 px (65 px at frame
+  90): the expert keeps moving the pusher after placing the block, and the success metric needs the agent within
+  20 px too. So +75 and +100 are the same block task with different budgets (owner's theory), separated mainly by
+  where the pusher must park.
