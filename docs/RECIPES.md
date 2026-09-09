@@ -303,6 +303,22 @@ files docs/results/wave1/board_wave1_2026-09-06.{md,json})
     Task-protocol evals submitted 14:04, one seed per job: 26fee192f16cb435 mf-5d5a8ba1 (s42) | 3298e87fa09bf9ac
     mf-0db6d248 (s0) | 69678e9e3b0e7dd9 mf-b48e2a13 (s1). A DP transport seed exceeded the 3 h wall under this
     protocol; jointflow inference is lighter (drawer: 136 min per seed, same as DP's 135) -- watch for the wall.
+    s42 (26fee192f16cb435, host n124-136-221) FAILED 15:44 after 97 min: the pod's /tmp filled (`OSError: [Errno 28]
+    No space left on device` in robosuite get_xml's TemporaryDirectory) -- the same class as the drawer s42 failure at
+    10:43 (n124-137-206), which then succeeded on a resubmit; node-level disk pressure, not our writes. Resubmitted
+    15:47 as 2ace94ed9d2ea125 mf-f19ba153 (EV_SPLITS d=42) -- which landed on the SAME host and died the same way at
+    17:09:29, one second before seed 1 (69678e9e3b0e7dd9) on that host died too: /tmp is exhausted at host level and
+    every pod on the host goes down together. Four evals lost to it today. FIX (scripts only, owner's overnight rule):
+    jf_tc_ev_b05a7f8_task2.sh = the task entry with ALL scratch on a per-job dir on the pod overlay
+    (SCR=/opt/tiger/evscr_$$: sim src, pip target, swm home incl. videos, TMPDIR for robosuite/Hydra, matplotlib, eval
+    logs) and a DISK heartbeat line (df + mounts of /tmp and /opt/tiger) at START so the layout is on record. Seeds 42
+    and 1 resubmitted on it 17:15: 1332a9cefdacc0d4 mf-3f908099 (s42) | 991a924024b2e7e3 mf-6f5ae799 (s1); the queued
+    drawer/transport vanilla evals switched to it.
+    DISK LINES (17:17): `overlay 984G 713G 227G 76% /` (n124-137-206) and `overlay 984G 589G 352G 63% /` (n124-136-240)
+    for BOTH /tmp and /opt/tiger -> the pod's /tmp is the root overlay itself, ~1 TB shared by every pod on the node;
+    an ENOSPC means the node's overlay reached 100% (other tenants' writes: our eval pods hold ~3 GB of sim stack +
+    videos). Moving scratch to /opt/tiger cannot prevent it; only a resubmit onto a healthier node does. Keep the
+    task2 entry for the DISK diagnostic; treat every `Errno 28` eval death as "resubmit once, different node".
   TRANSPORT mse-pw_zp TRAIN_FAIL 13:50 at epoch ~116/120: `OSError: [Errno 28] No space left on device` writing
     grad_probe.jsonl under /opt/tiger (the pod's local disk; node-level disk pressure, the failure class seen on the
     reacher mse-head pods). The synced jointflow_full.pt is intact (191.8 MB, epoch 114, model + optimizer + scheduler,
@@ -333,6 +349,95 @@ files docs/results/wave1/board_wave1_2026-09-06.{md,json})
   (design to the owner): a training entry variant whose chained block hands the synced checkpoint to the standalone
   eval entry with EVAL_MODES (default = the full 7) and EVAL_ENTRY (default jf_grev_5cca99fc.sh) as parameters; plus
   an INCOMPLETE line in the collector for any GR (cell, arm) missing one of the seven modes.
+  OWNER ~15:15: "Control change is fine. Yes also changing the eval at the bash level instead of the training file is
+  correct." IMPLEMENTED 15:20-15:25: commit 42560ab (rebased onto Minghao's 4c33287, see below; pushed) = dexmimicgen
+  wrapper (override before the drop-dims expansion; ep_offset from ep_len when absent -- the drawer file turned out to
+  carry ep_offset, so the fallback is a safety net), configs/eval/drawer_expert.yaml, collect_board INCOMPLETE-ladder
+  report (verified: it lists tworoom x2 / pointmaze_large x2 gradtr+steer+cemp and pusht fl192 / flsig192 SteerMPC).
+  Tarball lewam_jointflow_42560ab.tar.gz on HDFS. Entries: jf_tc_ev_42560ab_expert.sh (the _vid entry on 42560ab +
+  DEXMG_EXPERT_OVERRIDE=1, DEXMG_DS = the pod's drawer h5, EVALCFG forced to drawer_expert, tag JFTCEXPERT, logs evexp_,
+  videos_expert_), queued behind the video job (exp_dr, seed 0; placed 16:17 as f213801a3fcb57e3 mf-3802629d); jf_gr_67e20e1d.sh (training entry b with the inline
+  4-mode loop replaced by a hand-off `bash $EVAL_ENTRY $CELL $CK $EVAL_MODES ${ARM}_s$SEED`, defaults jf_grev_42560ab.sh
+  and the full ladder) for every future GR training; jf_grev_42560ab.sh = the fc entry on the new tarball.
+  BRANCH PICKED UP 4c33287 (Minghao, 03:06): reacher_policy qpos_match success ANGLE-WRAPPED for the unlimited shoulder
+  joint (the policy data winds it up to ~3.7 turns, 32.6% of frames beyond +-pi; a goal pose reached on another winding
+  branch was scored a failure forever -- "phantom failures that depress every CEM number on this cell"). My eval
+  tarballs 5cca99f / b05a7f8 were cut from the local branch WITHOUT it, so every reacher_policy row on the board so far
+  (nm192 / sig192 full ladders incl. SteerMPC, 08:57-09:43) was measured with the stock predicate = lower bounds.
+  The queued reacher vanilla ladder now runs on jf_grev_42560ab.sh; re-running nm192 / sig192 on it is proposed to the
+  owner (2 x ~1.5 h). OWNER ~15:30: "Sure, but again, no need to do pw_zp for reacher. Drop pw_zp from memory more or
+  less." -> queued rp_nm (fx_nm192, full ladder) on the wrapped rule; pw_zp arms are history only from here. Tag suffix
+  "w" (fx_nm192w_s42 / fx_vsig192w_s42) gives fresh logs (the entry skips (mode, seed) pairs whose persisted log exists)
+  and distinct board arms fx_nm192w / fx_vsig192w = wrapped rule; the old fx_nm192 rows stay as the old-rule lower bound.
+  REACHER_POLICY mse-noreg, WRAPPED RULE (fx_nm192w, job b334357e0b634887, 16:21-17:11; same checkpoint as fx_nm192):
+    reactive 100 +- 0.0 {100,100,100} | best-of-K 100 +- 0.0 {100,100,100} | gradient 100 +- 0.0 {100,100,100}
+    | gradient-TR 100 +- 0.0 {100,100,100} | SteerMPC 100 +- 0.0 {100,100,100} | CEM-policy 99.3 +- 1.2 {100,98,100}
+    | random-candidates 65.3 +- 6.1 {64,72,60}
+    vs the old-rule rows of the SAME checkpoint: 90.0 / 93.3 / 92.0 / 92.0 / 92.0 / 92.7 / 64.7 -> the 8-10 points the
+    old rows were missing were phantom failures of the unwrapped joint-match rule (Minghao's 4c33287), exactly as his
+    note said; the random-candidate control does not move (65 vs 65), so the wrap does not make the task easier, it
+    stops scoring correct poses on another winding branch as failures. Reacher_policy is saturated by both the reactive
+    head and every planner under the correct rule.
+  REACHER_POLICY mse-VANILLA, WRAPPED RULE (fx_vsig192w, job 72906cbea3c629b8, 17:16-18:06; TRAIN_OK 17:06):
+    reactive 100 +- 0.0 {100,100,100} | best-of-K 100 +- 0.0 {100,100,100} | gradient 100 +- 0.0 {100,100,100}
+    | gradient-TR 100 +- 0.0 {100,100,100} | SteerMPC 100 +- 0.0 {100,100,100} | CEM-policy 100 +- 0.0 {100,100,100}
+    | random-candidates 52.7 +- 5.8 {46,56,56}
+    -> both reacher arms saturate every policy / planner row under the wrapped rule; the random-candidate control is
+       lower on vanilla (52.7 vs 65.3), the same direction as tworoom and pointmaze_large.
+  rp_nm placed 16:18 as b334357e0b634887 mf-1e807869 (research queue). cu_nm (cube noreg ladder, fc entry, effector
+  term 0.04) placed 16:24 as 2a53268d87821808 mf-564ec539 right after the cube noreg TRAIN_OK (16:24, 5 h 17 min, val
+  act 0.521 / state 0.00037 / zstd 0.254); cube vanilla TRAIN_OK 16:26 (val act 0.531 / state 0.0020 / zstd 0.984),
+  its ladder cu_vsig placed 16:42 as 6962dd98606dfa91 mf-fe1e9bc2. REACHER_POLICY vanilla TRAIN_OK 17:06 (6 h 02 min,
+  val act 0.682 / state 0.0037 / zstd 0.960; the noreg arm's TRAIN_OK line: val act 0.683 / state 0.00039 / zstd 0.350).
+  OWNER ~15:35 (going to bed): "you may can relaunch failed jobs and write scripts but not touch model or train or
+  eval code unless it's directly to fix a bug that caused a crash. If cards free up and there are not many jobs from
+  the current flight left, you can begin GR for transport, drawer, toolhang".
+  OVERNIGHT SETUP 15:40: (1) GR eval stager now also requires the `done` marker (jointflow_best.pt is synced during
+  training; without the guard the cube ladders would have started on a partial checkpoint the moment a card freed --
+  caught before any placement). (2) Eval launcher queue holds: drawer expert replay (exp_dr), cube nm/vsig ladders
+  (fc entry), reacher vanilla + noreg ladders on the wrapped rule (42560ab entry, tag suffix w), and the drawer /
+  transport VANILLA task-only evals one seed per job (not-ready until their done markers, ~21:30 / ~00:30).
+  (3) GR-of-TC trainings staged in stage_fix_wave.py: thg_/drg_/trg_ x {fx_nm192, fx_vsig192} on jf_gr_67e20e1d.sh,
+  SKIP_EVAL=1 (train-only, 25 / 50 / 75 min pre-fix), H_max 10, fp16 strided caches; a delayed training launcher
+  places them from 17:30 under the reserve rule (by then the flight is down to the long TC trainings and eval tails).
+  Their ladders follow as one-mode-per-job lines on jf_grev_42560ab.sh (the goal-set branch of the wrappers: goal 50
+  raw steps ahead of a random start, success = goal-match with the 0.04 / 0.10 thresholds OR the task predicate = the
+  old "as GR" rows), added at each TRAIN_OK; the sim evals are 10-36 min per 50 episodes, so one mode (3 seeds) per
+  job stays under the 3 h wall for gc/plan/rand and a killed planner job is simply resubmitted (the entry skips the
+  (mode, seed) pairs already logged).
+  GR-of-TC LAUNCHER STARTED 17:30; placements: thg_fx_nm192 7b573d0ed5dc1320 mf-20e03965 (17:30, algorithm queue;
+  19 s/epoch, ep 10 at 17:40), thg_fx_vsig192 f07df4a99648edb9 mf-49a16384 (17:41), drg_fx_nm192 705aa3cd0744a26e
+  mf-c7ba01e0 (17:42), drg_fx_vsig192 4dd354d104e95551 mf-7bdf7882 (17:43); transport x2 pending the reserve.
+  The 34 ladder lines (toolhang 3 jobs per checkpoint: gc,plan,grad | gradtr,rand,cemp | steer; drawer + transport one
+  mode per job) are in the eval launcher's queue as NOT_READY until each training's done marker, so the whole GR-of-TC
+  flight runs unattended under the reserve rule.
+  DRAWER FAILURE VIDEOS (job 994072edb8dfa95e, 15:18-17:42, mse-noreg seed 0, task-only, 4.0 = envs 15 and 41; 50
+  harness panels [agent | demo | goal] in ckpts/jointflow_tc/videos_tc_drawer_fx_mnm192_s42_e0/ with montage_last.png,
+  first_mid_last.png and stage_table.txt; every clip runs the full 700-frame budget). Pixel-level stage read of the
+  48 failures (handle y for "drawer opened", teal blob for the mug; heuristic): 42 NEVER OPEN THE DRAWER (the dex hand
+  goes to the handle and hovers / pokes without pulling it out), 6 open it at some point (1, 5, 16, 26, 32, 39) but
+  never finish (32 and 39 end with it open), mug untouched in 11 / pushed or knocked in 18 / not visible at the end in
+  19 (arm occlusion or displaced). The two successes open, place and close. The demo goal panels all show the mug
+  gone into the CLOSED drawer with both arms retracted. -> the reactive policy stalls at STAGE ONE (drawer opening);
+  the old +50-step goal-reach rows never asked for that stage from a closed-drawer start, which is where the 42.7 vs
+  6.0 gap comes from. Clips sent to the owner 17:55 (env 6, 33 hover; 1, 32 opened-not-finished; 2, 43 mug knocked;
+  15 success). Expert-replay positive control (f213801a3fcb57e3) running since 16:21 will say whether the demos
+  themselves pass the predicate through the same path.
+  EXPERT REPLAY RESULT 18:04 (job f213801a3fcb57e3, 16:21-18:04; callables set_state + _set_start_step only, the
+  recorded 22-D actions replayed open-loop from row 0 through the same reset_to / predicate path): 72.0 = 36/50.
+  Replay failures: envs 1, 4, 6, 15, 18, 19, 24, 25, 28, 33, 35, 38, 45, 49. So the protocol's ceiling for a perfect
+  imitator is ~72 on this split, not 100: 28% of open-loop replays drift off the demo (dex-hand contact physics /
+  reset restore) or end short of the predicate. The policy's 4-6 is still ~66 points under that ceiling, i.e. the
+  drawer number is a policy failure (stage one, opening) on top of a lossy protocol. Env 15, one of the two policy
+  successes, FAILS in replay while env 41 passes -- replay and policy outcomes do not line up episode by episode,
+  another sign the replay drifts rather than the episodes being intrinsically unsolvable. Replay videos in
+  videos_expert_tc_drawer_fx_mnm192_s42_e0/ (+ montage_last.png, first_mid_last.png, stage_table.txt).
+  REPLAY STAGE READ (same pixel heuristic): all 14 replay failures OPENED the drawer (0 never-opened, vs 42/48 for
+  the policy); 3 end with it still open (env 6: mug visibly inside the open drawer -- placed, never closed); the mug
+  is knocked / dropped on the table in most of the rest (1, 4, 24, 33, 45, 49 ...). All 36 successes: opened, mug
+  inside, closed. -> the demos pass stage one every time under replay and lose 28% in the contact-heavy grasp / carry
+  / close stages (open-loop drift in the dex-hand physics); the policy loses 88% at stage one. Two different failure
+  modes: the protocol ceiling is ~72 for this split, and the policy problem is the drawer opening.
   DRAWER DIAGNOSIS (from the code, ~14:45): success = mug in contact with the drawer-bottom geom AND drawer joint >
   -0.01 (closed), reset puts the drawer at 0.0 (closed) -> open, place, close; the upright check is commented out
   (two_arm_drawer_cleanup.py:332-351). Seed 0 log: 2/50 successes, mean env replanned 137x = ~685 of a 542-700 step
@@ -398,20 +503,33 @@ correct"): 9 x (1 H100, cpu 16, memory 120000; cube 200000) --
     number with that late start in mind. By epoch 30 it had caught up (act 0.885 vs noreg 0.870; ep 40: 0.869 vs 0.860).
   RESULTS (3 eval seeds x 50, chained in the training job, train h5, H_max 10):
     TWOROOM mse-noreg (TRAIN_OK 13:29, 2 h 24 min, val act 1.185 / state 0.00010 / zstd 0.117):
-      reactive 98.0 +- 2.0 {96,98,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      reactive 98.0 +- 2.0 {96,98,100} | best-of-K 100 +- 0.0 {100,100,100} | gradient 100 +- 0.0 {100,100,100}
       | random-candidates 95.3 +- 3.1 {96,92,98}      (pre-fix H_max 25 row: 98.7 / 100 / 100 / 94.0)
+      ladder completed 15:37 (standalone job 018c6ec88e80f1fe, timing on): gradient-TR 100 +- 0.0 {100,100,100}
+      | SteerMPC 99.3 +- 1.2 {100,100,98} | CEM-policy 100 +- 0.0 {100,100,100}
     TWOROOM mse-vanilla (TRAIN_OK 13:41, 2 h 36 min, val act 1.184 / state 0.0043 / zstd 0.992):
-      reactive 98.7 +- 2.3 {96,100,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      reactive 98.7 +- 2.3 {96,100,100} | best-of-K 100 +- 0.0 {100,100,100} | gradient 100 +- 0.0 {100,100,100}
       | random-candidates 84.0 +- 6.0 {84,78,90}
+      ladder completed 15:36 (job 35eb724caccdd2d8): gradient-TR 100 +- 0.0 {100,100,100} | SteerMPC 100 +- 0.0
+      {100,100,100} | CEM-policy 100 +- 0.0 {100,100,100}
+      -> TWOROOM FULL LADDERS, both arms: every planner row 99-100; the cell separates nothing but the random-candidate
+         control (noreg 95.3 vs vanilla 84.0).
       -> tworoom is saturated on every policy row for both arms; the only separation is the random-candidate row,
          where vanilla is LOWER (84 vs 95) -- the opposite of pusht (51 vs 37). Not a recipe signal on this cell.
     POINTMAZE_LARGE mse-noreg (TRAIN_OK 13:44, 2 h 38 min, val act 0.848 / state 0.00004 / zstd 0.269):
-      reactive 100 {100,100,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      reactive 100 +- 0.0 {100,100,100} | best-of-K 100 +- 0.0 {100,100,100} | gradient 100 +- 0.0 {100,100,100}
       | random-candidates 89.3 +- 2.3 {88,92,88}      (pre-fix H_max 50 row: 100 / 100 / 100 / 80.0)
+      ladder completed 16:35 (job 4305729002ffc57d; SteerMPC ~19 min per seed on this cell, budget 100):
+      gradient-TR 100 +- 0.0 {100,100,100} | SteerMPC 100 +- 0.0 {100,100,100} | CEM-policy 100 +- 0.0 {100,100,100}
     POINTMAZE_LARGE mse-vanilla (TRAIN_OK 13:46, 2 h 40 min, val act 0.862 / state 0.0021 / zstd 0.997; stuck phase
       epochs 1-19, escaped at 20):
-      reactive 100 {100,100,100} | best-of-K 100 {100,100,100} | gradient 100 {100,100,100}
+      reactive 100 +- 0.0 {100,100,100} | best-of-K 100 +- 0.0 {100,100,100} | gradient 100 +- 0.0 {100,100,100}
       | random-candidates 59.3 +- 6.1 {58,66,54}
+      ladder completed 16:54 (job 073160d979fb8afe): gradient-TR 100 +- 0.0 {100,100,100} | SteerMPC 100 +- 0.0
+      {100,100,100} | CEM-policy 100 +- 0.0 {100,100,100}
+      -> POINTMAZE_LARGE FULL LADDERS, both arms: 100 on every planner row; only the random-candidate control
+         separates the arms (noreg 89.3 vs vanilla 59.3). The four ladders the owner asked for (tworoom x2,
+         pointmaze_large x2) are complete, all with std and timing.
       -> like tworoom: every policy row saturated on both arms; the random-candidate row is 30 points LOWER on vanilla
          (59 vs 89). On the two maze cells the unit-variance latent grades random proposals WORSE; on pusht it graded
          them better (51 vs 37). The late escape left no mark on the policy rows.
@@ -2007,3 +2125,234 @@ v6b adds epoch-snapshot sync (epoch=*.ckpt) so budget artifacts survive the wall
 - Model selection: pooled average across seeds; best-checkpoint = min val action loss.
 - n=50 episodes per eval seed; eval seeds {42, 0, 1}; SR gaps < ~8 pts at n=150 are
   within noise — run controls before claiming gains.
+
+### Overnight stall + re-drive (2026-09-08 05:51, session resumed after teardown ~18:11)
+The session process was torn down ~18:11 on 09-07; the CLUSTER jobs kept running (they are independent of the
+session's monitors), but every LAUNCHER / WATCHER (background Monitors) died, so all follow-on placement stalled.
+State at 05:51 (no jobs running):
+- COMPLETE (self-contained, finished fine): the recipe sweep -- cube+EEF, pointmaze_large, reacher_policy (wrapped
+  rule fx_nm192w / fx_vsig192w), tworoom, all BOTH arms with the full 7-mode ladder + std + timing. Board = 115 rows.
+- GR-of-TC trainings: toolhang x2 + drawer x2 reached TRAIN_OK (done markers); transport x2 never submitted (the
+  training launcher died while they waited for cards).
+- GR-of-TC ladders (toolhang/drawer/transport as GR): 0/6 ran -- the eval launcher died before placing them.
+- drawer-vanilla TC task-only (dvs): never placed.
+- transport TC task-only (mnm/msig/mvsig, start-to-finish env-success): ALL 6 jobs KILLED at the 3 h util wall. A
+  transport full_traj seed takes ~5 h (per-episode budgets to ~1632 steps), exactly the block that killed DP
+  transport. NEEDS EPISODE SHARDING (proposed, not built) -- left for the owner; do NOT resubmit as-is.
+RE-DRIVE 05:51 (owner overnight rule: relaunch failed jobs + begin GR for transport/drawer/toolhang; 15 H100 free):
+- Submitted the 2 transport GR trainings train-only (trg_fx_nm192 mf-16a0dfd5, trg_fx_vsig192 mf-4f33fb00).
+- Trimmed the 3 wall-blocked transport-vanilla task-only lines (tvs) out of grev_queue.txt (kept dvs + all GR
+  ladders); restarted grev_launcher (places toolhang+drawer GR ladders now, dvs now, transport GR ladders once
+  trained) and grtc_ladder_watch. Transport TC task-only stays blocked pending the sharding decision.
+
+### Transport TC task-only sharding (owner "yeah shard", 2026-09-08)
+The sharding code was ALREADY in eval_gip.py:237-246 (both deployed tarballs, since commit 16133ec) -- never invoked.
++gip_eval.shard_count=N +gip_eval.shard_idx=K slices episodes[K::N], sets num_envs to the shard size, keeps the
+per-episode budget (goal_offsets sliced identically). So this is script-only, no eval-code change.
+Built (scripts, on HDFS/scratch): jf_tc_ev_b05a7f8_shard.sh (= the task2 scratch-off-tmp entry + shard params; one
+seed x one shard per job; logs evshard_ so the collector's evtask_ glob ignores them; tag JFTCSHARD),
+stage_shards.py (submits one job per (arm, seed, shard)), pool_shards.py (concatenates each seed's shard
+episode_successes -> the seed SR, then mean +- std; --write appends the pooled JFTCTASK line into hb_evtask_ for
+the board). N=5 -> 10 envs/shard -> transport ~1 h/shard (est. from drawer's 0.246 s/env-step, IF env stepping is
+serial-ish). Arms = mnm192 (noreg) + mvsig192 (vanilla); pw_zp dropped. 2 x 3 x 5 = 30 short jobs.
+VERIFYING FIRST: one shard (noreg s42 sh0/5, job 1bc042a9c444205d mf-427fe3d0) to measure the wall before the other
+29 -- if it lands ~1 h the rest go out; if it still hits the 3 h wall the sim renders in parallel (sharding by env
+count would not help) and the approach is rethought rather than burning 30 jobs.
+
+### GR-of-TC ladders (09-08 re-drive) + a SIGReg planning signal
+Toolhang-as-GR (goal +50, goal-match OR task), 3 seeds, mean +- std, jf_grev_42560ab.sh:
+  mse+noreg:      reactive 92.0+-2.0 | best-of-K 92.0+-2.0 | gradient 76.0+-4.0 | grad-TR 90.7+-1.2 | SteerMPC 88.0+-0.0 | CEM 88.0+-5.3 | random 33.3+-2.3
+  vanilla SIGReg: reactive 92.0+-0.0 | best-of-K 94.7+-3.1 | gradient 91.3+-1.2 | grad-TR 93.3+-1.2 | SteerMPC 91.3+-4.2 | CEM 93.3+-1.2 | random 31.3+-5.8
+Drawer-as-GR (seed 42/0 partial at writing): noreg reactive 28/48, best-of-K 30/58, gradient 4/20, CEM 2/22, random 6/14;
+  vanilla reactive 40/58, best-of-K 60/60, gradient 12/22, CEM 20/32, grad-TR 52/52. Big eval-seed variance on drawer.
+SIGNAL: on the HARD manipulation GR cells (toolhang, drawer) the two arms tie on the POLICY rows (reactive, best-of-K)
+but VANILLA SIGReg clearly lifts the WORLD-MODEL planner rows -- toolhang gradient 91.3 vs 76.0, CEM 93.3 vs 88.0;
+drawer reactive/best-of-K/CEM all up. SIGReg's value is in PLANNING: it makes the dynamics informative enough to
+grade action sequences, exactly where noreg was weak. Invisible on the saturated GR cells (pointmaze/tworoom/reacher,
+both arms ~100). Matches the earlier dynamics-probe finding that SIGReg trades policy-best for dynamics-best.
+Horizon note (owner question): TC demo lengths toolhang 332-736 (score 84) > transport 355-440 > drawer 271-350
+(score 6) -- horizon does NOT explain the drawer task-only collapse (longest-horizon toolhang succeeds); the drawer
+failure is task-structure (open/place/close, stalls at drawer-opening per the videos), possibly single-view occlusion
+of the mug at grasp (owner's multiview hypothesis). Expert replay = OPEN-LOOP playback of the recorded demo actions
+through reset_to+step+predicate; 72/100 is the protocol's record->replay divergence ceiling, not a policy number.
+Transport TC task-only sharding VERIFIED: 10-env shard = ~51 min (vs 5.5 h for 50 envs), sharding cuts wall ~linearly;
+one shard (noreg s42 sh0/5) scored 0/10 -> transport start-to-finish looks near-floor like drawer. Full sharded run
+held pending the owner's scope call (N=3=18 jobs vs a reduced probe vs drop).
+
+DRAWER-as-GR COMPLETE (goal +50, goal-match OR task), 3 seeds, mean +- std:
+  mse+noreg:      reactive 40.7+-11.0 | best-of-K 46.7+-14.7 | gradient 12.7+-8.1 | grad-TR 38.0+-8.7 | SteerMPC 39.3+-3.1 | CEM 14.0+-10.6 | random 11.3+-4.6
+  vanilla SIGReg: reactive 52.0+-10.4 | best-of-K 59.3+-1.2  | gradient 19.3+-6.4 | grad-TR 52.7+-1.2 | SteerMPC 47.3+-1.2 | CEM 25.3+-6.1  | random 10.7+-4.2
+  -> vanilla SIGReg beats noreg on EVERY row (policy AND planner) and is much LOWER-VARIANCE (std ~1.2 vs 8-15).
+  The strongest vanilla>noreg signal on the board. Note drawer GR (+50 reach, ~40-60) >> drawer TASK-ONLY (~6): the
+  +50 goal is far easier than start-to-finish open/place/close. (Steer seeds ran ~64 min each; the 3-seed steer jobs
+  finished seed 1 just at the 3 h wall.)
+
+TRANSPORT-as-GR COMPLETE (goal +50, goal-match OR task), 3 seeds, mean +- std:
+  mse+noreg:      reactive 80.0+-6.0 | best-of-K 76.0+-2.0 | gradient 46.7+-3.1 | grad-TR 79.3+-3.1 | SteerMPC 76.0+-4.0 | CEM 68.7+-1.2 | random 4.7+-1.2
+  vanilla SIGReg: reactive 78.0+-7.2 | best-of-K 77.3+-6.1 | gradient 54.7+-11.0| grad-TR 80.7+-4.6 | SteerMPC 78.0+-3.5 | CEM 69.3+-4.2 | random 4.0+-0.0
+  -> arms basically TIED (only gradient shows a small vanilla edge 54.7 vs 46.7); transport GR sits high (~76-80),
+  near ceiling, so little room for SIGReg.
+GR-of-TC FLIGHT COMPLETE 10:14 (all 6 ladders 21/21). SYNTHESIS across the TC-as-GR cells: SIGReg's benefit tracks
+distance-from-ceiling and how much world-model planning carries the cell.
+  - drawer (hardest, ~40-60): vanilla wins EVERY row, decisively + far lower variance.
+  - toolhang (~90): vanilla wins the world-model planner rows (gradient 91 vs 76, CEM 93 vs 88); policy rows tied.
+  - transport (~76-80): tied.
+  - saturated GR cells (pointmaze/tworoom/reacher, ~100): tied, effect invisible.
+This matches the dynamics-probe story: SIGReg trades policy-best for dynamics-best, so it shows up on cells where
+the dynamics/planner matter and there is headroom. Every GR-of-TC number carries mean +- std over 3 eval seeds.
+
+DRAWER-VANILLA TASK-ONLY (start-to-finish, env success) COMPLETE 11:06: 4 / 6 / 2 -> 4.0 +- 2.0.
+All three drawer task-only arms at the floor: mse-noreg 6.0+-3.5, mse-pw_zp 5.3+-4.2, mse-vanilla 4.0+-2.0 (DP 2.0).
+Confirms the drawer collapse is task-structure (open/place/close, stall at drawer-opening per the videos), arm-independent.
+GR-EVAL START SAMPLING (owner question, verified gip.py:sample_eval_episodes:121-136): default GR eval = RANDOM start
+in [0, len-51], goal at start+50 (NOT start=end-50). Consistent with training (goals h~U[1,10] fs from random anchors,
+goal_terminal false). A `to_end` flag (gip.py:124-126) would do start=end-50 / goal=terminal, but was NOT used and
+would mismatch training. So the TC-as-GR numbers are training-consistent random-anchor +50 goal-reaching.
+
+TRANSPORT FAILURE VISUALIZATION (owner "let's visualize", 2026-09-08): jf_tc_ev_b05a7f8_vidshard.sh = the shard
+entry + the harness panel-video copy; one 10-env shard (noreg seed 0, sh0/5, job 6799dab919318fdf mf-...) ~51 min
+under the wall, copies videos_shard_tc_transport_fx_mnm192_s42_e0_sh0/env_*.mp4. First diagnostic step before the
+full sharded transport TC number: check whether transport stalls at the first bimanual grasp/handoff gate the way
+drawer stalls at drawer-opening. Hypothesis for the toolhang(84)-vs-drawer/transport(~0) CLIFF: bimanual +
+conjunctive contact-gate success predicate (drawer verified: object_in_drawer AND drawer_closed, reset closed) with
+the reactive policy failing gate 1 (~90%, drawer videos 42/48 never open) -> all-or-nothing product ~0, not 40-50;
+tasks bottlenecked on ONE precision-contact event bifurcate rather than degrade gradually. Expert replay clears the
+gate every time (drawer 72 ceiling), so it is a policy-competence gap at the contact gate, not task-impossibility.
+
+TRANSPORT VISUALIZATION RESULT (12:44, noreg seed 0 sh0/5 = 0/10, second seed confirms near-floor after seed 42=0/10):
+clips in videos_shard_tc_transport_fx_mnm192_s42_e0_sh0/ (+ transport_montage_last.png, transport_first_mid_last.png).
+Read: transport = bimanual pick hammer from start bin -> handoff between arms -> place in target bin. In ALL 10 the
+hammer never leaves its start area (env 4 knocked to the floor); one arm hovers over the shelf doing an averaged reach
+toward the goal region, never establishes the grasp/handoff. Full 878-step budget every time.
+=> SAME gate-1 failure as drawer (42/48 never open). Confirms the toolhang(84)-vs-transport/drawer(~0) CLIFF is a
+single discrete precision-CONTACT gate the reactive policy can't execute (grasp/open), not horizon drift: conjunctive
+all-or-nothing predicate x ~90% gate-1 failure -> ~0, not 40-50. Toolhang's grasp is in the policy's executable basin.
+Expert replay clears every gate (drawer 72 ceiling) -> policy-competence gap at the contact, not task-impossibility.
+Owner's occlusion hypothesis (single agentview hides object at grasp) + bimanual coordination are the leading causes;
+candidate fixes = multiview obs and/or a grasp-competent action head. Transport TC number = near-floor (do not spend
+the full 30-shard run to pin ~0 unless the owner wants the exact figure).
+
+OBSERVATION AUDIT (owner "fairly convinced it's a partial observability issue", 2026-09-09; all verified):
+DATA SOURCES (wf8 h5 attrs + assets/dexmg_*_env_meta.json + per-episode model_xml asset paths):
+  toolhang  = robomimic ToolHang, 200 PH demos, 1 Panda; our h5 = th_im224.hdf5 via dataset_states_to_obs, AGENTVIEW 224.
+             Official robomimic/DP obs = sideview + robot0_eye_in_hand at 240x240 + eef pos/quat/gripper (tool_hang_image.yaml).
+  transport = robosuite TwoArmTransport (robomimic/MimicGen task; XML references robosuite only), 2 Panda parallel-jaw,
+             1029 eps of 356-441 steps (matches neither robomimic PH 200 nor MH 300 -> origin unrecorded, ask Minghao);
+             our h5 = tp_im224.hdf5 via dataset_states_to_obs, AGENTVIEW 224. Recorded env cameras: agentview,
+             robot0/1_eye_in_hand, shouldercamera0/1 (84). Official DP transport_image.yaml = shouldercamera0/1 +
+             both eye_in_hand at 84x84 + both arms' eef pos/quat/gripper.
+  drawer    = DexMimicGen TwoArmDrawerCleanup (XML references dexmimicgen), PandaDexRH/PandaDexLH (dexterous hands),
+             1026 eps of 272-351 steps; our h5 = _source/drawer_raw.h5 single `pixels` AGENTVIEW 224 (24-D actions,
+             22-D view). Recorded env cameras: agentview + robot0_eye_in_hand + robot1_eye_in_hand at 84x84.
+OUR EVAL RENDERS ONE CAMERA: dexmimicgen_env.py:64-71 forces camera_names=[agentview] ("other 4 cameras are per-step
+  waste"); robomimic_gc_env.py:272 render(camera_name="agentview"). Wrist cameras never stored nor rendered.
+THEIR BASELINES: DexMimicGen scripts/generate_training_config.py = BC-RNN image (seq 10), rgb agentview +
+  robot0_eye_in_hand + robot1_eye_in_hand, crop 76, low_dim both arms' eef pos/quat/gripper_qpos, horizon drawer 550 /
+  transport 1200. Paper Table I (1000 generated demos): Drawer Cleanup BC-RNN 80.0+-0.0, DP 76.0+-0.0, BC-RNN-GMM
+  30.7+-5.0 (source demos 0.7); Transport DP 83.3+-0.9, BC-RNN 57.3, GMM 64.0 (theirs = DexMimicGen transport, not ours).
+  DP paper Table 2 (image, PH, max/avg-last-10): ToolHang DP-T 1.00/0.90, LSTM-GMM 0.82/0.59; robomimic Transport
+  DP-T 1.00/0.98.
+OUR DP-T (official diffusion_policy code, wf8_dp_cell_v5: single agentview 224, NO proprio, crop 202): toolhang 68-71
+  task-only, drawer 2.0 task-only (52.7 old hybrid), transport 84.7 old hybrid (task-only not run).
+  => same algorithm family, drawer 76-80 (their 3-cam + proprio, 84px) vs 2 (our 1-cam, no proprio, 224px).
+  Strongest evidence yet for the observation hypothesis; confounds: proprio, resolution, epochs, action correction.
+PROPOSED (not launched): reproduce DexMimicGen drawer with THEIR hdf5 + THEIR BC-RNN config unchanged (target ~80),
+  then ablate toward ours (agentview-only + proprio; agentview-only no proprio). Our h5 keeps state + model_xml per
+  episode, so re-rendering wrist cameras is a dataset_states_to_obs render job (the th/tp route), no re-collection.
+
+PAPER ROBUSTNESS PLAN (supervisor feedback 2026-09-09) -> docs/PAPER_ROBUSTNESS_PLAN.md. Seven experiments E1-E7
+(frozen-DINO baseline, paired significance tests, flow-head distribution recovery, latent geometry/t-SNE/collapse,
+SIGReg robustness, loss weighting sweep, SR-vs-goal-distance vs LeWM), each with existing support, design, cost,
+deliverable; five owner decisions listed at the end. PROPOSAL only, nothing launched. Rides with the next code commit.
+
+LONG-HORIZON PLANNING PROTOCOL (owners 2026-09-09; LeWM side = Minghao with LeWM's eval UNCHANGED, LeWAM side here):
+roll the dynamics the entire distance to the goal, score the final imagined state (dynamics-drift test), replan every
+25 raw steps executing all 25 actions like LeWM; fallback = intermediate cost every 25 steps. The ShrinkHorizon LeWM
+patch is DROPPED. LeWAM mirror = flags only: plan_rollout=H/5 (auto from goal_offset), exec_actions=25,
+plan_goal_time=false (last-block cost). Entry jf_grev_42560ab_x.sh = 42560ab + `${XARGS:-}` on the eval_gip line.
+SAMPLER FINDING (sampler_ab.py, wf8/train/pusht.h5): le-wm eval.py (verified on GitHub), our scripts/eval.py:150 and
+gip.py:131 all draw g.choice(len(valid)-1); stable-worldmodel's newer scripts/plan/eval_wm.py draws g.choice(len(valid))
+-> same seed only 23/50 common tuples at H 25/50, 19/50 at H 100. A2 (lewm_eval_full.sh -> eval.py) IS paired with
+every eval_gip row; rows from eval_wm.py are NOT. If Minghao uses eval_wm.py, drop the -1 in gip.py for the comparison
+rows and re-run the two closed-loop pusht reference rows. Memory lewm-eval-equivalence updated with the caveat.
+RUN A LAUNCH (standard protocol, H 25 / budget 50, seeds 42 0 1): grev_pusht_ol25.yaml mf-acde8c88, arms fx_nm192 and
+fx_vsig192, modes plan (best-of-K) + gradtr, XARGS='++gip_eval.exec_actions=25 ++gip_eval.plan_goal_time=false',
+tags <arm>ol25_s42 (board arms fx_nm192ol25 / fx_vsig192ol25). References: LeWM 88.7 (A2) / 88.0 (via eval_gip);
+ours closed-loop exec 5: best-of-K 80.7, gradient 86.7. Run B (grid H 50/75/100, budget 2H) waits for the evaluator +
+start-rule answers from Minghao.
+
+RUN A RESULT (05:28, job a3c78579b5cf9794 mf-acde8c88; LeWAM under LeWM's scheme: 5-block plan executed whole,
+exec_actions 25, last-block cost, replan only when the 25-step plan ends; offset 25 / budget 50; seeds 42/0/1 x 50,
+paired with the board's closed-loop exec-5 rows on the same tuples; McNemar exact on 150 paired episodes):
+  fx_nm192   best-of-K   closed 78.0+-2.0 {76,80,78} -> open 73.3+-5.0 {74,78,68}  delta -4.7  (13 vs 6 discordant, p 0.167)
+  fx_nm192   gradient-TR closed 78.7+-2.3 {80,80,76} -> open 74.7+-3.1 {74,78,72}  delta -4.0  (10 vs 4,  p 0.180)
+  fx_vsig192 best-of-K   closed 89.3+-4.2 {88,94,86} -> open 83.3+-3.1 {80,86,84}  delta -6.0  (10 vs 1,  p 0.012)
+  fx_vsig192 gradient-TR closed 94.7+-4.2 {96,98,90} -> open 91.3+-2.3 {94,90,90}  delta -3.3  (8 vs 3,   p 0.227)
+  LeWM reference under the same scheme: 88.7 (A2) / 88.0 (via eval_gip). 42% of episodes needed the second plan
+  (replans_per_env 1.42 / 1.36). Reading: closed-loop replanning is worth 3-6 points on pusht, significant only on the
+  SIGReg best-of-K row; under LeWM's own open-loop scheme the SIGReg arm still beats LeWM (gradient-TR 91.3 vs 88.7,
+  best-of-K 83.3 vs 88.7 -> below), the noreg arm sits below it (73-75). Scripts: paired_ol25.py (seed of the E2
+  sig_tests). Board arms fx_nm192ol25 / fx_vsig192ol25.
+
+(25, TRUE) RESULT (06:51, job 9a3f8f9e78acb25a mf-..., owner "important datapoint": exec_actions 25 with the goal-time
+cost, i.e. the retry scores its FIRST imagined block; standard protocol, seeds 42/0/1, paired with the (25, false)
+run-A rows on the same tuples):
+  fx_nm192   best-of-K   72.7+-4.2 {74,76,68}  vs (25,false) 73.3+-5.0 {74,78,68}   1 episode differs (p 1.0)
+  fx_nm192   gradient-TR 74.7+-3.1 {72,78,74}  vs           74.7+-3.1 {74,78,72}   2 differ (1 each way)
+  fx_vsig192 best-of-K   83.3+-5.0 {78,88,84}  vs           83.3+-3.1 {80,86,84}   2 differ (1 each way)
+  fx_vsig192 gradient-TR 91.3+-3.1 {92,94,88}  vs           91.3+-2.3 {94,90,90}   4 differ (2 each way)
+  Reading: the first plan is identical in both (goal time = last block), so the two rows can only differ through the
+  retry, and the retry's scoring rule moves at most 2 episodes per 150. The open-loop numbers are set by the first
+  25-step plan; the retry is a wash either way. Board arms fx_nm192ol25gt / fx_vsig192ol25gt. Script paired_tags.py.
+
+ROLLOUT CUT (owner 2026-09-09 "fix it and do a dry run ensuring the numbers match exactly"; code UNCOMMITTED pending
+review): +gip_eval.rollout_cut=true (default off) makes the planners imagine only up to the batch's farthest goal-time
+block (never fewer blocks than executed) instead of all plan_rollout blocks. Design: the noise of ALL blocks is still
+drawn up front in the original per-block order (motflow.sample_noise mirrors sample's draws; given-style vs policy-style
+per block follows the caller's `given`, which must cover all blocks -- asserted), so the persistent per-policy generator
+advances identically; only model calls past the cut are skipped. Callers reshape by blocks.shape[1]; CEM keeps full-H
+candidates (pads the policy-init mean); the LeWM-grader path (extwm_bok) keeps all H blocks.
+  BUG CAUGHT BY THE DRY RUN: the first version passed CEM candidates with n blocks, so blocks past n were pre-drawn
+  policy-style (different shape) -> generator stream shifted -> CEM iterations 2-3 differed (0.0028 vs 0.0029 best cost).
+  Fixed by keeping candidates full-H.
+  VERIFICATION 1, CPU unit test (test_rollout_cut.py, real pusht fx_nm192 ckpt, real _imagine/_n_unroll/_goal_idx/_at/
+  _take/_gen bound to a stub; exec 5/25; steps 3/2/1, 5/4/1, 1/1/1; policy path and given path; two consecutive calls):
+  16/16 cases bit-exact -- cut blocks == uncut[:, :n], goal-time latents equal, generator state equal after each call.
+  VERIFICATION 2, GPU dry run (pusht fx_nm192 seed 42, tarball lewam_jointflow_cutdry.tar.gz = 42560ab + the edit,
+  entry jf_grev_cutdry.sh; jobs c2359ab92c0a28b3 cut off @n124-137-064, 75d29583728dfa86 cut on @n124-137-063,
+  8f425f1d1de53e94 cut on CEM rerun @n124-139-211; board log @n124-139-222):
+    best-of-K   76 / 76 / 76 (board/off/on)  arrays identical all three            t_call 0.570 -> 0.344 s (-40%)
+    gradient-TR 80 / 80 / 80                 arrays identical all three; [grad] diagnostics differ at the 3rd-4th
+                                             decimal among ALL THREE runs (three nodes; attention-backward
+                                             nondeterminism), outcomes unaffected       3.018 -> 1.338 s (-56%)
+    SteerMPC    80 / 82 / 82                 on == off on every episode; board differs by 1 (node drift, identical code)
+                                                                                         39.6 -> 20.6 s (-48%)
+    CEM         78 / 76 / 78                 on == BOARD on every episode AND all six [cem] cost lines; the cut-OFF run
+                                             is the outlier (1 episode, node drift)      0.728 -> 0.433 s (-41%)
+  Verdict: the cut is exact (CPU bit-exact; on GPU it reproduces the board's own results where the platform is
+  deterministic, and matches outcomes everywhere). Side finding: the GPU eval is not bit-deterministic across nodes
+  for the gradient-based planners and CEM (~1 episode in 50 can flip run to run) -- E2's paired tests hold within a
+  run; cross-run comparisons carry that noise floor.
+
+ROLLOUT CUT MADE THE ONLY PATH + READABILITY PASS (owner 2026-09-09: "make the change default and remove the old way";
+"rename things and fix your comments so I can at least understand the file"; "someone should get it having just read
+our paper"). The rollout_cut flag is gone: the planners always imagine only up to the batch's farthest goal horizon
+(never fewer dynamics steps than action chunks executed); all plan steps only when the planning cost sits on the last
+step (plan_goal_time off) or for the external-grader path. Names (approval requested): _imagine_rollout,
+_dynamics_steps_needed, _goal_horizon_index, _latent_at, _flow_generator, _n_actions_to_execute, _gradient_plan,
+_cem_plan, _steer_plan, _rollout_cost_differentiable, _best_of_k_external_grader, _best_of_k_oracle; model
+draw_sample_noise + needs_state_noise. The imagination core is rewritten with paper-vocabulary names (latent_history,
+goal_latent, goal_horizon, candidate_actions, n_candidates, chunk_len, noise_by_step, ...) and docstrings in the
+paper's terms (action chunk, dynamics step, candidate plan, goal horizon, planning cost, episode); history and
+pointers removed from code. Not touched: the pre-existing single-letter locals inside the other planners (next
+week's <500-line cleanup). Style rule recorded in CLAUDE.md ("Code style -- HARD RULE") and memory.
+Verification: CPU test ALL_EXACT (16/16) after the default switch and again after the rename; GPU rows: job
+6f7a27175ce7d1c1 (default cut, pre-rename) and 717c4e5db9dab9bf (renamed code, all four planners, seed 42) --
+results below when they land.
+  RESULTS (08:25): CPU test ALL_EXACT (16/16) on the renamed code. GPU seed-42 outcome arrays, renamed code
+  (fx_nm192cutnamed_s42, host n124-137-206, all four planners) vs the earlier runs: best-of-K == cutoff == board (0
+  differ); gradient-TR == cutoff == board (0); CEM == board == cuton2 (0; cutoff is the outlier by 1 episode); SteerMPC
+  == cutoff == cuton (0; board differs by 1). Per-call time vs the full rollout: -40 / -56 / -41 / -48%. The
+  pre-rename default-cut job (fx_nm192cutdef_s42, same host as cutoff) flipped ONE best-of-K episode (34) vs four other
+  runs of the same computation -> the run-to-run GPU noise floor reaches best-of-K too, about 1 episode in 50, rarely.
+  Ready to commit on the owner's approval of the names (commit message drafted: tmp/commit_msg_rollout_cut.txt).

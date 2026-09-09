@@ -474,6 +474,22 @@ class MoTFlow(nn.Module):
     def sample(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None):
         return self._sample_impl(z_history, history_pad, generator, z_goal, h_norm)
 
+    @property
+    def needs_state_noise(self):
+        """True when the state phase of sampling starts from a noise tensor: a flow state head with
+        a random prior, or a noisy previous-state prior. The mse state head never draws."""
+        return self.num_states > 0 and self.state_head != "mse" and \
+            (self.state_prior != "prev" or self.state_prior_sigma > 0)
+
+    def draw_sample_noise(self, batch_size, device, generator=None):
+        """The random tensors `sample` consumes, in order: the action noise, then the state noise if
+        needs_state_noise (else None). A caller that imagines several steps can draw them all first
+        and pass them to _sample_impl, keeping the generator stream identical to calling `sample`."""
+        act_noise = torch.randn(batch_size, self.num_actions, self.action_raw_dim, device=device, generator=generator)
+        state_noise = torch.randn(batch_size, self.num_states, self.z_dim, device=device, generator=generator) \
+            if self.needs_state_noise else None
+        return act_noise, state_noise
+
     def imagine_step(self, z_history, history_pad, actions, noise_state=None, z_goal=None, h_norm=None):
         """The MoT's one dynamics primitive, gradients enabled: the state token(s) one block ahead
         of the history from the CLEAN actions of that block (the first n_clean_actions of `actions`).

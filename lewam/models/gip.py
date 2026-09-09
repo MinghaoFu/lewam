@@ -88,7 +88,8 @@ def sample_eval_episodes(cfg, dataset):
 
     Each pair defines a start frame; the goal frame is goal_offset_steps ahead of it,
     except when cfg.gip_eval.to_end is set, in which case the goal is each episode's
-    last frame and only one start per episode qualifies. Episodes too short to reach
+    last frame and only one start per episode qualifies. cfg.gip_eval.start_zero draws
+    episodes instead of frames and starts each at frame 0. Episodes too short to reach
     the goal are excluded. Sampling is deterministic given cfg.seed.
 
     With cfg.gip_eval.full_traj, each pick starts at the episode's FIRST frame and the goal
@@ -121,6 +122,15 @@ def sample_eval_episodes(cfg, dataset):
     max_start = lengths - cfg.eval.goal_offset_steps - 1
     max_start_by_ep = {e: max_start[i] for i, e in enumerate(ep_indices)}
     max_start_per_row = np.array([max_start_by_ep[e] for e in ep_idx])
+    start_zero = bool(cfg.get("gip_eval", {}).get("start_zero", False))
+    if start_zero:
+        # start every picked episode at its first frame, goal goal_offset_steps later; the draw is
+        # over episodes long enough for the offset, so one seed picks the same episodes for every
+        # offset they all allow (paired across goal distances)
+        first_frames = np.nonzero((step_idx == 0) & (max_start_per_row >= 0))[0]
+        g = np.random.default_rng(cfg.seed)
+        picks = np.sort(first_frames[g.choice(len(first_frames), size=cfg.eval.num_eval, replace=False)])
+        return dataset.get_row_data(picks)[col].tolist(), [0] * len(picks), None
     to_end = bool(cfg.get("gip_eval", {}).get("to_end", False))
     if to_end:
         valid = np.nonzero((step_idx == max_start_per_row) & (max_start_per_row >= 0))[0]
@@ -1126,7 +1136,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
     def __init__(self, model, cfg, *args, **kwargs):
         self.exec_actions = int(kwargs.pop("exec_actions", 0))
         # flow-noise generator seeded from the eval seed (the flow-head seeding rule):
-        # every model.sample / inpaint-noise draw goes through _gen(), never the global RNG
+        # every model.sample / inpaint-noise draw goes through _flow_generator(), never the global RNG
         self._flow_seed = int(kwargs.pop("flow_seed", 0))
         self._flow_gen = None
         # pixel_scale=raw255: the checkpoint trained on raw 0-255 floats (uint8 cache whose
@@ -1200,7 +1210,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
                 history_pad[row, hl - len(buf):] = False
             action_chunk = self._propose(info_dict, replan, history, history_pad)
             raw = (action_chunk * self._astd + self._amean).cpu()      # (R, num_actions, raw_adim)
-            take = self._take()
+            take = self._n_actions_to_execute()
             for row, i in enumerate(replan):
                 self._action_buffer[i].extend(raw[row, :take])
                 self._steps_left[i] = max(self._steps_left[i] - take / self.action_block, 1.0)
@@ -1211,7 +1221,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
                 action[i] = self._action_buffer[i].popleft()
         return action.reshape(*self.env.action_space.shape).float().numpy()
 
-    def _take(self):
+    def _n_actions_to_execute(self):
         return self.exec_actions if 0 < self.exec_actions <= self.num_actions else self.action_block
 
     def _flush_env(self, i):
@@ -1219,7 +1229,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         self._lat_buf[i].clear()
         self._steps_left[i] = _h0_at(self.horizon0, i)
 
-    def _gen(self, device):
+    def _flow_generator(self, device):
         dev = torch.device(device)
         if self._flow_gen is None or self._flow_gen.device != dev:
             self._flow_gen = torch.Generator(device=dev)
@@ -1228,7 +1238,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
 
     def _propose(self, info_dict, replan, history, history_pad):
         action_chunk, _imagined = self.model.sample(history, history_pad,
-                                                    generator=self._gen(history.device))
+                                                    generator=self._flow_generator(history.device))
         return action_chunk
 
 
@@ -1355,7 +1365,7 @@ class JointFlowGCPolicy(JointFlowPolicy):
                                   device=device, dtype=torch.float32)
         action_chunk, z_imag = self.model.sample(history, history_pad,
                                                  z_goal=z_goal, h_norm=h_norm,
-                                                 generator=self._gen(history.device))
+                                                 generator=self._flow_generator(history.device))
         if not self.dyn_log:
             return action_chunk
         return self._dyn_log_step(replan, history, history_pad, z_goal, h_norm,
@@ -1371,7 +1381,7 @@ class JointFlowGCPolicy(JointFlowPolicy):
         then open a new prediction for the chunk about to execute (policy or random)."""
         device = history.device
         R = len(replan)
-        assert self._take() == self.action_block, \
+        assert self._n_actions_to_execute() == self.action_block, \
             "dyn_log needs exec == one action block so the +fs prediction meets the next replan"
         if self._dyn_prev is None:
             self._dyn_prev = [None] * self.env.num_envs
@@ -1387,12 +1397,12 @@ class JointFlowGCPolicy(JointFlowPolicy):
         exec_chunk = action_chunk.clone()
         is_random = torch.zeros(R, dtype=torch.bool)
         if self.dyn_random_p > 0:
-            gen = self._gen(device)
+            gen = self._flow_generator(device)
             coin = torch.rand(R, device=device, generator=gen) < self.dyn_random_p
             rnd = torch.randn(action_chunk.shape, device=device, generator=gen)
             exec_chunk[coin] = rnd[coin]
             is_random = coin.cpu()
-        gen = self._gen(device)
+        gen = self._flow_generator(device)
         A, adim = self.model.num_actions, self.model.action_raw_dim
         noise_a = torch.randn(R, A, adim, device=device, generator=gen)
         noise_s = torch.randn(R, self.model.num_states, self.model.z_dim, device=device,
@@ -1665,11 +1675,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 g_obs = goal[:, -1] if goal.ndim == 5 else goal
                 z_cond = self._enc(g_obs.to(device).float())
                 h_norm = torch.zeros(len(replan), device=device, dtype=torch.float32)
-            plan = (self._grad_plan(history, history_pad, z_cond, None, cost_goal=z_cost)
+            plan = (self._gradient_plan(history, history_pad, z_cond, None, cost_goal=z_cost)
                     if self.plan_mode == "grad"
                     else self._best_of_k(history, history_pad, z_cond, h_norm,
                                          cost_goal=z_cost))
-            take = self._take()
+            take = self._n_actions_to_execute()
             for i in replan:
                 self._raw_done[i] += take
             if self._prev_plan is not None:
@@ -1689,16 +1699,16 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_mode == "best_of_k":
             plan = self._best_of_k(history, history_pad, z_goal, h_norm, steps=steps_t)
         elif self.plan_mode == "extwm_bok":
-            plan = self._extwm_bok(info_dict, replan, history, history_pad, z_goal, steps_t, g_obs)
+            plan = self._best_of_k_external_grader(info_dict, replan, history, history_pad, z_goal, steps_t, g_obs)
         elif self.plan_mode == "oracle_bok":
-            plan = self._oracle_bok(history, history_pad, z_goal, h_norm, replan, steps=steps_t)
+            plan = self._best_of_k_oracle(history, history_pad, z_goal, h_norm, replan, steps=steps_t)
         elif self.plan_mode == "grad":
-            plan = self._grad_plan(history, history_pad, z_goal, steps_t)
+            plan = self._gradient_plan(history, history_pad, z_goal, steps_t)
         elif self.plan_mode == "steer":
             plan = (self._steer_rollout(history, history_pad, z_goal, steps_t) if self.rollout_only
                     else self._steer(history, history_pad, z_goal, h_norm))
         else:
-            plan = (self._cem_rollout(history, history_pad, z_goal, steps_t) if self.rollout_only
+            plan = (self._cem_plan(history, history_pad, z_goal, steps_t) if self.rollout_only
                     else self._cem(history, history_pad, z_goal, h_norm, replan))
         if self._prev_plan is not None:
             for row, i in enumerate(replan):
@@ -1710,7 +1720,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self._ext_frames is not None:
             self._ext_frames[i].clear(); self._ext_acts[i].clear()
 
-    def _extwm_bok(self, info_dict, replan, history, history_pad, z_goal, steps, g_obs):
+    def _best_of_k_external_grader(self, info_dict, replan, history, history_pad, z_goal, steps, g_obs):
         """best_of_k proposals (policy chunks imagined through OUR dynamics, as in _best_of_k's
         rollout path), selected by an EXTERNAL frozen LeWM world model's terminal cost. The LeWM
         sees the last ext_wm_hist real frames (its own encoder), the executed past action blocks
@@ -1736,7 +1746,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
             goal_rep = z_goal.repeat_interleave(K, 0)
             steps_rep = steps.repeat_interleave(K, 0) if steps is not None else None
-            blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)            # (R*K, H, fs, adim)
+            blocks, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep, n_dyn_steps=H)   # the external grader scores the whole plan
             cost_ours = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
             # 2) LeWM grading
             Hf = self.ext_wm_hist; A = fs * adim
@@ -1772,69 +1782,112 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 self._ext_acts[i].append(plan[row, :fs].reshape(-1).detach().cpu())
         return plan
 
-    def _goal_idx(self, steps, n_rows_per_env=1):
-        """Per-row index of the imagined block at the goal time: clamp(round(steps_left), 1, H) - 1,
-        or the last block when plan_goal_time is off / steps unknown."""
-        H = self.plan_rollout
-        if not self.plan_goal_time or steps is None:
+    def _goal_step_idx(self, goal_horizon, n_rows_per_env=1):
+        """Index of the predicted state at each proposal's goal horizon.
+
+        goal_horizon: dynamics steps left until the goal must be reached, one float per proposal,
+        or None. Returns clamp(round(goal_horizon), 1, full plan length) - 1, or None when the
+        planning cost is taken at the last predicted state (plan_goal_time off, or no horizon)."""
+        n_dyn_steps_full = self.plan_rollout
+        if not self.plan_goal_time or goal_horizon is None:
             return None
-        idx = (steps.round().clamp(min=1.0, max=float(H)).long() - 1)
-        return idx.repeat_interleave(n_rows_per_env, 0) if n_rows_per_env > 1 else idx
+        goal_step_idx = goal_horizon.round().clamp(min=1.0, max=float(n_dyn_steps_full)).long() - 1
+        return goal_step_idx.repeat_interleave(n_rows_per_env, 0) if n_rows_per_env > 1 else goal_step_idx
+
+    def _n_dyn_steps_needed(self, goal_horizon):
+        """Dynamics steps to imagine in one replan: the largest goal horizon in the batch, never
+        fewer than the action chunks that will be executed. The dynamics is autoregressive, so
+        predicted states past the goal horizon cannot change the planning cost. The full plan
+        length when the cost is taken at the last step."""
+        n_dyn_steps_full = self.plan_rollout
+        if not self.plan_goal_time or goal_horizon is None:
+            return n_dyn_steps_full
+        n_dyn_steps_to_goal = int(self._goal_step_idx(goal_horizon).max().item()) + 1
+        n_chunks_executed = (self._n_actions_to_execute() + self.action_block - 1) // self.action_block
+        return max(1, min(n_dyn_steps_full, max(n_dyn_steps_to_goal, n_chunks_executed)))
 
     @staticmethod
-    def _at(zs, idx):
-        """zs (B, H, D) -> (B, D) at per-row block idx (None = last)."""
-        if idx is None:
-            return zs[:, -1]
-        return zs[torch.arange(zs.shape[0], device=zs.device), idx]
+    def _pred_state_at(pred_states_per_step, step_idx):
+        """Pick one predicted state per proposal: pred_states_per_step (proposals, steps, z_dim)
+        -> (proposals, z_dim) at each proposal's step_idx (None = the last step)."""
+        if step_idx is None:
+            return pred_states_per_step[:, -1]
+        return pred_states_per_step[torch.arange(pred_states_per_step.shape[0], device=pred_states_per_step.device), step_idx]
 
-    def _imagine(self, h, p, goal_rep, steps_rep, given=None):
-        """Autoregressive imagination over plan_rollout blocks for B = R*K rows (K candidates per
-        replan row). Block k's actions come from given[:, k] (B, fs, adim) while k < given.shape[1]
-        (imagined state via sample_inpaint under noise shared across a row's candidates), else
-        from a fresh policy sample (its first fs actions). The imagined z (+1 block) slides into
-        the history each unroll; GR checkpoints see h_norm counting down one block per unroll.
-        Returns (blocks (B, plan_rollout, fs, adim), z_final (B, D)) where z_final is the
-        imagined latent at each row's goal time (plan_goal_time) or after the last block."""
-        fs, K = self.action_block, self.plan_k
-        R = h.shape[0] // K
-        A, adim = self.model.num_actions, self.model.action_raw_dim
-        S, D = self.model.num_states, self.model.z_dim
-        gc = getattr(self.model, "goal_conditioning", False)
-        gen = self._gen(h.device)
-        n_given = 0 if given is None else given.shape[1]
-        n_rep = (A + fs - 1) // fs
-        blocks, zs, z_next = [], [], None
-        for k in range(self.plan_rollout):
-            cond = dict()
-            if gc:
-                # steps_rep None = goal_terminal ckpts (h_norm trained constant 0)
-                hk = torch.zeros(h.shape[0], device=h.device) if steps_rep is None else \
-                    (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
-                cond = dict(z_goal=goal_rep, h_norm=hk)
-            if k < n_given:
-                blk = given[:, k]
-                nxt = given[:, k + 1] if k + 1 < n_given else blk
-                plan = torch.cat([blk] + [nxt] * (n_rep - 1), 1)[:, :A]
-                noise_a = torch.randn(R, 1, A, adim, device=h.device, generator=gen) \
-                    .expand(R, K, A, adim).reshape(R * K, A, adim)
-                noise_s = torch.randn(R, 1, S, D, device=h.device, generator=gen) \
-                    .expand(R, K, S, D).reshape(R * K, S, D)
-                if self.rollout_only:
-                    z_imag = self.model.predict_state(h, p, plan, noise_state=noise_s, **cond)
-                else:
-                    z_imag = self.model.sample_inpaint(h, p, plan, noise_action=noise_a, noise_state=noise_s, **cond)
+    def _imagine_rollout(self, state_history, history_pad, goal_state, goal_horizon,
+                         candidate_actions=None, n_dyn_steps=None):
+        """Predict the state trajectory of every proposal (candidate plan) and return the predicted
+        state at each proposal's goal horizon, where the planning cost is measured.
+
+        Tensors are stacked over all proposals of all episodes, episode-major (entry = episode *
+        n_proposals + proposal). One dynamics step predicts the next state from the state history
+        and one action chunk. The chunk comes from candidate_actions[:, step] when proposals are
+        given (CEM, gradient and oracle planning; an episode's proposals share one noise draw),
+        otherwise from a fresh policy sample on the predicted history (best-of-K). Each predicted
+        state is appended to the history; goal-conditioned checkpoints see the goal horizon shrink
+        by one per step. Steps predicted: n_dyn_steps, default _n_dyn_steps_needed. The noise for
+        every step of a full plan is drawn first, in plan order, so the seeded generator advances
+        exactly as for a full rollout however many steps are predicted.
+        Returns (act_chunks_per_step (total_proposals, n_dyn_steps, actions_per_chunk, action_dim),
+        pred_state_at_goal (total_proposals, z_dim))."""
+        actions_per_chunk, n_proposals = self.action_block, self.plan_k
+        total_proposals = state_history.shape[0]
+        n_episodes = total_proposals // n_proposals
+        device = state_history.device
+        n_actions_pred, action_dim = self.model.num_actions, self.model.action_raw_dim
+        n_states_pred, z_dim = self.model.num_states, self.model.z_dim
+        is_goal_conditioned = getattr(self.model, "goal_conditioning", False)
+        noise_generator = self._flow_generator(device)
+        n_proposal_steps = 0 if candidate_actions is None else candidate_actions.shape[1]
+        assert candidate_actions is None or n_proposal_steps == self.plan_rollout, \
+            "candidate_actions must cover the whole plan"
+        n_chunk_repeats = (n_actions_pred + actions_per_chunk - 1) // actions_per_chunk
+        n_dyn_steps = self._n_dyn_steps_needed(goal_horizon) if n_dyn_steps is None else int(n_dyn_steps)
+
+        noise_per_dyn_step = []
+        for step in range(self.plan_rollout):
+            if step < n_proposal_steps:
+                act_noise = torch.randn(n_episodes, 1, n_actions_pred, action_dim, device=device, generator=noise_generator) \
+                    .expand(n_episodes, n_proposals, n_actions_pred, action_dim).reshape(total_proposals, n_actions_pred, action_dim)
+                state_noise = torch.randn(n_episodes, 1, n_states_pred, z_dim, device=device, generator=noise_generator) \
+                    .expand(n_episodes, n_proposals, n_states_pred, z_dim).reshape(total_proposals, n_states_pred, z_dim)
+                noise_per_dyn_step.append((act_noise, state_noise))
             else:
-                action, z_imag = self.model.sample(h, p, generator=gen, **cond)
-                blk = action[:, :fs]
-            blocks.append(blk)
-            z_next = z_imag[:, :1]
-            zs.append(z_next.squeeze(1))
-            h = torch.cat([h[:, 1:], z_next], dim=1)
-            p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
-        return torch.stack(blocks, 1), self._at(torch.stack(zs, 1), self._goal_idx(steps_rep))
+                noise_per_dyn_step.append(self.model.draw_sample_noise(total_proposals, device, generator=noise_generator))
 
-    def _oracle_bok(self, history, history_pad, z_goal, h_norm, replan, steps=None):
+        act_chunks_per_step, pred_states_per_step = [], []
+        for step in range(n_dyn_steps):
+            act_noise, state_noise = noise_per_dyn_step[step]
+            goal_inputs = dict()
+            if is_goal_conditioned:
+                # goal_terminal checkpoints train with h_norm 0 and get no horizon
+                h_norm = torch.zeros(total_proposals, device=device) if goal_horizon is None else \
+                    (goal_horizon - step).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
+                goal_inputs = dict(z_goal=goal_state, h_norm=h_norm)
+            if step < n_proposal_steps:
+                curr_act_chunk = candidate_actions[:, step]
+                next_act_chunk = candidate_actions[:, step + 1] if step + 1 < n_proposal_steps else curr_act_chunk
+                dyn_act_input = torch.cat([curr_act_chunk] + [next_act_chunk] * (n_chunk_repeats - 1), 1)[:, :n_actions_pred]
+                if self.rollout_only:
+                    pred_states = self.model.predict_state(state_history, history_pad, dyn_act_input,
+                                                        noise_state=state_noise, **goal_inputs)
+                else:
+                    pred_states = self.model.sample_inpaint(state_history, history_pad, dyn_act_input, noise_action=act_noise,
+                                                         noise_state=state_noise, **goal_inputs)
+            else:
+                with torch.no_grad():   # model.sample with the pre-drawn noise
+                    sampled, pred_states = self.model._sample_impl(state_history, history_pad, None, goal_inputs.get("z_goal"),
+                                                                goal_inputs.get("h_norm"), noise_action=act_noise,
+                                                                noise_state=state_noise)
+                curr_act_chunk = sampled[:, :actions_per_chunk]
+            act_chunks_per_step.append(curr_act_chunk)
+            next_pred_state = pred_states[:, :1]
+            pred_states_per_step.append(next_pred_state.squeeze(1))
+            state_history = torch.cat([state_history[:, 1:], next_pred_state], dim=1)
+            history_pad = torch.cat([history_pad[:, 1:], torch.zeros_like(history_pad[:, :1])], dim=1)
+        return torch.stack(act_chunks_per_step, 1), self._pred_state_at(torch.stack(pred_states_per_step, 1), self._goal_step_idx(goal_horizon))
+
+    def _best_of_k_oracle(self, history, history_pad, z_goal, h_norm, replan, steps=None):
         """Expert sequence vs K-1 wrong sequences, scored by the dynamics: one block ahead by
         inpaint (plan_rollout 1: chunks of num_actions raw actions, shared noise) or by rollout to
         the goal time (plan_rollout H: sequences of H*fs raw actions, every block imagined from
@@ -1870,7 +1923,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         cz = torch.from_numpy((cands - amean) / astd).to(device).reshape(R * K, A, adim)
         h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0)
-        gen = self._gen(device)
+        gen = self._flow_generator(device)
         Am = self.model.num_actions
         noise_a = torch.randn(R, 1, Am, adim, device=device, generator=gen).expand(R, K, Am, adim).reshape(R * K, Am, adim)
         S, D = self.model.num_states, self.model.z_dim
@@ -1878,7 +1931,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if self.plan_rollout > 1:
             fs = self.action_block
             steps_rep = steps.repeat_interleave(K, 0) if steps is not None else None
-            _, z_final = self._imagine(h, p, goal_rep, steps_rep, given=cz.view(R * K, self.plan_rollout, fs, adim))
+            _, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep, candidate_actions=cz.view(R * K, self.plan_rollout, fs, adim))
             cost = ((z_final - goal_rep) ** 2).mean(-1).view(R, K)
         else:
             z_imag = self.model.sample_inpaint(h, p, cz, noise_action=noise_a, noise_state=noise_s,
@@ -1886,7 +1939,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             cost = self._final_cost(z_imag, goal_rep).view(R, K)
         pick = cost.argmin(1)
         self._oracle_hits += int((pick == 0).sum()); self._oracle_n += R
-        take = self._take()
+        take = self._n_actions_to_execute()
         pick_np = pick.cpu().numpy()
         for row, i in enumerate(replan):
             key = (int(self._oracle_idx[i]), bool(self._oracle_ondemo[i]))
@@ -1916,11 +1969,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         plans = []
         for lo in range(0, R, chunk):
             hi = min(R, lo + chunk)
-            plans.append(self._steer_rollout_chunk(history[lo:hi], history_pad[lo:hi], z_goal[lo:hi],
+            plans.append(self._steer_plan(history[lo:hi], history_pad[lo:hi], z_goal[lo:hi],
                                                    None if steps is None else steps[lo:hi]))
         return torch.cat(plans, 0)
 
-    def _steer_rollout_chunk(self, history, history_pad, z_goal, steps):
+    def _steer_plan(self, history, history_pad, z_goal, steps):
         """SteerMPC on MoT: Adam on a z_dim bias delta added to the goal latent fed to the POLICY,
         through the frozen flow sampler and the dynamics rollout (plan_rollout blocks). K noise
         realizations per env share one delta; the noise is fixed per replan, so delta -> cost is
@@ -1934,7 +1987,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         A, adim = self.model.num_actions, self.model.action_raw_dim
         S, D = self.model.num_states, self.model.z_dim
         device = history.device
-        gen = self._gen(device)
+        gen = self._flow_generator(device)
         steps_t = steps if steps is not None else torch.full((R,), float(H), device=device)
         h0 = history.repeat_interleave(K, 0); p0 = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0); steps_rep = steps_t.repeat_interleave(K, 0)
@@ -1943,12 +1996,13 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         gnorm = z_goal.norm(dim=-1, keepdim=True)
         rows = torch.arange(R, device=device)
 
-        gidx = self._goal_idx(steps_rep)
+        gidx = self._goal_step_idx(steps_rep)
+        n_dyn_steps = self._n_dyn_steps_needed(steps_rep)   # the noise lists above cover the whole plan: same draws as a full rollout
 
         def rollout(delta):
             zg = goal_rep + delta.repeat_interleave(K, 0)
             h, p, zs, blocks = h0, p0, [], []
-            for k in range(H):
+            for k in range(n_dyn_steps):
                 hk = (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 action, z_imag = self.model._sample_impl(h, p, z_goal=zg, h_norm=hk,
                                                          noise_action=noise_a[k], noise_state=noise_s[k])
@@ -1956,9 +2010,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 zs.append(z_imag[:, 0])
                 h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
                 p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
-            z = self._at(torch.stack(zs, 1), gidx)                          # latent at the goal time
+            z = self._pred_state_at(torch.stack(zs, 1), gidx)                          # latent at the goal time
             cost = ((z - goal_rep) ** 2).mean(-1).view(R, K)              # vs the TRUE goal
-            return torch.stack(blocks, 1).view(R, K, H, fs, adim), cost
+            return torch.stack(blocks, 1).view(R, K, n_dyn_steps, fs, adim), cost
 
         with torch.enable_grad():
             delta = torch.zeros(R, D, device=device, requires_grad=True)
@@ -1994,15 +2048,14 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             print(f"[steer] {st['improved']}/{st['n']} replans improved on iterate 0 (best of {K}); mean cost "
                   f"{st['c0'] / st['n']:.4f} -> {st['cb'] / st['n']:.4f}; mean ||delta||/||z_goal|| "
                   f"{st['dn'] / st['n']:.3f} (steps {self.pm_steps}, lr {self.pm_lr}, rho {self.pm_rho})", flush=True)
-        return best_plan.reshape(R, H * fs, adim)
+        return best_plan.reshape(R, best_plan.shape[1] * fs, adim)
 
-    def _rollout_cost_grad(self, history, history_pad, z_goal, steps, U, noise_s=None,
+    def _rollout_cost_differentiable(self, history, history_pad, z_goal, steps, U, noise_s=None,
                            cost_goal=None):
-        """Differentiable terminal cost (R,) of the z-scored plan U (R, H, fs, adim) through the
-        MoT's imagine_step; the graph flows through U only (history and goal are constants).
-        noise_s: per-block state noise (flow state head; fixed per replan), ignored by the MSE
-        head. steps None = goal_terminal ckpts (h_norm constant 0); cost_goal = score target
-        when it differs from the conditioning goal (subgoal planning)."""
+        """Planning cost of a plan U (episodes, steps, chunk_len, action_dim), differentiable in U:
+        imagine the plan step by step and measure the distance from the latent at the goal horizon
+        (`steps`) to the goal latent (cost_goal when the scoring goal differs from the conditioning
+        goal). noise_s: per-step state noise for a flow state head, fixed per replan."""
         h, p = history, history_pad
         gc = getattr(self.model, "goal_conditioning", False)
         zs = []
@@ -2016,40 +2069,39 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             zs.append(z_imag[:, 0])
             h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
             p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
-        z = self._at(torch.stack(zs, 1), self._goal_idx(steps))
+        z = self._pred_state_at(torch.stack(zs, 1), self._goal_step_idx(steps))
         tgt = cost_goal if cost_goal is not None else z_goal
         return ((z - tgt) ** 2).mean(-1)
 
-    def _grad_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
-        """Gradient planning on the MoT dynamics: warm start = the best of plan_k policy rollouts
-        (the roll planner), then grad_steps of Adam on the z-scored H-block plan against the
-        differentiable terminal cost; the warm start is a floor and the best iterate by model
-        cost is returned (its first block executes)."""
+    def _gradient_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
+        """Gradient planning: start from the best of plan_k policy proposals (best-of-K), then refine
+        the whole plan with grad_steps Adam steps on the planning cost, with an optional trust region
+        around the start (grad_tr). Returns the lowest-cost plan seen, the start included."""
         R, K, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
         device = history.device
         steps_t = steps          # None = goal_terminal ckpts (h_norm 0, cost at the last block)
         with torch.no_grad():
             h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
             goal_rep = z_goal.repeat_interleave(K, 0)
-            blocks, z_final = self._imagine(
+            blocks, z_final = self._imagine_rollout(
                 h, p, goal_rep, steps_t.repeat_interleave(K, 0) if steps_t is not None else None)
             cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
             cost0 = ((z_final - cg_rep) ** 2).mean(-1).view(R, K)
             pick = cost0.argmin(1)
             rows = torch.arange(R, device=device)
-            U0 = blocks.view(R, K, H, fs, -1)[rows, pick].detach()          # (R, H, fs, adim)
+            U0 = blocks.view(R, K, blocks.shape[1], fs, -1)[rows, pick].detach()   # (R, n, fs, adim)
             c_warm = cost0[rows, pick].detach()
         if self.grad_steps <= 0:
-            return U0.reshape(R, H * fs, -1)
+            return U0.reshape(R, U0.shape[1] * fs, -1)
         S, D = self.model.num_states, self.model.z_dim
-        gen = self._gen(device)
+        gen = self._flow_generator(device)
         noise_s = [torch.randn(R, S, D, device=device, generator=gen) for _ in range(H)]   # flow state head: fixed per replan
         best_U, best_c = U0.clone(), c_warm.clone()
         U = U0.clone().requires_grad_(True)
         opt = torch.optim.Adam([U], lr=self.grad_lr)
         with torch.enable_grad():
             for it in range(self.grad_steps + 1):
-                c = self._rollout_cost_grad(history, history_pad, z_goal, steps_t, U, noise_s,
+                c = self._rollout_cost_differentiable(history, history_pad, z_goal, steps_t, U, noise_s,
                                             cost_goal=cost_goal)
                 with torch.no_grad():
                     better = c < best_c
@@ -2077,16 +2129,13 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             print(f"[grad] {st['improved']}/{st['n']} replans improved on the warm start; mean cost "
                   f"{st['c_warm'] / st['n']:.4f} -> {st['c_best'] / st['n']:.4f}; mean ||U-U0|| "
                   f"{st['du'] / st['n']:.3f} (steps {self.grad_steps}, lr {self.grad_lr}, tr {self.grad_tr})", flush=True)
-        return best_U.detach().reshape(R, H * fs, -1)
+        return best_U.detach().reshape(R, best_U.shape[1] * fs, -1)
 
-    def _cem_rollout(self, history, history_pad, z_goal, steps, cost_goal=None):
-        """CEM on the MoT rollout dynamics (Minghao 2026-09-04: same ckpt, CEM vs grad). Candidate
-        H-block plans are imagined as GIVEN actions through `_imagine` (no policy inside the loop);
-        cost = terminal latent distance to the goal, as in best_of_k/grad. Per replan: cem_iters
-        rounds of plan_k Gaussian candidates around the running mean (candidate 0 = the mean),
-        elites (cem_elites) refit mean/std. cem_init=policy: mean0 = the best of plan_k policy
-        rollouts (grad's warm start, the policy prior); cem_init=zero: mean0 = 0 (pure world model).
-        The best candidate seen executes (its first block)."""
+    def _cem_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
+        """Cross-entropy-method planning on the planning cost: cem_iters rounds of plan_k Gaussian
+        candidate plans around a running mean (candidate 0 is the mean itself); the cem_elites best
+        refit the mean and std. The mean starts at the best policy proposal (cem_init=policy) or at
+        zero (cem_init=zero, world model only). Returns the lowest-cost candidate seen."""
         R, P, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
         adim = self.model.action_raw_dim
         device = history.device
@@ -2098,20 +2147,25 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         rows = torch.arange(R, device=device)
         with torch.no_grad():
             if self.cem_init == "policy":
-                blocks, z_final = self._imagine(h, p, goal_rep, steps_rep)
+                blocks, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep)
                 cost0 = ((z_final - cg_rep) ** 2).mean(-1).view(R, P)
                 pick = cost0.argmin(1)
-                mean = blocks.view(R, P, H, fs, adim)[rows, pick].clone()      # (R, H, fs, adim)
+                mean = blocks.view(R, P, blocks.shape[1], fs, adim)[rows, pick].clone()   # (R, n, fs, adim)
                 best_plan, best_cost = mean.clone(), cost0[rows, pick].clone()
             else:
                 mean = torch.zeros(R, H, fs, adim, device=device)
                 best_plan, best_cost = mean.clone(), torch.full((R,), float("inf"), device=device)
+            if mean.shape[1] < H:
+                # candidates always span the whole plan, so the random draws match a full rollout;
+                # the part past the imagined steps is never scored or executed
+                unpredicted_steps_pad = mean.new_zeros(R, H - mean.shape[1], fs, adim)
+                mean, best_plan = torch.cat([mean, unpredicted_steps_pad], 1), torch.cat([best_plan, unpredicted_steps_pad], 1)
             std = torch.full_like(mean, self.cem_std)
             for _ in range(self.cem_iters):
                 cand = mean[:, None] + std[:, None] * torch.randn(R, P, H, fs, adim, device=device,
-                                                                  generator=self._gen(device))
+                                                                  generator=self._flow_generator(device))
                 cand[:, 0] = mean
-                _, z_final = self._imagine(h, p, goal_rep, steps_rep, given=cand.reshape(R * P, H, fs, adim))
+                _, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep, candidate_actions=cand.reshape(R * P, H, fs, adim))
                 cost = ((z_final - cg_rep) ** 2).mean(-1).view(R, P)
                 iter_cost, iter_pick = cost.min(1)
                 better = iter_cost < best_cost
@@ -2127,7 +2181,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         if st["n"] % 50 < R:
             print(f"[cem] init={self.cem_init} iters={self.cem_iters} elites={self.cem_elites} std0={self.cem_std}: "
                   f"mean best cost {st['c'] / st['n']:.4f}" + (f" (warm start {st['c0'] / st['n']:.4f})" if self.cem_init == "policy" else ""), flush=True)
-        return best_plan.reshape(R, H * fs, adim)
+        return best_plan.reshape(R, best_plan.shape[1] * fs, adim)
 
     def _cond_args(self, z_goal, h_norm, repeat):
         if not getattr(self.model, "goal_conditioning", False):
@@ -2141,11 +2195,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         p = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0)
         if self.plan_rollout <= 1:
-            action, z_imag = self.model.sample(h, p, generator=self._gen(h.device),
+            action, z_imag = self.model.sample(h, p, generator=self._flow_generator(h.device),
                                                **self._cond_args(z_goal, h_norm, K))
             if self.plan_score == "inpaint":
                 A, adim = self.model.num_actions, self.model.action_raw_dim
-                gen = self._gen(h.device)
+                gen = self._flow_generator(h.device)
                 noise_a = torch.randn(R, 1, A, adim, device=h.device, generator=gen) \
                     .expand(R, K, A, adim).reshape(R * K, A, adim)
                 noise_s = torch.randn(R, 1, self.model.num_states, self.model.z_dim,
@@ -2164,16 +2218,16 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         fs = self.action_block
         gc = getattr(self.model, "goal_conditioning", False)
         steps_rep = steps.repeat_interleave(K, 0) if gc and steps is not None else None
-        given = None
+        random_proposals = None
         if self.plan_random_candidates:
-            given = torch.randn(h.shape[0], self.plan_rollout, fs, self.model.action_raw_dim,
-                                device=h.device, generator=self._gen(h.device))
-        blocks, z_final = self._imagine(h, p, goal_rep, steps_rep, given=given)
+            random_proposals = torch.randn(h.shape[0], self.plan_rollout, fs, self.model.action_raw_dim,
+                                device=h.device, generator=self._flow_generator(h.device))
+        blocks, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep, candidate_actions=random_proposals)
         # cost_goal (subgoal planning on goal-conditioned ckpts): the policy is conditioned on
         # z_goal, the planner scores against cost_goal
         cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
         cost = ((z_final - cg_rep) ** 2).mean(-1).view(R, K)
-        plan = blocks.reshape(R, K, self.plan_rollout * fs, -1)
+        plan = blocks.reshape(R, K, blocks.shape[1] * fs, -1)
         pick = cost.argmin(1)
         return plan[torch.arange(R, device=plan.device), pick]
 
@@ -2188,7 +2242,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         A, adim = self.model.num_actions, self.model.action_raw_dim
         S, D = self.model.num_states, self.model.z_dim
         device = history.device
-        gen = self._gen(device)
+        gen = self._flow_generator(device)
         noise_a = torch.randn(R, A, adim, device=device, generator=gen)
         noise_s = torch.randn(R, S, D, device=device, generator=gen)
         in_noise_a = torch.randn(R, A, adim, device=device, generator=gen)
@@ -2233,9 +2287,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         R, P = history.shape[0], self.plan_k
         A, adim = self.model.num_actions, self.model.action_raw_dim
         device = history.device
-        take = self._take()
+        take = self._n_actions_to_execute()
 
-        mean, _ = self.model.sample(history, history_pad, generator=self._gen(history.device),
+        mean, _ = self.model.sample(history, history_pad, generator=self._flow_generator(history.device),
                                     **self._cond_args(z_goal, h_norm, 1))
         for row, i in enumerate(replan):
             prev = self._prev_plan[i] if self._prev_plan is not None else None
@@ -2243,10 +2297,10 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 mean[row] = torch.cat([prev[take:], prev[-1:].expand(take, adim)])
         std = torch.full_like(mean, self.cem_std)
 
-        noise_action = torch.randn(R, 1, A, adim, device=device, generator=self._gen(device)) \
+        noise_action = torch.randn(R, 1, A, adim, device=device, generator=self._flow_generator(device)) \
             .expand(R, P, A, adim).reshape(R * P, A, adim)
         noise_state = torch.randn(R, 1, self.model.num_states, self.model.z_dim, device=device,
-                                  generator=self._gen(device)) \
+                                  generator=self._flow_generator(device)) \
             .expand(R, P, self.model.num_states, self.model.z_dim) \
             .reshape(R * P, self.model.num_states, self.model.z_dim)
         hist = history.repeat_interleave(P, 0)
@@ -2258,7 +2312,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         best_cost = torch.full((R,), float("inf"), device=device)
         for _ in range(self.cem_iters):
             cand = mean[:, None] + std[:, None] * torch.randn(R, P, A, adim, device=device,
-                                                              generator=self._gen(device))
+                                                              generator=self._flow_generator(device))
             cand[:, 0] = mean
             z_imag = self.model.sample_inpaint(hist, pad, cand.reshape(R * P, A, adim),
                                                noise_action, noise_state,

@@ -92,3 +92,15 @@ Eval: `bash scripts/eval_lewam_gc.sh <task>` (in the repo; remaps ckpt → gcidm
 3 seeds × N=50). Traps: the loader reads the prebuilt frames_cache (~1× the frame tensor in RAM:
 cube/reacher ~140GB, pusht ~160GB, tworoom ~70GB); reacher eval needs `dm_control==1.0.43`;
 headless needs `MUJOCO_GL=egl`.
+
+## Code style — HARD RULE (owner, 2026-09-09; applies to every edit, never copy a file's existing habits)
+
+- Names: concise and descriptive (`imagine_rollout`, `goal_horizon`, `n_candidates`, `chunk_len`).
+  No single letters, no two-letter or cryptic abbreviations, no paragraph-long names.
+- Docstrings and comments explain in the paper's vocabulary (action chunk, dynamics step,
+  candidate plan, imagined trajectory, goal horizon, planning cost, episode). A reader who has
+  only read the paper must understand a function without other files. That is what docstrings
+  are for; the code itself says what, comments say why.
+- No dates, attributions, RECIPES or commit pointers, "keep in sync" notes, or verification
+  claims in code. History belongs in RECIPES and commit messages.
+- Files stay under ~500 lines; deprecated modules are removed, not kept "just in case".
