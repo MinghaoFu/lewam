@@ -58,18 +58,24 @@ def observe(proprio):
 
 
 def set_absolute_control():
-    """DP's abs_action checkpoints were trained with control_delta=False: switch every OSC part
-    controller of the live robots to absolute goals (robosuite 1.4 and 1.5 layouts)."""
+    """DP's abs_action checkpoints were trained with control_delta=False: switch every OSC controller of
+    the live robots to absolute goals (position, axis-angle). robosuite 1.4 keeps the flag as
+    `use_delta`, 1.5's part controllers as `input_type`; both read it at every goal update."""
     switched = 0
     for robot in env.env.env.robots:
         controllers = [getattr(robot, "controller", None), getattr(robot, "composite_controller", None)]
         controllers += list((getattr(controllers[1], "part_controllers", {}) or {}).values())
         for controller in controllers:
-            if controller is not None and hasattr(controller, "use_delta"):
+            if controller is None or "OperationalSpace" not in type(controller).__name__:
+                continue
+            if hasattr(controller, "use_delta"):
                 controller.use_delta = False
                 switched += 1
-    assert switched > 0, "no OSC controller exposes use_delta"
-    print(f"[baseline-eval] {switched} controller(s) switched to absolute goals", flush=True)
+            elif hasattr(controller, "input_type"):
+                controller.input_type = "absolute"
+                switched += 1
+    assert switched > 0, "no OSC controller found to switch to absolute goals"
+    print(f"[baseline-eval] {switched} OSC controller(s) switched to absolute goals", flush=True)
 
 
 if args.kind == "bc_rnn":
