@@ -7,7 +7,9 @@ the batched cost of up to 50 plans and an episode's total is its amortized share
 planned in that call): a throughput number; reported as mean +- std over eval seeds. Batch-1 runs
 (num_envs == 1, i.e. eval.num_eval=1 on a few seeds): every record is one plan, so the seconds are
 the time a plan takes alone; reported as mean +- std over those single-episode runs. The first
-call of any run also carries the CUDA warm-up.
+call of any run (a fresh process) also carries the CUDA warm-up, so a second table gives the warm
+plan time by imagined length (our planners' cost depends on the imagined length, LeWM's on its
+fixed horizon) from every record after the first call of its process.
 
 usage: plan_timing_report.py <eval logs ...> [--phase plan|call] [--json out.json]
 """
@@ -52,18 +54,38 @@ def run_key(summary):
 
 
 def run_stats(run, key):
-    """Per replan cycle: seconds of the (one) call per cycle; per episode: amortized totals, all and
-    successful only (with one env the amortized total is the episode's own time)."""
-    by_cycle = defaultdict(list)
+    """Per replan cycle: seconds and envs planned of the (one) call per cycle; per episode: amortized
+    totals, all and successful only (with one env the amortized total is the episode's own time)."""
+    by_cycle, by_cycle_envs = defaultdict(list), defaultdict(list)
     for r in run["records"]:
         for cycle in set(r["cycle_idx"]):
             by_cycle[cycle].append(r[key])
+            by_cycle_envs[cycle].append(len(r["envs_planned"]))
     per_cycle = {cycle: float(np.mean(v)) for cycle, v in by_cycle.items()}
+    per_cycle_envs = {cycle: float(np.mean(v)) for cycle, v in by_cycle_envs.items()}
     total, _ = episode_totals(run["records"], key)
     envs = sorted(total)
     success = run["success"]
     ok = [e for e in envs if success is not None and e < len(success) and success[e]]
-    return per_cycle, [total[e] for e in envs], [total[e] for e in ok], success is not None
+    return per_cycle, per_cycle_envs, [total[e] for e in envs], [total[e] for e in ok], success is not None
+
+
+def warm_by_length(run, key):
+    """(seconds, envs planned) of every plan call after the first one of the process, keyed by the
+    imagined length."""
+    by_length = defaultdict(list)
+    for r in run["records"]:
+        if r["call_idx"] > 0 and r.get("imagined_blocks") is not None:
+            by_length[int(r["imagined_blocks"])].append((r[key], len(r["envs_planned"])))
+    return by_length
+
+
+def mean_std_envs(pairs):
+    """mean_std of the seconds plus the mean envs planned per call."""
+    stat = mean_std([p[0] for p in pairs])
+    if stat is not None:
+        stat["envs"] = float(np.mean([p[1] for p in pairs]))
+    return stat
 
 
 def mean_std(values):
@@ -75,9 +97,12 @@ def mean_std(values):
 
 
 def fmt(stat, digits=3):
+    """mean +- std (n, and the mean envs planned per call when it is not 1)."""
     if stat is None:
         return "-"
-    return f"{stat['mean']:.{digits}f} +- {stat['std']:.{digits}f} (n={stat['n']})"
+    envs = stat.get("envs")
+    tail = f", {envs:.0f} envs" if envs is not None and envs != 1 else ""
+    return f"{stat['mean']:.{digits}f} +- {stat['std']:.{digits}f} (n={stat['n']}{tail})"
 
 
 def main():
@@ -101,31 +126,38 @@ def main():
     for group in sorted(groups):
         batched_cycles, batched_totals, batched_ok, batched_seeds, success_rates = defaultdict(list), [], [], [], []
         single_cycles, single_totals, single_ok, single_runs = defaultdict(list), [], [], 0
-        flags_missing = 0
+        batched_warm, single_warm, flags_missing = defaultdict(list), defaultdict(list), 0
         for run in groups[group]:
-            per_cycle, totals, ok, has_flags = run_stats(run, key)
+            per_cycle, per_cycle_envs, totals, ok, has_flags = run_stats(run, key)
             flags_missing += int(not has_flags)
+            warm = warm_by_length(run, key)
             if int(run["summary"].get("num_envs", 0)) == 1:
                 single_runs += 1
                 for cycle, seconds in per_cycle.items():
-                    single_cycles[cycle].append(seconds)
+                    single_cycles[cycle].append((seconds, 1))
                 single_totals.extend(totals)
                 single_ok.extend(ok)
+                for length, pairs in warm.items():
+                    single_warm[length].extend(pairs)
                 continue
             batched_seeds.append(int(run["summary"]["seed"]))
             success_rates.append(float(run["summary"].get("success_rate", float("nan"))))
             for cycle, seconds in per_cycle.items():
-                batched_cycles[cycle].append(seconds)
+                batched_cycles[cycle].append((seconds, per_cycle_envs[cycle]))
             batched_totals.append(float(np.mean(totals)))
             if ok:
                 batched_ok.append(float(np.mean(ok)))
+            for length, pairs in warm.items():
+                batched_warm[length].extend(pairs)
         report["|".join(map(str, group))] = dict(
             seeds=sorted(batched_seeds), success_rate=mean_std(success_rates),
-            batched_per_cycle={c: mean_std(v) for c, v in sorted(batched_cycles.items())},
+            batched_per_cycle={c: mean_std_envs(v) for c, v in sorted(batched_cycles.items())},
             batched_episode_all=mean_std(batched_totals), batched_episode_success=mean_std(batched_ok),
+            batched_warm_by_length={n: mean_std_envs(v) for n, v in sorted(batched_warm.items())},
             runs_without_success_flags=flags_missing, batch1_runs=single_runs,
-            batch1_per_cycle={c: mean_std(v) for c, v in sorted(single_cycles.items())},
-            batch1_episode_all=mean_std(single_totals), batch1_episode_success=mean_std(single_ok))
+            batch1_per_cycle={c: mean_std_envs(v) for c, v in sorted(single_cycles.items())},
+            batch1_episode_all=mean_std(single_totals), batch1_episode_success=mean_std(single_ok),
+            batch1_warm_by_length={n: mean_std_envs(v) for n, v in sorted(single_warm.items())})
 
     print(f"phase = {args.phase}; seconds; batched = mean +- std over seeds, batch 1 = over single-episode runs\n")
     print("| harness | arm | planner | H | seeds | success % | batched cycle 0 | batched cycles 1.. | "
@@ -138,6 +170,15 @@ def main():
               f"{fmt(stats['batched_per_cycle'].get(0))} | {later(stats['batched_per_cycle'])} | "
               f"{fmt(stats['batched_episode_success'])} | {fmt(stats['batch1_per_cycle'].get(0))} | "
               f"{later(stats['batch1_per_cycle'])} | {fmt(stats['batch1_episode_success'])} |")
+
+    print("\nwarm plan seconds by imagined length (records after the first call of each process)\n")
+    print("| harness | arm | planner | H | batched: blocks -> seconds | batch-1: blocks -> seconds |")
+    print("|---|---|---|---|---|---|")
+    for name, stats in report.items():
+        harness, arm, planner, horizon = name.split("|")
+        by_length = lambda table: ", ".join(f"{n}: {fmt(table[n])}" for n in sorted(table)) or "-"
+        print(f"| {harness} | {arm} | {planner} | {horizon} | {by_length(stats['batched_warm_by_length'])} | "
+              f"{by_length(stats['batch1_warm_by_length'])} |")
     if args.json:
         with open(args.json, "w") as f:
             json.dump(report, f, indent=1)

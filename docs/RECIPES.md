@@ -2700,3 +2700,28 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   first plan and the per-successful-episode total; batched runs (mean +- std over seeds) and batch-1 runs (num_envs ==
   1; mean +- std over the single-episode runs) side by side; --phase call for the whole call.
   plan_timing_stats.load_records parses bare json lines from .jsonl only (the printed metrics dict starts with "{").
+  GRID LAUNCH (owner "Go" 2026-09-10 ~13:05, code ed314d6 = tarball code/lewam_jointflow_ed314d6.tar.gz, bi_algorithm
+  aigcp H100, 6 free at submit): mf-d27e22f5 job 59abcfc609444a5c = LeWM release grid (lewm_grid_ed314d6_v2.sh:
+  batched H 25/50/75/100 x seeds 42/0/1 with H 25 s42 skipped as done, then NEVAL=1 runs at every H x seeds
+  42/0/1/2/3, logs ckpts/lewm_grid/ev_lewm[_n1]_H<H>_s<S>.log); mf-06e48fc9 job 9e4cc4bd0b1c23a9 = LeWAM noreg arm
+  fx_nm192_s42 and mf-501f21b5 job a98c2897bbea1d22 = SIGReg arm fx_vsig192_s42 (jf_e7grid_ed314d6.sh -> jf_grev_ed314d6.sh
+  per H: batched plan,gradtr x seeds 42/0/1 at H 25/50/75/100, tags <arm>tm<H>_s42, the smoke cell skipped; then
+  NEVAL=1 at H 25/100 x seeds 42/0/1/2/3, tags <arm>tm<H>n1_s42; logs ckpts/jf_grev/ev_pusht_<tag>_<mode>_e<seed>.log).
+  Report: scripts/plan_timing_report.py over those logs.
+  GRID RESULTS (all three jobs finished by 15:08, about 1 h each, no failures; 88 LeWAM logs + 32 LeWM logs; report
+  docs/results/e7/timing_report.{md,json}). LeWM release (CEM 300 x 30, H/5 blocks, execute 25), seeds 42/0/1:
+  H 25 72/66/68 = 68.7 +- 3.1; 50 12/8/16 = 12.0 +- 4.0; 75 2/6/2 = 3.3 +- 2.3; 100 2/2/4 = 2.7 +- 1.2. LeWAM rerun
+  with records (seeds 42/0/1): noreg best-of-K 98/98/92, 14/32/20, 12/10/10, 8/6/12; noreg gradient-TR 96/96/90,
+  10/32/20, 8/8/10, 8/6/10; SIGReg best-of-K 100/100/98, 34/50/36, 18/28/34, 20/26/24; SIGReg gradient-TR 98/100/98,
+  72/74/68, 44/42/54, 36/42/46 -- within seed noise of the E7 table (largest gap SIGReg gradient-TR H 100: 41.3 vs
+  45.3). TIMING (plan phase, seconds). Batch 1, warm plans by imagined blocks: best-of-K 5: 0.19 (n 21-25), 10:
+  0.37-0.39, 15: 0.55-0.57; gradient-TR 2.14, 4.20-4.25, 6.32-6.33; LeWM 5: 0.40 (n 1), 10: 0.79 (n 12), 15: 1.16
+  (n 25), 20: 1.58 (n 31). First calls of a process (CUDA warm-up): best-of-K 0.39 (5 blocks) / 0.93-0.95 (20),
+  gradient-TR 2.43-2.44 / 8.70-8.82, LeWM 0.74 / 1.10 / 1.59 / 1.97 at 5/10/15/20. Batched per call at H 100
+  (t 0/25/50/75, 50 live envs): best-of-K 2.9/2.0/1.35/0.68, gradient-TR 11.9-12.2/8.6-8.7/5.7-5.8/2.9, LeWM
+  79.7/76.3/77.0/76.3; amortized per successful episode H 25 0.02/0.08/0.54, H 100 0.14-0.15/0.60/7.5. Batch-1
+  successful episodes: H 25 0.385 / 2.43-2.44 / 0.73 (n 5/5/4); H 100 n = 1 each: 2.34 (noreg best-of-K), 21.3 and
+  21.7 (gradient-TR, both arms), 6.76 (LeWM). Our observation encoding outside the plan phase is 0.03 s per call
+  (0.34-0.44 s as a first call); LeWM's 0.77 s of encoding sits inside its 24 s first batched call at H 25. A batched
+  call's cost also falls with the number of live envs (5-block plans 0.19 s at 2-3 envs vs 0.63 s at ~46), so the
+  report's batched warm-by-length entries carry the mean envs per call.

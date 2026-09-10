@@ -24,9 +24,9 @@ then E5, E6, E1 last.
 - [ ] **E5** Perturbation eval hook (pixel noise, brightness, occlusion, action noise, env
       variations on swm cells); not started.
 - [ ] **E6** Gradient rescaling flag `--grad_balance d_to_p`, one cell, three seeds; not started.
-- [ ] **E7** Done for LeWAM on PushT. In progress (ours; Minghao could not run LeWM): the LeWM
-      row on the same episodes with per-plan timing records and separate batch-1 runs (five
-      seeds); both smoke cells passed 2026-09-10, the grids are next. Open: other cells, GC-IDM row.
+- [x] **E7** Done on PushT: the LeWAM grid, the LeWM row on the same episodes, and planning
+      time per plan in both regimes (`docs/results/e7/timing_report.md`). Open: other cells,
+      GC-IDM row, paired McNemar LeWM vs our arms.
 
 ## Story
 
@@ -342,14 +342,20 @@ remaining distance; K = 32 proposals; best-of-K and gradient-TR; noreg and SIGRe
 for reproduction: eligible episodes in h5 order, picks =
 `sorted(rng(seed).choice(n_eligible, 50, replace=False))`.
 
-**Result** (success %, mean +- std over three seeds).
+**Result** (success %, mean +- std over three seeds; the same 150 episodes in every cell).
 
-| H | noreg best-of-K | noreg gradient-TR | SIGReg best-of-K | SIGReg gradient-TR |
-|---|---|---|---|---|
-| 25 | 96.0 +- 3.5 | 93.3 +- 4.6 | 99.3 +- 1.2 | 98.0 +- 2.0 |
-| 50 | 22.0 +- 9.2 | 20.7 +- 11.0 | 39.3 +- 9.2 | 71.3 +- 3.1 |
-| 75 | 10.0 +- 0.0 | 8.7 +- 1.2 | 26.0 +- 9.2 | 46.7 +- 6.4 |
-| 100 | 9.3 +- 4.2 | 8.7 +- 2.3 | 23.3 +- 3.1 | 45.3 +- 6.4 |
+| H | noreg best-of-K | noreg gradient-TR | SIGReg best-of-K | SIGReg gradient-TR | LeWM CEM |
+|---|---|---|---|---|---|
+| 25 | 96.0 +- 3.5 | 93.3 +- 4.6 | 99.3 +- 1.2 | 98.0 +- 2.0 | 68.7 +- 3.1 |
+| 50 | 22.0 +- 9.2 | 20.7 +- 11.0 | 39.3 +- 9.2 | 71.3 +- 3.1 | 12.0 +- 4.0 |
+| 75 | 10.0 +- 0.0 | 8.7 +- 1.2 | 26.0 +- 9.2 | 46.7 +- 6.4 | 3.3 +- 2.3 |
+| 100 | 9.3 +- 4.2 | 8.7 +- 2.3 | 23.3 +- 3.1 | 45.3 +- 6.4 | 2.7 +- 1.2 |
+
+LeWM = the authors' released PushT checkpoint under its own planner (CEM 300 x 30, horizon H/5
+blocks, all 25 actions of each plan executed, then replan), run through our port of its
+evaluator on the same episodes (a guard asserts the identical draw); its random-start H = 25
+number is 88.7. The LeWAM cells were rerun on 2026-09-10 with per-plan timing records and agree
+with the table within seed noise (per-seed values in RECIPES).
 
 Paired McNemar on the same 150 episodes: 50 vs 75 is a significant drop in every cell (p =
 0.003, 0.004, 0.004, 0.000); 75 vs 100 is not different in any cell (p = 1.0, 1.0, 0.64,
@@ -362,7 +368,9 @@ frame-100 pose; only the pusher's parking differs). The arms separate with dista
 at the floor from 75 with either planner, SIGReg holds 23-39 with best-of-K and 45-71 with
 gradient refinement. The pusht arms were trained with goals at most 50 steps ahead, so H >= 75
 is out of distribution for the goal conditioning only; label it "beyond the trained goal
-horizon".
+horizon". LeWM, with its own planner on the same episodes, sits below both arms at every H:
+68.7 at H = 25 against 96-99, and at the floor from H = 50 (12, 3, 3) where SIGReg gradient-TR
+holds 71, 47, 45.
 
 **Control: LeWAM under LeWM's open-loop scheme at the standard offset** (random starts,
 H = 25, budget 50; plan 5 blocks with a last-step cost, execute all 25, one retry):
@@ -378,20 +386,50 @@ LeWM under its own scheme: 88.7. The closed-loop rows are the method, this row t
 SIGReg gradient-TR beats LeWM under LeWM's own rules. Scoring the retry at the goal time
 instead moves at most 2 episodes per 150.
 
-**Open.** The LeWM row on the same grid is ours now (Minghao could not run LeWM). Our port of
-LeWM's evaluator (`scripts/eval.py`, the authors' released PushT checkpoint) draws the episodes
-above (frame-0 starts, 101-frame filter; a guard calls our sampler and asserts the identical
-draw), and both harnesses now record every plan cycle: the whole policy call, the plan phase
-alone (proposal to finalized chunk), the envs planned in that call, the imagined length; plus
-separate batch-1 runs (`eval.num_eval=1`, five seeds, the same single episode on both sides),
-because a batched call's time divided by the batch is throughput, not the time one plan takes.
-Smoke cells at H = 25, seed 42: LeWM 72.0
-(CEM 300 x 30, 24 s for 50 plans batched), ours 100.0 (SIGReg best-of-K, 0.96 s for 50). The
-LeWM grid (11 remaining cells) and the LeWAM grid rerun with records (47 cells) are next; the
-timing report (`scripts/plan_timing_report.py`) then gives the time to complete a successful
-episode, the time of one 25-step plan, and the per-replan curve at H = 100, in both regimes.
-Also open: other cells (tworoom, reacher, pointmaze with their own ladders); GC-IDM as the one
-goal-conditioned baseline that can run the ladder; the repo significance script (E2).
+**Planning time** (the same grid; both harnesses record every plan: the plan phase is from
+entering the planner to the finalized action chunk; our planners encode the observation outside
+it, 0.03 s per call, LeWM encodes inside its solver). Two regimes. Batched is the harnesses' own
+mode: the 50 episodes of a seed are planned in one call, so a call's seconds cover up to 50 plans
+and an episode's share is a throughput number. Batch 1 (`eval.num_eval=1`, one episode per
+process, seeds 42/0/1/2/3, the same single episode on both sides) is the time one plan takes.
+The cost is set by the imagined length: ours imagine to the goal, 20/15/10/5 blocks at
+t = 0/25/50/75 for H = 100 and never fewer than the 5 blocks executed; LeWM's horizon is fixed
+per run (H/5 blocks at every replan). The first call of a process carries CUDA warm-up (*).
+Full tables: `docs/results/e7/timing_report.md`.
+
+Seconds per plan at batch 1 (mean over single-episode runs; std <= 0.06 everywhere):
+
+| planner | 5 blocks | 10 | 15 | 20 |
+|---|---|---|---|---|
+| best-of-K (K = 32) | 0.19 (0.39* as a first call) | 0.37-0.39 | 0.55-0.57 | 0.93-0.95* |
+| gradient-TR (50 steps) | 2.14 (2.44* first call) | 4.20-4.25 | 6.32-6.33 | 8.70-8.82* |
+| LeWM CEM (300 x 30) | 0.40 (n = 1; 0.74* first call) | 0.79 | 1.16 | 1.58 |
+
+Per replan at H = 100, t = 0/25/50/75. Batch 1: best-of-K 0.95*/0.57/0.39/0.19, gradient-TR
+8.8*/6.3/4.2/2.1, LeWM 1.97*/1.57/1.58/1.59 (20 blocks every time). Batched, 50 episodes per
+call: best-of-K 2.9*/2.0/1.35/0.68, gradient-TR 12.0*/8.7/5.7/2.9, LeWM 79.7*/76.3/77.0/76.3.
+
+Time to complete a successful episode (plan phase). At H = 25 it is one plan: 0.39 s
+(best-of-K), 2.4 s (gradient-TR), 0.73 s (LeWM) at batch 1 (n = 5, 5, 4). At H = 100 it is
+four plans to the goal time: 2.1 / 21.5 / 6.7 s from the batch-1 replans above (the single
+successful batch-1 episodes measured 2.3 / 21.3-21.7 / 6.8 s). Batched, amortized per
+successful episode: 0.02 / 0.08 / 0.54 s at H = 25 and 0.15 / 0.60 / 7.5 s at H = 100.
+
+**Interpretation (time).** Per plan, best-of-K is about 2x faster than LeWM's CEM and
+gradient-TR about 5x slower (0.19 / 0.40 / 2.14 s for a 5-block plan; about 0.75 (linear
+extrapolation, the measured 20-block plans are first calls) / 1.58 / 8.4 s for 20 blocks). All
+three grow linearly with the imagined length, about 0.04, 0.08 and 0.42 s per block. Our replans
+get cheaper as the goal nears because the rollout shortens; LeWM's do not. Batched, the ordering
+changes for CEM: its 300 x 30 samples already saturate the card, so 50 episodes cost 50x one
+(76 s vs 1.6 s at 20 blocks), while best-of-K amortizes to 0.68 s for 50 five-block plans. The
+paper's "under one second" per plan for LeWM matches our batch-1 measurement of its release
+(0.4-0.7 s at 5 blocks). Report timing as latency at batch 1; the batched numbers describe
+evaluation throughput only.
+
+**Open.** Other cells (tworoom, reacher, pointmaze with their own ladders); GC-IDM as the one
+goal-conditioned baseline that can run the ladder; the repo significance script (E2), including a
+paired McNemar for LeWM against our arms on the 150 shared episodes (the per-episode success
+flags are in the logs).
 
 ## Open decisions
 
