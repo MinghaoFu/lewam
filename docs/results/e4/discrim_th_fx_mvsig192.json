@@ -1,0 +1,86 @@
+{
+ "jf:th_fx_mvsig192": {
+  "n_anchors": 200,
+  "k": 32,
+  "horizon_blocks": 1,
+  "cost_now_mean": 16.73884391784668,
+  "cost_real_next_mean": 16.42533302307129,
+  "real_progress_mean": 0.3135119676589966,
+  "expert_pred_err_mean": 1.3769946098327637,
+  "expert_pred_cost_mean": 16.341157913208008,
+  "types": {
+   "zero": {
+    "goal_gap_mean": 0.33555537462234497,
+    "goal_gap_per_progress": 1.070311188697815,
+    "goal_acc": 0.605,
+    "truth_gap_mean": 3.130599021911621,
+    "truth_gap_per_err": 2.273501396179199,
+    "truth_acc": 0.995
+   },
+   "neg": {
+    "goal_gap_mean": 0.24294210970401764,
+    "goal_gap_per_progress": 0.7749053835868835,
+    "goal_acc": 0.55,
+    "truth_gap_mean": 5.550747871398926,
+    "truth_gap_per_err": 4.031060218811035,
+    "truth_acc": 1.0
+   },
+   "shuf_other": {
+    "goal_gap_mean": 0.36815547943115234,
+    "goal_gap_per_progress": 1.1742948293685913,
+    "goal_acc": 0.55625,
+    "truth_gap_mean": 4.4766998291015625,
+    "truth_gap_per_err": 3.251065731048584,
+    "truth_acc": 0.9978125
+   },
+   "shuf_ep": {
+    "goal_gap_mean": 0.3766217827796936,
+    "goal_gap_per_progress": 1.2012995481491089,
+    "goal_acc": 0.55390625,
+    "truth_gap_mean": 4.456852912902832,
+    "truth_gap_per_err": 3.236652374267578,
+    "truth_acc": 0.994375
+   },
+   "pert0.25": {
+    "goal_gap_mean": 0.06771418452262878,
+    "goal_gap_per_progress": 0.215985968708992,
+    "goal_acc": 0.5675,
+    "truth_gap_mean": 0.483501136302948,
+    "truth_gap_per_err": 0.35112783312797546,
+    "truth_acc": 0.83796875
+   },
+   "pert0.5": {
+    "goal_gap_mean": 0.2185489982366562,
+    "goal_gap_per_progress": 0.6970993876457214,
+    "goal_acc": 0.6059375,
+    "truth_gap_mean": 1.2388312816619873,
+    "truth_gap_per_err": 0.8996631503105164,
+    "truth_acc": 0.934375
+   },
+   "pert1": {
+    "goal_gap_mean": 0.4633159637451172,
+    "goal_gap_per_progress": 1.477825403213501,
+    "goal_acc": 0.63453125,
+    "truth_gap_mean": 2.4326255321502686,
+    "truth_gap_per_err": 1.7666194438934326,
+    "truth_acc": 0.98453125
+   },
+   "pert2": {
+    "goal_gap_mean": 0.6513789892196655,
+    "goal_gap_per_progress": 2.0776846408843994,
+    "goal_acc": 0.6409375,
+    "truth_gap_mean": 3.7688891887664795,
+    "truth_gap_per_err": 2.737039804458618,
+    "truth_acc": 0.99640625
+   },
+   "uniform": {
+    "goal_gap_mean": 1.0397661924362183,
+    "goal_gap_per_progress": 3.316511869430542,
+    "goal_acc": 0.6946875,
+    "truth_gap_mean": 5.387196063995361,
+    "truth_gap_per_err": 3.912285566329956,
+    "truth_acc": 1.0
+   }
+  }
+ }
+}

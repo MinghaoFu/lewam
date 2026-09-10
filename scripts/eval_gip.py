@@ -53,57 +53,7 @@ _ENV_MODULES = {
 GOAL_METHODS = {"_set_goal_state", "_set_goal_proprio", "set_target_qpos", "set_target_pos", "set_goal_effector"}
 
 
-class GetActionTimer:
-    """Planning-time measurement (protocol item 5, design verified 2026-09-06). Wraps policy.get_action.
-    Every adapter keeps per-env deques `_action_buffer` and replans, in one batched call, exactly the envs
-    whose deque is empty and are not terminated (or that the harness asked to flush); that rule is
-    reproduced here BEFORE the call to count `n_replanned`. Recorded per call: wall seconds (CUDA-synchronized
-    on both sides), alive envs, replanned envs. Attribution: each alive env gets seconds / n_alive of every
-    call (`time_per_env` = the per-episode total, one episode per env); the block time is seconds /
-    n_replanned over replan calls (batch-amortized cost of producing one action block)."""
-
-    def __init__(self, policy, num_envs, cuda):
-        self.policy, self.num_envs, self.cuda = policy, int(num_envs), bool(cuda)
-        self.calls = []                                        # (seconds, n_alive, n_replanned)
-        self.time_per_env = np.zeros(self.num_envs)
-        self.replans_per_env = np.zeros(self.num_envs, dtype=int)
-        self._orig_get_action = policy.get_action
-        policy.get_action = self.__call__
-
-    def __call__(self, info_dict, **kwargs):
-        terminated = info_dict.get("terminated")
-        dead = (np.asarray(terminated, dtype=bool).reshape(-1) if terminated is not None
-                else np.zeros(self.num_envs, dtype=bool))
-        flush = info_dict.get("_needs_flush")                  # peek only; the adapter pops it
-        buffers = getattr(self.policy, "_action_buffer", None)  # None before the first call: everyone replans
-        alive = [i for i in range(self.num_envs) if not dead[i]]
-        replan = [i for i in alive if buffers is None or len(buffers[i]) == 0
-                  or (flush is not None and bool(flush[i]))]
-        if self.cuda:
-            torch.cuda.synchronize()
-        t_start = time.perf_counter()
-        out = self._orig_get_action(info_dict, **kwargs)
-        if self.cuda:
-            torch.cuda.synchronize()
-        seconds = time.perf_counter() - t_start
-        self.calls.append((seconds, len(alive), len(replan)))
-        if alive:
-            self.time_per_env[alive] += seconds / len(alive)
-        self.replans_per_env[replan] += 1
-        return out
-
-    def summary(self):
-        calls = np.asarray(self.calls, dtype=float).reshape(-1, 3)
-        replan_calls = calls[calls[:, 2] > 0]
-        per_block = replan_calls[:, 0] / replan_calls[:, 2] if len(replan_calls) else np.zeros(0)
-        std = lambda x: float(np.std(x, ddof=1)) if len(x) > 1 else float("nan")
-        mean = lambda x: float(np.mean(x)) if len(x) else float("nan")
-        return dict(n_calls=int(len(calls)), n_replan_calls=int(len(replan_calls)),
-                    t_call_mean_s=mean(replan_calls[:, 0]), t_call_std_s=std(replan_calls[:, 0]),
-                    n_replanned_mean=mean(replan_calls[:, 2]),
-                    t_block_amortized_mean_s=mean(per_block), t_block_amortized_std_s=std(per_block),
-                    t_episode_mean_s=mean(self.time_per_env), t_episode_std_s=std(self.time_per_env),
-                    replans_per_env_mean=mean(self.replans_per_env))
+from lewam.eval_timing import PlanTimer
 
 
 def _register_env(env_name):
@@ -526,7 +476,8 @@ def run(cfg: DictConfig):
         policy = gip.build_policy(cfg, model, adim, process, transform, goal_offsets=goal_offsets,
                                   policy_kwargs=_policy_kwargs(cfg, dataset, episodes, starts))
     print(f"[GIP] eval mode={mode} policy={type(policy).__name__}")
-    timer = GetActionTimer(policy, world.num_envs, torch.cuda.is_available())
+    timer = PlanTimer(policy, world.num_envs, torch.cuda.is_available(), plan_attr="_propose", encode_attr="_enc",
+                      imagined_attr="_last_n_dyn_steps", steps_left_attr="_steps_left")
 
     # random-goal eval: a goal-conditioned policy fed an off-distribution goal can extrapolate to
     # out-of-box actions, which strict-checker envs (tworoom Box[-1,1]) reject -> crash (pusht clips, so
@@ -643,7 +594,12 @@ def run(cfg: DictConfig):
                       note="batched over num_envs; amortized = call seconds / envs served in that call",
                       **timer.summary())
         (results_path / f"timing_{cfg.policy}_seed{int(cfg.seed)}.json").write_text(json.dumps(timing, indent=1))
+        timer.write_records(results_path / f"timing_records_{cfg.policy}_seed{int(cfg.seed)}.jsonl")
+        timer.write_per_episode(results_path / f"timing_episodes_{cfg.policy}_seed{int(cfg.seed)}.json",
+                                success=metrics.get("episode_successes"))
         print("[timing-json] " + json.dumps(timing), flush=True)
+        for line in timer.record_lines():                 # one line per plan call, persisted with the log
+            print(line, flush=True)
         print(f"[timing] block {1e3 * timing['t_block_amortized_mean_s']:.1f} ms amortized "
               f"(call {1e3 * timing['t_call_mean_s']:.0f} ms over {timing['n_replanned_mean']:.0f} envs) | "
               f"episode total {timing['t_episode_mean_s']:.2f} +- {timing['t_episode_std_s']:.2f} s | "

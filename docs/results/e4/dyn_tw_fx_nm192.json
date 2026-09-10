@@ -1,0 +1,11 @@
+{
+ "tw_fx_nm192": {
+  "n": 200,
+  "k_alts": 15,
+  "match_top1": 0.92,
+  "chance": 0.0625,
+  "match_rank_mean": 1.15,
+  "sensitivity": 1.9533551001548768,
+  "cost_cv": 0.9159399259090424
+ }
+}

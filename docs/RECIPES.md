@@ -2379,3 +2379,295 @@ starts, H 25) and the closed-loop board rows.
   90): the expert keeps moving the pusher after placing the block, and the success metric needs the agent within
   20 px too. So +75 and +100 are the same block task with different budgets (owner's theory), separated mainly by
   where the pusher must park.
+  PAIRED RE-RUN (owner-approved design 09:40): commit f4fb884 replaces start_zero with +gip_eval.random_start (default
+  true = the board's draw, unchanged) and adds +gip_eval.min_episode_len (episode filter applied before either draw).
+  H=25/50/75 re-launched with random_start=false min_episode_len=101 (= the H=100 eligibility, so all four H draw the
+  same 50 episodes per seed); tags <arm>lhp<H>_s42; entry jf_grev_f4fb884.sh; placed by lh_launcher.sh under the
+  reserve rule. The unpaired H=50 job (71badf6121d456e7, tags lh50) keeps running as a second sample of that distance.
+
+LONG-HORIZON GRID COMPLETE (10:51; paired: every H draws the same 50 episodes per seed from the 101+-frame demos,
+frame-0 start, goal +H, budget 2H, imagine to the goal, cost at the goal, execute 25, replan; seeds 42/0/1 x 50):
+  H   | noreg best-of-K        | noreg gradient-TR      | SIGReg best-of-K       | SIGReg gradient-TR
+  25  | 96.0 +- 3.5 {98,98,92} | 93.3 +- 4.6 {96,96,88} | 99.3 +- 1.2 {100,100,98} | 98.0 +- 2.0 {96,100,98}
+  50  | 22.0 +- 9.2 {14,32,20} | 20.7 +-11.0 {10,32,20} | 39.3 +- 9.2 {34,50,34} | 71.3 +- 3.1 {72,74,68}
+  75  | 10.0 +- 0.0 {10,10,10} |  8.7 +- 1.2 {8,8,10}   | 26.0 +- 9.2 {16,28,34} | 46.7 +- 6.4 {44,42,54}
+  100 |  9.3 +- 4.2 {8,6,14}   |  8.7 +- 2.3 {10,6,10}  | 23.3 +- 3.1 {20,26,24} | 45.3 +- 6.4 {38,50,48}
+  Jobs: lhp25 4fef3ded407f3da2, lhp50 05ef8c1d17815afb, lhp75 1d14ebf99ccde3c8 (commit f4fb884), lh100 7aedeb12ce2a3056
+  (commit 2a5acc5, same episode draw). Superseded unpaired lh75 (3ce879d3) finished with the same means; unpaired lh50
+  (71badf61) killed at the owner's request. Reading: H=25 from frame 0 is the approach phase (96-99, not comparable to
+  the random-start offset-25 board rows at 76-89); the drop is between 25 and 50; the noreg dynamics is at the floor
+  from 75 on with either planner; SIGReg keeps 23-39 with best-of-K and 45-71 with gradient-TR; H=75 and H=100 are
+  the same difficulty for every cell (owner's theory: past ~75 the goal state is the placed block plus where the
+  pusher parks, and the extra budget does not move success).
+
+E4 WAVE 1, LATENT PROBES noreg vs SIGReg ON THE DEVBOX CPU (owner 2026-09-09: "knock off some quick jobs like E3
+and E4"; B1/E2 with Minghao). Cells pusht (GR arms fx_nm192 / fx_vsig192, goal-conditioned, p_drop_goal 0) and
+toolhang (TC arms fx_mnm192 / fx_mvsig192, goal-free). No repo code: scratch scripts in the job tmp dir, copied to
+ckpts/probes_e4/ with the outputs; json + png also in docs/results/e4/.
+  Setup facts: the trainer's validation split is 10% of sample starts inside the same episodes (train_jointflow.py
+  :388-392), so there is no episode-level held-out set -> frames drawn at random from the whole h5. pusht pixels are
+  Blosc-compressed (filter 32001) in 100-frame chunks and each 1000-row column chunk costs ~0.5 s through the fuse
+  layer (a full column read ~20 min), so the geometry script reads WINDOWS of 10 consecutive frames from 500 random
+  episodes (one or two chunk reads per window; 946 s pusht, 2084 s toolhang for 5000 frames) and the ridge probes
+  split train/test by window. probe_state_factors.py lacks the hdf5plugin import and was dropped (its targets are in
+  the geometry script's factors). probe_wm_discrim runs goal-free, so it is skipped on the pusht GC arms (trained
+  without goal dropout) and run on toolhang only. Environment landmine: a `lance` 1.2.1 install (02:19 today)
+  emptied pylance's __init__; importing lewam.models.motflow BEFORE stable_worldmodel now crashes in lancedb
+  (import gip / stable_worldmodel first).
+  GEOMETRY (5000 frames, 500 windows; z_dim 192; latent_geometry.py, geometry_<cell>.json):
+    cell      arm     part.ratio  eff.rank  PCs90  PCs99 | pose R2 (block / tool)  angle R2  agent R2  proprio R2  IDM R2 (z_t,z_t+5)  IDM R2 (z_t)
+    pusht     noreg      4.7        7.8       9     20   |   0.803                   0.365     0.989     0.627        0.792               0.383
+    pusht     SIGReg    32.7       35.3      30     37   |   0.947                   0.816     0.990     0.604        0.812               0.364
+    toolhang  noreg      8.2       13.8      12     60   |   0.868 (frame 0.728)       -         -         -          0.792               0.768
+    toolhang  SIGReg    19.8       21.8      19     24   |   0.929 (frame 0.877)       -         -         -          0.883               0.808
+    (toolhang `stand` block 10:13 is constant in the data, std 1e-4 -> R2 meaningless, dropped; agent_vel R2 0.27 /
+    0.22.) Reading: SIGReg spreads the latent over ~4x more directions on pusht and ~2x on toolhang, and the extra
+    directions carry object state (block angle 0.37 -> 0.82) and inverse dynamics (toolhang 0.79 -> 0.88).
+  SECONDARY, SIGReg-flavored (latent_gaussianity.py; whitened PCs for 99% variance; Gaussian = 0): per-PC |excess
+    kurtosis| mean pusht 0.53 (noreg) vs 0.79 (SIGReg), toolhang 0.29 vs 1.01; 64 random directions of the whitened
+    latent 0.24 vs 0.23 and 0.28 vs 0.29. So the SIGReg arms are NOT more Gaussian per direction on these frames;
+    the measurable effect is the spread over directions.
+  COUNTERFACTUAL DYNAMICS (probe_jf_dynamics, 200 anchors, 15 alternative chunks, chance 0.0625): match_top1 pusht
+    0.88 -> 0.985, toolhang 0.77 -> 0.985; sensitivity 1.37 -> 1.56 and 1.06 -> 1.47.
+  COST-TO-GOAL pusht (probe_jf_cost, goal +5 obs steps, 32 samples, 8 rollouts x 8 steps): imagined vs real
+    progress medians noreg -0.44 / -0.39, SIGReg -1.27 / -1.25 (latent scales differ: cost_prev 3.2 vs 17.4);
+    frac_samples_imagined_closer 0.83 / 0.86; frac_anchors_real_closer 0.79 / 0.85; per-anchor CV 0.012 / 0.007.
+  DIVERSITY pusht (probe_jf_diversity, 32 samples): act_div 0.346 / 0.352, out_div 0.180 / 0.211, mode_ratio p50
+    3.43 / 3.49 -- the same.
+  PICTURES (latent_pictures.py, one frame per window = 500 points; latent_pictures_<cell>.png): PCA with equal axes:
+    pusht noreg = a ring holding 60% of the variance in two PCs (the agent position), SIGReg a dense core with 9%;
+    toolhang 39% vs 15%. t-SNE unlabeled / by object state / by phase: pusht SIGReg is locally coherent in block
+    angle where noreg interleaves hues; toolhang organizes by episode phase for both arms. The 10-frames-per-window
+    version (pictures_<cell>.png in ckpts/probes_e4 only) draws every window as a worm and is not for the paper; panels are titled without / with SIGReg, colorbars carry quantity, unit and range, "time in episode" = frame index / (episode length - 1).
+  TOOLHANG TAIL (16:08). DISCRIMINATION (probe_wm_discrim, goal-free TC arms, 200 anchors, k 32; truth_acc = the
+    imagined next state under the expert chunk is closer to the real next state than under the alternative):
+      alternative   zero   neg   shuf_other  shuf_ep  pert0.25  pert0.5  pert1  pert2  uniform
+      noreg         0.975  1.00  0.971       0.966    0.664     0.774    0.894  0.966  0.994
+      SIGReg        0.995  1.00  0.998       0.994    0.838     0.934    0.985  0.996  1.000
+    goal_acc (expert closer to the +10-step goal than the alternative) 0.52-0.62 vs 0.55-0.69: weak for both, the
+    expert's real progress over one block is ~0 on toolhang (real_progress_mean 0.003 / 0.31 at latent scales 1.8 /
+    16.7). COST-TO-GOAL toolhang: uninformative for the same reason (imagined vs real progress -0.07 / -0.02 noreg,
+    +0.02 / -0.11 SIGReg; frac_anchors_real_closer 0.55 / 0.55). DIVERSITY toolhang: act_div 0.347 / 0.378, out_div
+    0.233 / 0.349 (SIGReg's imagined outcomes spread more, consistent with its higher action sensitivity), mode_ratio
+    p50 2.73 / 2.50.
+  TWOROOM (GR arms tw_fx_nm192 / tw_fx_vsig192, label = pos_agent; e4_tworoom.sh; geometry 16:3x): noreg part.ratio
+    2.05, eff.rank 2.26, PCs90/99 = 2/3, agent R2 1.000, IDM R2 0.220 (z_t only 0.011); SIGReg part.ratio 23.9,
+    eff.rank 25.5, PCs90/99 = 22/26, agent R2 0.998, IDM R2 0.222. The noreg latent IS the agent position and nothing
+    else, which is the whole state of the fixed maze; SIGReg spreads over 25 directions with the same readout and
+    the same inverse-dynamics score -> on this cell more directions carry no extra information. Kurtosis: per-PC
+    0.62 / 1.18, random directions 1.15 / 0.47 (the 3-D noreg latent is far from isotropic Gaussian, SIGReg closer
+    in random directions here). Pictures: latent_pictures_tworoom.png (the noreg t-SNE colored by agent x / y is a
+    map of the maze). COUNTERFACTUAL DYNAMICS tworoom: match_top1 0.92 -> 0.995, sensitivity 1.95 / 1.69.
+    COST-TO-GOAL tworoom (goal +5 obs steps): imagined vs real progress -0.47 / -0.49 noreg, -0.60 / -0.50 SIGReg;
+    frac_anchors_real_closer 0.78 / 0.63; per-anchor CV 0.22 / 0.09. DIVERSITY tworoom: act_div 1.33 / 1.33, out_div
+    1.77 / 1.62, mode_ratio p50 2.96 / 1.78. E4 WAVE 1 COMPLETE (17:0x): three cells, one checkpoint per arm; all
+    json / png in docs/results/e4/, npz + logs + scripts in ckpts/probes_e4/.
+  FIGURE CONVENTION (owner 2026-09-10): panels named by what they represent (without / with SIGReg), never run
+    names; every colorbar carries quantity, unit and range; "time in episode" = frame index / (episode length - 1).
+    Figures regenerated as latent_pictures_<cell>.png. PCA reading (owner: SIGReg looks anisotropic): the first two
+    PCs share variance nearly equally under SIGReg (ratio 1.04 / 1.19 / 1.16 on pusht / toolhang / tworoom vs
+    1.30 / 2.88 / 1.64 without) but are heavy-tailed (excess kurtosis 1 to 3.4 vs negative without); the stretch
+    in the plot is tails, not variance, and the two PCs hold 9-15% of the variance under SIGReg vs 39-96% without.
+
+E3a TWO-DOOR FORK TOY, DATASET (owner 2026-09-10: continuous, trajectories, "add 2 holes into tworoom", expert
+50/50 through each hole, target reachable in ~25 raw steps, noise in both legs, TC recipe with SIGReg, eval =
+100 rollouts from the same starts, flow vs mse). No custom env: stable_worldmodel's TwoRoomEnv (envs/two_room/
+env.py) takes door.number (1-3), door.position (centers) and door.size (half-widths) in its variation space.
+Config (toy_fork_dataset.py, job tmp + ckpts/probes_e4/../ later): 224 px, vertical wall x=112 thickness 10, doors
+at y=72 and y=152 half-width 14, agent radius 7 speed 5, target (165,112) rendered, start x~U[35,60] y~U[97,127];
+expert = per-episode coin (exactly 250/250, shuffled independently of the start), unit step to the chosen door
+center while x<112 then to the target, + N(0, 0.25^2) on each action, clipped; episode ends within 16 px of the
+target (cap 60). Result: 500 episodes, 13,707 frames, lengths 23-34 (mean 27.4), zero failed episodes; start y vs
+door corr -0.06, start x vs door +0.08 (the owner's concern: a start-correlated choice would let an mse policy
+look bimodal). h5 written to local /tmp (h5py cannot random-write on the fuse mount, Errno 95) then copied to
+wf8/train/twodoor.h5 (2.08 GB); caches: raw-anchor (what the TC loader reads, tag _raw) under
+preload_cache/twodoor/, built by make_preload_cache.py --anchor_rate raw (VERIFY_OK). Figures sent to the owner:
+twodoor_expert_overlay.png (all 500 paths, DP-style) and twodoor_expert_episodes.png (six episodes + frame strip).
+CPU dry run of the trainer on the cache (2 steps, both heads) passes. Entry jf_toy_f4fb884.sh (TC toolhang recipe
++ SIGReg: w_reg 0.04, sigreg_proj_dim 0, zstd_floor 0.005, z 192, d 192, depth 4, heads 4, 10 actions / 1 state
+predicted, history 2, lr 1e-4, batch 64, 50 epochs (owner: 120 unnecessary), fp32; flow then mse head; ckpts/jointflow_tc/
+tc_twodoor_fx_<head>vsig192_s42), YAML jf-toy-twodoor.yaml (mf-c2b5162b, 1 H100 research queue). Owner
+inspected the demos and said go (2026-09-10): SUBMITTED job f1a9014517ee2664 (research queue, 5 free at launch);
+epochs 50 (owner: 120 unnecessary). TRAIN_OK flow head 03:30 (val act 1.065 = velocity MSE), mse head 03:42 (val act
+0.629 = action MSE; the two losses are not comparable), ~12 min per head on one H100, ALL_DONE 03:42; checkpoints
+ckpts/jointflow_tc/tc_twodoor_fx_{flow,mse}vsig192_s42. Rollout comparison toy_rollouts.py (100 closed-loop
+rollouts per head from the same starts, execute 5 of 10 predicted actions, overlay + door counts): RESULT (04:20, 100
+random held-out starts, same starts for both heads): flow head upper 62 / lower 38 / wall 0, reached 97; mse head
+upper 64 / lower 36 / wall 0, reached 100. The mse head does NOT run into the wall: its rollouts leave the start
+horizontally (the mean of the two expert headings), reach the wall, and turn to the nearer door, the start's
+offset from the midline deciding the door; the flow rollouts leave diagonally toward one door from the first
+chunk. So with replanning every 5 steps the mean action is executable until the wall and the deterministic
+head still succeeds; the difference is that its door is a function of the start while the flow samples it.
+Figure docs/results/e3/twodoor_rollouts.png. OWNER (04:5x): "that would've been good to know. Now it's impossible
+to tell because it looks like MSE somehow learned multimodality" -> env rule recorded (memory env-mechanics-in-
+design): TwoRoomEnv._apply_collisions clamps only the coordinate entering the wall (x held at 94.5 = wall face
+minus radius) and lets y slide, no termination; the mse agent hits the wall and slides to a door.
+  FIRST-CHUNK TEST, no env mechanics (toy_first_chunk.py; 100 sampled 10-step chunks from fixed starts, drawn as
+  start + 5 * cumsum(actions); heading up > +8 deg, down < -8 deg): flow head at (48,112): up 75 / level 10 /
+  down 15 (heading mean +17.6, std 20.5 deg); (48,104): 73 / 10 / 17; (48,120): 73 / 6 / 21; (38,112): 56 / 14 /
+  30. mse head: std 0.0 everywhere (deterministic), heading +0.7 / -1.5 / +0.5 deg at three starts (straight at
+  the wall) and +10.5 at (48,120). So the mse first chunk IS the mean heading into the wall; the flow head is
+  bimodal but biased toward the upper door at these starts (75/15 at the midline; 62/38 over 100 random starts)
+  with 250/250 training episodes. Figure twodoor_first_chunk.png.
+  EXPERT WALL CONTACT in the demos (pos within 1 px of the wall face outside a door band): 29 of 500 episodes, all
+  1-2 consecutive steps (grazing a door edge), never a slide -> a rule "pressed on the wall outside a door for >= 3
+  consecutive steps = failure" never fails an expert demo and catches the mse slide. Proposed to the owner as the
+  eval-side fix; applicable offline to the saved rollout paths.
+  FIXED-START ROLLOUTS (toy_rollouts_fixed.py, 25 closed-loop rollouts per head from each of four fixed starts,
+  batched; contact = pressed on the wall face outside a door band): flow head upper/lower 21/4 at (48,112), 16/9 at
+  (48,104), 17/8 at (48,120), 13/12 at (38,112); reached 25/24/25/25; rollouts touching the wall 0/1/1/0 (one
+  step). mse head: 0/25, 25/0, 25/0, 0/25 (every rollout from a start takes the SAME door), reached 25 each,
+  touching the wall 25/25/25/0 (one step each: after the contact frame the replanned chunk leaves the wall
+  diagonally toward a door). Figure twodoor_rollouts_fixed_starts.png; paths saved as npz beside it.
+  OWNER DECISION (05:1x): rerun the first eval with a smaller start variation and terminate the episode on wall
+  contact -> toy_rollouts_v2.py: 100 starts within 4 px of (48,112), same starts for both heads, batched, an
+  episode ends as a CRASH on the first step pressed against the wall outside a door band.
+  RESULT (05:4x): flow head reached 92 (upper door 75, lower 17), crashed 7, timeout 1; mse head reached 49
+  (upper 10, lower 39), crashed 51, timeout 0. Reading: the mse first chunk aims between the doors; replanning
+  every 5 steps turns it late, so half of its rollouts hit the wall first and the rest turn toward the door set
+  by the start offset (deterministic); the flow head uses both doors with a bias toward the upper one (75/17;
+  75/15 in the first-chunk test), a property of this trained head (one seed, 50 epochs), not of the 250/250
+  demos. Figure docs/results/e3/twodoor_rollouts_crash_rule.png (replotted from the saved paths); all E3 figures,
+  paths, logs and scripts in ckpts/probes_e3/.
+  CORRECTION (owner 05:5x: "a lot of these trajectories die before hitting the wall"): my contact test used x =
+  94.5 for the wall face; the env clamps the agent center at 99.5 (wall left edge 107 - radius 7 - 0.5; I had
+  subtracted the half thickness twice). So the "crash" fired on any path crossing a strip 5 px in front of the
+  wall outside the door bands, and the same constant produced the "29 expert episodes graze the wall" statistic
+  and the fixed-start contact counts: all three are VOID. Correct rule: |x - 99.5| <= 0.5 (the clamp value; an
+  upper bound is needed too, else the right room between the door bands counts) and y outside both door bands.
+  Under it the demos never touch the wall (max x outside the bands on the left side 98.2).
+  CORRECTED RESULT (06:2x; toy_rollouts_v3, same 100 starts within 4 px of (48,112), crash = center within 0.5 px
+  of the clamp value 99.5 outside both door bands): flow head reached 98 (upper 79, lower 19), crashed 0, timeout
+  2; mse head reached 36 (upper 0, lower 36), crashed 64, timeout 0. Figure docs/results/e3/
+  twodoor_rollouts_crash_rule.png (replaces the void version). The flow head's upper-door bias is in the trained
+  head, not the sampler: first chunk re-sampled with 64 Euler steps gives 73 up / 17 down at (48,112) vs 75 / 15
+  with 8 (twodoor_first_chunk_64steps.png); the training curve is near plateau (val velocity loss 1.10 at epoch
+  30, 1.07 at 50). Proposed two more flow-head seeds to tell seed noise from a systematic bias (awaiting go).
+  E3b first pass: the noreg arm completed (expert median +0.8 nats, own samples +19.8, noise 0.25 -14.5, 0.5
+  -26.8, 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1; expert highest of all alternatives in 90% of anchors,
+  per-alternative 0.93-1.00); the SIGReg arm was cut by my 2 h timeout after the first arm took 75 min -> both
+  arms re-running with a 4 h cap (log_e3b_pusht_rerun.txt).
+  FIGURE FIX (owner: "what does the red cloud represent"): the overlay backgrounds were frame 0 of episode 0, so
+  the red blob was that episode's agent at (52.8, 118.5), not the start distribution; backgrounds are now rendered
+  with the agent painted white and the start boxes drawn (toy_background.py); rule added to memory figure-conventions.
+  DOOR-BIAS MAP over the demonstration start box (owner: "calculate the flow bias for a wider start distribution";
+  toy_bias_map.py, 6 x 7 grid of starts over x 35-60, y 97-127, 100 first-chunk samples per start, up = heading
+  > +8 deg, down < -8 deg): flow head overall up 0.59 / down 0.31 / level 0.10, per-start (up - down)/n from -1.00 to
+  +0.91, row means by y (97 -> 127) +0.57, +0.33, +0.30, +0.38, +0.54, +0.22, -0.38: the preference is position-
+  dependent (the bottom row goes down, the rest up), not a uniform 50/50. mse head: up 0.36 / down 0.12 / level
+  0.52 (deterministic per start; level = straight at the wall). Figure twodoor_bias_map.png.
+  START-BOX WIDTH vs FLOW SPLIT (owner: "slightly larger start variance, bias closer to 60-40"; first-chunk
+  samples on a 6 x 7 grid, 100 per start): box half-width 8 px around (48,112): up 0.69 / down 0.23 / level 0.08
+  (decided 75/25); 12 px: 0.61 / 0.29 / 0.10 (68/32); 15 px = the full demonstration box x 35-60, y 97-127: 0.59 /
+  0.31 / 0.10 (66/34). 60/40 is not reachable with a centered box for this head; only a box shifted toward the
+  lower door (y 107-127) would give ~61/39. Decision: run the crash-rule rollouts from the full demonstration
+  start box (the principled choice, 66/34 first-chunk split).
+  FULL-BOX RESULT (07:0x; 100 starts uniform over x 35-60, y 97-127, same starts for both heads, crash rule with
+  the corrected wall face): flow head reached 94 (upper 57, lower 37 -> 61/39 of the reached), crashed 3, timeout
+  3; mse head reached 57 (upper 24, lower 33), crashed 43, timeout 0. This is the headline E3a closed-loop
+  result; the 4-px-box run (98 / 0 crashes vs 36 / 64 crashes) stays as the tight-start variant. Figure
+  docs/results/e3/twodoor_rollouts_crash_rule_fullbox.png.
+  HALF-BOX (owner: "run a half-width just to see"; x 41.25-53.75, y 104.5-119.5, half of the demonstration box in
+  each direction, 100 starts): flow head reached 97 (upper 72, lower 28), crashed 0, timeout 3; mse head reached
+  42 (upper 4, lower 38), crashed 58. Trend with box width (4 px -> half -> full): flow reached 98 / 97 / 94, door
+  split 79-19 / 72-28 / 57-37, crashes 0 / 0 / 3; mse reached 36 / 42 / 57, crashes 64 / 58 / 43. The wider the
+  start box, the more mse starts are off-center enough for the mean heading to miss the wall, and the closer the
+  flow split gets to the demonstrations' 50/50. Figure twodoor_rollouts_crash_rule_halfbox.png.
+
+E3a VERSION 2 (owner 2026-09-10: "redo the entire dataset, training, and eval": starts inside one third of the
+original box in each direction, the target marked with an X in training too; figures paper-ready with the
+execution details in the caption, not the figure). Scene module toy2_scene.py: same walls/doors/speed/radius,
+env target dot OFF, a green X (half-size 8, thickness 3 px) painted into every rendered frame, start box x 43.83-
+52.17, y 107-117. Generator toy2_dataset.py: 500 episodes (250/250), 13,571 frames, lengths 23-33 (mean 27.1),
+zero failures, start y vs door corr -0.09; h5 wf8/train/twodoor2.h5 (2.03 GB), raw cache preload_cache/twodoor2/
+(VERIFY_OK). Entry jf_toy2_f4fb884.sh (= jf_toy with the v2 names), YAML jf-toy2-twodoor.yaml mf-d9c33cb3;
+SUBMITTED job b743e477bc5ce704 (research queue, 33 free) on the owner's redo instruction. Eval to follow:
+toy2_eval.py (100 rollouts per head from the v2 start box with the crash rule, saved paths; 100 first chunks at
+the box center) and toy2_figures.py (demos / rollouts / chunks, minimal style). Demo figure e3v2/demonstrations.png.
+  TRAIN_OK flow 06:51, mse 07:01 (10 min per head), ALL_DONE 07:01. Owner: "queue eval on the same job" ->
+  toy2_eval.py made device-aware, GPU eval entry jf_toy2_eval_f4fb884.sh (links the two checkpoints, 100 rollouts
+  per head with the crash rule + 100 first chunks, figures; outputs ckpts/probes_e3/v2_eval_s42/), chained into
+  jf_toy2_f4fb884.sh for future runs; for this run submitted standalone as job 06621625d2860848 (mf-6ffc1c91).
+  Owner rule recorded (memory compute-placement): model passes at scale go on a card as a small job. E3b also
+  moved to a GPU job: e3b_likelihood.py device-aware, entry jf_e3b_f4fb884.sh CELL RUN_A RUN_B H5 [anchors]
+  [steps] -> ckpts/probes_e3/e3b_<cell>/; pusht submitted as job 8a292bff3dcdeb11 (mf-d5bf8a1a); the CPU rerun
+  stays as the fallback until the GPU job passes its first candidate set.
+  E3b RESULT (GPU job 8a292bff3dcdeb11, EVAL_BEGIN 07:08 -> EVAL_DONE 07:11, 5 s per candidate set vs ~300 s on
+  the devbox CPU; the CPU rerun killed; first attempt of the GPU entry failed on np.savez to the fuse mount,
+  Errno 95 -> entries write to /tmp and copy at the end). 200 anchors, 64 Euler steps, medians in nats
+  (noreg / SIGReg): expert 0.8 / 2.5, own samples 19.3 / 19.2, expert + noise 0.25 -13.4 / -13.5, 0.5 -25.9 /
+  -25.8, 1.0 -45.0 / -44.1, in-episode shuffle -48.0 / -50.1, uniform -75.3 / -74.4. Accuracy (expert scores
+  above the alternative): shuffle 0.98 / 0.97, noise 0.25 0.95 / 0.955, 0.5 0.98 / 0.985, 1.0 1.0 / 1.0,
+  uniform 1.0 / 1.0, expert highest of all 0.915 / 0.915, own samples above expert 0.86 / 0.825. Reading: the
+  flow head is a proper density over chunks: its mass sits on the expert's chunk and its own samples, falls
+  monotonically with the noise scale, and puts plausible-but-wrong chunks (the same episode at another time)
+  and random chunks 50 to 75 nats below; identical ranking in both arms, so SIGReg changes the latent, not the
+  action head's density. Own samples above the expert = the expert chunk carries the demonstrator's noise.
+  Outputs docs/results/e3/e3b_pusht.{json,png} (working figure) and e3b_pusht_loglik.png (paper style,
+  e3b_figure.py); npz + log in ckpts/probes_e3/e3b_pusht/.
+  E3a VERSION 2 EVAL (GPU job 06621625d2860848, mf-6ffc1c91; the chained attempt inside the training job ran the
+  rollouts in 20 s but died on np.savez to the fuse mount, Errno 95; entries now write to /tmp and copy): 100
+  rollouts per head from the v2 start box (x 43.8-52.2, y 107-117), crash rule at the true wall face, execute 5
+  of 10 predicted actions then replan: flow head reached 80 (upper 61, lower 19), crashed 9, timeout 11; mse
+  head reached 37 (upper 2, lower 35), crashed 39, timeout 24. First chunk at the box center, 100 samples: flow
+  66 up / 24 down (heading std 21 deg); mse deterministic (std 0), level (0 up, 0 down: straight at the wall).
+  Note vs v1: the flow head is weaker here (80 vs 94-98 reached, 11 timeouts = wandering without crashing),
+  one seed at 50 epochs on the narrower start distribution. Outputs ckpts/probes_e3/v2_eval_s42/ (paths npz,
+  summary.json, demonstrations.png, rollouts.png, first_chunks.png).
+  OWNER (07:3x): "try again reducing the start size in eval; curious why it favors the top so much". Eval box
+  made a parameter (toy2_eval.py [box_half_x box_half_y]; entry jf_toy2_eval_f4fb884.sh SEED [HALF_X HALF_Y]
+  [TAG]); submitted the 1 px box (center (48, 112) +- 1) as job fcad83669f80a280 (mf-a41e0c77) -> v2_eval_s42_
+  box1px/. Data symmetry check on twodoor2.h5: episodes 250/250, frames 6769 (upper) / 6802 (lower), mean length
+  27.08 / 27.21, first action mean (+0.82, -0.53) / (+0.80, +0.53), start y 112.05 / 111.54; frame vs its
+  vertical mirror differs by 1.1 gray levels on average (the half-pixel offset of a 224-row grid about 111.5).
+  The upward preference is therefore in the trained head; v1 and v2 heads (both seed 42, same init) lean the
+  same way -> a second training seed is the decisive check (proposed, awaiting go).
+  1 PX BOX RESULT (job fcad83669f80a280; starts within 1 px of (48, 112)): flow head reached 82 (upper 54, lower
+  28), crashed 5, timeout 13; mse head reached 74 (upper 0, lower 74), crashed 26, timeout 0. With the start
+  essentially fixed the mse head's rollouts are one path with tiny jitter: three quarters turn to the lower door
+  after the first level chunk, one quarter hit the wall first; the flow head still splits between the doors
+  (66/34 of the reached) from the same start. Outputs ckpts/probes_e3/v2_eval_s42_box1px/.
+  E3 CLOSED (owner 2026-09-10: "this picture is sufficient"; "both are pretty good"): paper figures = E3a
+  docs/results/e3/v2/rollouts_box1px.png (+ first_chunks.png) and E3b e3b_pusht_preference.png + e3b_pusht_ranks.png
+  (nats box plot dropped: "not interpretable for the average reader"; preference shares + rank bubbles instead,
+  own samples removed from the ranking, brick/teal palette, legend above the axes). Plan section rewritten to the
+  final experiment only, captions with the execution details included; older E3a variants stay in this file.
+  Left optional: a second training seed for the toy's door lean.
+
+E7 LeWM ROW + PLANNING-TIME RECORDS (owner 2026-09-10: Minghao cannot run LeWM, "it is on us now"; timing per plan
+cycle from the candidate draw through dynamics, scoring and refinement to the finalized proposal; store the whole
+call and the plan phase; maximum flexibility for downstream statistics, e.g. mean over episodes of the first plan,
+time per replan at H=100 at t=0/25/50/75, total time of successful plans; batching is fine, caveated).
+  WHAT SURVIVED of the E7 grid timing: every ev_*.log carries a [timing-json] summary (65 files): wall_total_s (the
+  whole batched evaluation), t_call mean/std over the run's replan calls (one call plans every env whose buffer is
+  empty), envs per call, amortized per-block time, per-episode amortized totals, replans per env; NOT the cycles
+  themselves (no list, no cycle index, no imagined length). Means per H (best-of-K / gradient-TR, seconds per
+  batched call): 25: 0.81-0.93 / 3.2; 50: 0.98-1.03 / 3.7-3.9; 75: 1.09-1.16 / 4.6; 100: 1.24-1.28 / 5.0-5.3.
+  TIMER WINDOW (old GetActionTimer, eval_gip.py): CUDA-synchronized around policy.get_action = bookkeeping +
+  observation encoding (_enc) + _propose (goal encoding, time-to-goal conditioning, proposals + imagination + cost +
+  refinement, finalized chunk) + buffer fill + pop. Goal frame re-encoded at every replan (gip.py 1355/1692), no
+  cache; LeWM's get_cost encodes the goal once per solve and caches it for the 30 CEM iterations (lewm.py 124-150),
+  observation embedding cached the same way (rollout, 73-80): both sides encode once per plan cycle. LeWM has NO
+  per-plan timing code in any copy we have (eval scripts time the whole evaluation; the CEM solver has no timer);
+  the paper's Figure 3 ("planning time averaged over 50 runs", "up to ~50x faster than DINO-WM", "under one
+  second", CEM 300 x 30 top 30, 5-block horizon) comes from an unpublished measurement.
+  NEW CODE (design reviewed by the owner): lewam/eval_timing.py PlanTimer wraps policy.get_action, the plan callable
+  (ours "_propose", LeWM "solver") and the encoder callable ("_enc" / "solver.model.encode"); one record per call:
+  call_idx, n_alive, envs_planned, cycle_idx per env (0 = first plan, reset on flush), steps_left per env (captured
+  before the call), imagined_blocks (gip.py stores _last_n_dyn_steps where the imagined length is decided; LeWM: its
+  horizon), t_call_s, t_plan_s, t_encode_obs_s (outside the plan), t_encode_goal_s (inside). Outputs: the old summary
+  json (+ t_plan mean/std), timing_records_*.jsonl, timing_episodes_*.json (per-episode lists of plans with batch
+  size, amortized shares and the success flag), and [timing-record] stdout lines so the records persist with the
+  eval logs the entries copy. scripts/plan_timing_stats.py: per-cycle table, per-episode totals, success filter,
+  --phase plan|call. scripts/eval.py (LeWM port): eval.random_start / eval.min_episode_len with the gip.py draw, a
+  pairing guard that calls gip.sample_eval_episodes on the same dataset and asserts identical episodes and starts
+  before planning, PlanTimer with the CEM settings in the json. CPU unit test test_plan_timer.py (stub policies of
+  both shapes; caught two bugs: steps_left read after the policy decremented it, and the plan marker breaking
+  attribute pass-through on the solver). Batched numbers are the measurement on both sides; the batch size is in
+  every record (owner: "it would be silly not to batch").
+  PLAN: commit + tarball; smoke job (LeWM H=25 seed 42 via lewm_grid entry; LeWAM H=25 best-of-K seed 42 via the
+  grev entry) to see the records land; then the LeWM grid (4 H x 3 seeds, one job, ~1 h) and the LeWAM grid rerun
+  with records (16 runs, ~2 card-hours). E3b likelihood (e3b_likelihood.py, trimmed candidates: expert,
+in-episode shuffle, expert + noise 0.25 / 0.5 / 1, uniform, 8 own samples; 200 anchors, 64 Euler steps, exact
+trace by 20 VJPs) running alongside (noreg arm medians so far: expert +0.8, noise 0.25 -14.5, noise 0.5 -26.8,
+noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).

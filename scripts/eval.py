@@ -140,28 +140,52 @@ def run(cfg: DictConfig):
         [max_start_idx_dict[ep_id] for ep_id in dataset.get_col_data(col_name)]
     )
 
-    # keep only rows with step_idx <= max_start_per_row
-    valid_mask = dataset.get_col_data("step_idx") <= max_start_per_row
-    valid_indices = np.nonzero(valid_mask)[0]
-    print(valid_mask.sum(), "valid starting points found for evaluation.")
-
+    # episodes eligible for the draw: long enough for the goal offset and at least min_episode_len
+    # frames (the same length bar for every goal offset makes one seed pick the same episodes for all)
+    step_idx = dataset.get_col_data("step_idx")
+    episode_of_row = dataset.get_col_data(col_name)
+    length_of_episode = {ep_id: episode_len[i] for i, ep_id in enumerate(ep_indices)}
+    frames_per_row = np.array([length_of_episode[ep_id] for ep_id in episode_of_row])
+    eligible_row = (max_start_per_row >= 0) & (frames_per_row >= int(cfg.eval.get("min_episode_len", 0)))
     g = np.random.default_rng(cfg.seed)
-    random_episode_indices = g.choice(
-        len(valid_indices) - 1, size=cfg.eval.num_eval, replace=False
-    )
-
-    # sort increasingly to avoid issues with HDF5Dataset indexing
-    random_episode_indices = np.sort(valid_indices[random_episode_indices])
+    if not bool(cfg.eval.get("random_start", True)):
+        first_frames = np.nonzero((step_idx == 0) & eligible_row)[0]
+        random_episode_indices = np.sort(first_frames[g.choice(len(first_frames), size=cfg.eval.num_eval, replace=False)])
+    else:
+        valid_indices = np.nonzero((step_idx <= max_start_per_row) & eligible_row)[0]
+        print(len(valid_indices), "valid starting points found for evaluation.")
+        random_episode_indices = np.sort(valid_indices[g.choice(len(valid_indices) - 1, size=cfg.eval.num_eval, replace=False)])
 
     print(random_episode_indices)
 
     eval_episodes = dataset.get_row_data(random_episode_indices)[col_name]
     eval_start_idx = dataset.get_row_data(random_episode_indices)["step_idx"]
+    print("eval episodes:", np.asarray(eval_episodes).tolist(), "starts:", np.asarray(eval_start_idx).tolist())
+
+    # pairing guard: the LeWAM harness must draw exactly these (episode, start) tuples for the same flags
+    from lewam.models.gip import sample_eval_episodes
+    from omegaconf import OmegaConf as _OC
+    paired_cfg = _OC.create({"seed": int(cfg.seed),
+                             "eval": {"num_eval": int(cfg.eval.num_eval), "goal_offset_steps": int(cfg.eval.goal_offset_steps)},
+                             "gip_eval": {"random_start": bool(cfg.eval.get("random_start", True)),
+                                          "min_episode_len": int(cfg.eval.get("min_episode_len", 0))}})
+    paired_episodes, paired_starts, _ = sample_eval_episodes(paired_cfg, dataset)
+    assert list(map(int, paired_episodes)) == list(map(int, eval_episodes)) and \
+        list(map(int, paired_starts)) == list(map(int, eval_start_idx)), \
+        "LeWM eval episodes differ from the LeWAM harness draw: the comparison would not be paired"
+    print("pairing guard: the LeWAM harness draws the same episodes and starts")
 
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
 
     world.set_policy(policy)
+    timer = None
+    if cfg.policy != "random":
+        from lewam.eval_timing import PlanTimer
+        # plan phase = the solver call (CEM sampling, dynamics rollouts, cost, all iterations);
+        # the goal and observation encodings happen inside it in the world model's cost
+        timer = PlanTimer(policy, world.num_envs, torch.cuda.is_available(), plan_attr="solver",
+                          encode_attr="solver.model.encode", horizon_blocks=int(cfg.plan_config.horizon))
 
     results_path.mkdir(parents=True, exist_ok=True)
 
@@ -176,8 +200,26 @@ def run(cfg: DictConfig):
         video=results_path,
     )
     end_time = time.time()
-    
+
     print(metrics)
+    if timer is not None:
+        import json
+        timing = dict(policy=str(cfg.policy), seed=int(cfg.seed), num_envs=int(world.num_envs), planner="cem",
+                      horizon_blocks=int(cfg.plan_config.horizon), receding_blocks=int(cfg.plan_config.receding_horizon),
+                      action_block=int(cfg.plan_config.action_block), cem_samples=int(cfg.solver.num_samples),
+                      cem_iters=int(cfg.solver.n_steps), cem_topk=int(cfg.solver.topk),
+                      goal_offset_steps=int(cfg.eval.goal_offset_steps), eval_budget=int(cfg.eval.eval_budget),
+                      random_start=bool(cfg.eval.get("random_start", True)), min_episode_len=int(cfg.eval.get("min_episode_len", 0)),
+                      gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
+                      wall_total_s=float(end_time - start_time), success_rate=float(metrics.get("success_rate", float("nan"))),
+                      **timer.summary())
+        tag = f"{cfg.policy}_H{int(cfg.eval.goal_offset_steps)}_seed{int(cfg.seed)}"
+        (results_path / f"timing_{tag}.json").write_text(json.dumps(timing, indent=1))
+        timer.write_records(results_path / f"timing_records_{tag}.jsonl")
+        timer.write_per_episode(results_path / f"timing_episodes_{tag}.json", success=metrics.get("episode_successes"))
+        print("[timing-json] " + json.dumps(timing), flush=True)
+        for line in timer.record_lines():
+            print(line, flush=True)
 
     results_path = results_path / cfg.output.filename
     results_path.parent.mkdir(parents=True, exist_ok=True)

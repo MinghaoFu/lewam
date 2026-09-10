@@ -1,0 +1,40 @@
+{
+ "pu_fx_nm192": {
+  "n": 200,
+  "k": 32,
+  "rollouts": 8,
+  "H": 8,
+  "cost_prev_median": 3.161005973815918,
+  "cost_real1_median": 2.780383348464966,
+  "cost_joint_median": 2.752728223800659,
+  "cost_inp_median": 2.752728223800659,
+  "per_anchor_std_joint_median": 0.030529361218214035,
+  "per_anchor_std_inp_median": 0.030529361218214035,
+  "per_anchor_cv_joint_median": 0.011506810784339905,
+  "per_anchor_cv_inp_median": 0.011506810784339905,
+  "imagined_progress_median": -0.4374951124191284,
+  "real_progress_median": -0.38709020614624023,
+  "frac_samples_imagined_closer": 0.82671875,
+  "frac_anchors_real_closer": 0.785,
+  "roll_cost_mean_by_step": [
+   2.7731,
+   2.3669,
+   1.8575,
+   1.2708,
+   0.7994,
+   0.9091,
+   0.9715,
+   0.9988
+  ],
+  "real_cost_mean_by_step": [
+   2.8237,
+   2.4427,
+   1.9193,
+   1.1923,
+   0.0,
+   1.2468,
+   1.9358,
+   2.3188
+  ]
+ }
+}

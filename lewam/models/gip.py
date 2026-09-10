@@ -1843,6 +1843,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             "candidate_actions must cover the whole plan"
         n_chunk_repeats = (n_actions_pred + actions_per_chunk - 1) // actions_per_chunk
         n_dyn_steps = self._n_dyn_steps_needed(goal_horizon) if n_dyn_steps is None else int(n_dyn_steps)
+        self._last_n_dyn_steps = n_dyn_steps          # read by the evaluation timer
 
         noise_per_dyn_step = []
         for step in range(self.plan_rollout):
@@ -1998,6 +1999,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
 
         gidx = self._goal_step_idx(steps_rep)
         n_dyn_steps = self._n_dyn_steps_needed(steps_rep)   # the noise lists above cover the whole plan: same draws as a full rollout
+        self._last_n_dyn_steps = n_dyn_steps
 
         def rollout(delta):
             zg = goal_rep + delta.repeat_interleave(K, 0)

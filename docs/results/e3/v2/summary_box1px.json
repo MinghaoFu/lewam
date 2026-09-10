@@ -1,0 +1,34 @@
+{
+ "flow": {
+  "run": "twodoor2_flow",
+  "reached": 82,
+  "crashed": 5,
+  "timeout": 13,
+  "upper": 54,
+  "lower": 28,
+  "chunk_up": 66,
+  "chunk_down": 24,
+  "chunk_heading_std": 21.032207489013672
+ },
+ "mse": {
+  "run": "twodoor2_mse",
+  "reached": 74,
+  "crashed": 26,
+  "timeout": 0,
+  "upper": 0,
+  "lower": 74,
+  "chunk_up": 0,
+  "chunk_down": 0,
+  "chunk_heading_std": 1.1920928955078125e-07
+ },
+ "start_box": [
+  [
+   47.0,
+   49.0
+  ],
+  [
+   111.0,
+   113.0
+  ]
+ ]
+}

@@ -1,0 +1,11 @@
+{
+ "pu_fx_nm192": {
+  "n": 200,
+  "k_alts": 15,
+  "match_top1": 0.88,
+  "chance": 0.0625,
+  "match_rank_mean": 1.135,
+  "sensitivity": 1.3671615573763847,
+  "cost_cv": 0.7720320151746273
+ }
+}

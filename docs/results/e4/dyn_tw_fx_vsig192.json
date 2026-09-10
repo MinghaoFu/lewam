@@ -1,0 +1,11 @@
+{
+ "tw_fx_vsig192": {
+  "n": 200,
+  "k_alts": 15,
+  "match_top1": 0.995,
+  "chance": 0.0625,
+  "match_rank_mean": 1.005,
+  "sensitivity": 1.6924227091670037,
+  "cost_cv": 0.6866317503154278
+ }
+}
