@@ -2774,6 +2774,14 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   BC_RNN_GMM loads and returns a 7-d action. Resubmitted mf-0789fd28 job 65e81e5a8128f103 (seeds 42/0/1).
   Third failure: the pod's robomimic 0.3.1 deserializes {nets, optimizers, lr_schedulers} (0.3.0: the bare state
   dict) -> the loader emits the installed version's layout (fa2f605); resubmitted mf-18478a6f job 6c30468a9a5b49af.
+  DP-C seed 42 (job de73ba9c33cb5fe9, 273a0b1) ran 2 h 50 min: 0/50, every episode at its budget (median 894
+  steps). Cause: robosuite 1.5's OSC part controllers default to input_ref_frame "base", so an absolute action is a
+  base-frame pose (osc.py 318-345: the controller keeps goal_pos in its reference frame and converts the reference
+  eef pose into the base frame in base mode); DP's absolute actions are world-frame poses (robosuite 1.2/1.4 had no
+  other convention), so every goal was displaced by the base pose. Delta actions are unaffected by the translation,
+  which is why our own TC rows and BC-RNN never showed it. Fix: input_ref_frame = "world" with input_type =
+  "absolute" (scripts/eval_official_baseline.py); DP-C resubmitted on the fix (seeds 0/1 of the base-frame runs
+  were left to finish; they are the same 0).
 - **MULTI-VIEW LEWAM (owner 2026-09-11: N views = N x history tokens the policy reads, N x S state slots each
   reading all history, every view's slots at steps <= its own, and the clean actions of its step; GR stays one
   view).** History stays bidirectional; the rule that justifies the asymmetry (owner asked): a token block is

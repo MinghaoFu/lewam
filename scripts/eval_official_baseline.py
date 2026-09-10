@@ -59,8 +59,10 @@ def observe(proprio):
 
 def set_absolute_control():
     """DP's abs_action checkpoints were trained with control_delta=False: switch every OSC controller of
-    the live robots to absolute goals (position, axis-angle). robosuite 1.4 keeps the flag as
-    `use_delta`, 1.5's part controllers as `input_type`; both read it at every goal update."""
+    the live robots to absolute goals (position, axis-angle) in the world frame. robosuite 1.4 keeps the
+    flag as `use_delta` (goals are world-frame); 1.5's part controllers use `input_type`, and their
+    default `input_ref_frame` is the robot base, which would displace every world-frame goal by the
+    base pose, so it is set to the world frame too. Both read the flags at every goal update."""
     switched = 0
     for robot in env.env.env.robots:
         controllers = [getattr(robot, "controller", None), getattr(robot, "composite_controller", None)]
@@ -73,6 +75,8 @@ def set_absolute_control():
                 switched += 1
             elif hasattr(controller, "input_type"):
                 controller.input_type = "absolute"
+                if hasattr(controller, "input_ref_frame"):
+                    controller.input_ref_frame = "world"
                 switched += 1
     assert switched > 0, "no OSC controller found to switch to absolute goals"
     print(f"[baseline-eval] {switched} OSC controller(s) switched to absolute goals", flush=True)
