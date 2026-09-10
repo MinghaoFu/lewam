@@ -9,10 +9,18 @@ now backbone and pool. `load_rollout_policy` translates both and returns robomim
 """
 import json
 
+import robomimic
 import robomimic.utils.file_utils as file_utils
 from robomimic.config import config_factory
 
 RENAMED_MODULES = ((".vis_core.", ".backbone."), (".pool_net.", ".pool."))
+
+
+def installed_wraps_state_dict():
+    """robomimic 0.3.1 serializes a model as {nets, optimizers, lr_schedulers} and reads all three back;
+    earlier versions read the bare state dict."""
+    version = tuple(int(part) for part in robomimic.__version__.split(".")[:3])
+    return version >= (0, 3, 1)
 
 
 def merge_into(config, saved):
@@ -57,10 +65,16 @@ def load_rollout_policy(ckpt_path, device):
     with config.unlocked():
         merge_into(config, saved)
     ckpt_dict["config"] = config.dump()
+    model = ckpt_dict["model"]
+    state = model["nets"] if "nets" in model else model
     weights = {}
-    for key, value in ckpt_dict["model"].items():
+    for key, value in state.items():
         for old, new in RENAMED_MODULES:
             key = key.replace(old, new)
         weights[key] = value
-    ckpt_dict["model"] = weights
+    if installed_wraps_state_dict():
+        ckpt_dict["model"] = dict(nets=weights, optimizers=model.get("optimizers", {}),
+                                  lr_schedulers=model.get("lr_schedulers", {}))
+    else:
+        ckpt_dict["model"] = weights
     return file_utils.policy_from_checkpoint(ckpt_dict=ckpt_dict, device=device, verbose=False)
