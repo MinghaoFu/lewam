@@ -104,6 +104,15 @@ BC-RNN with DexMimicGen's `generate_training_config.py` on their hdf5 (their cam
 horizon 550), a few card-hours, same adapter. Keep our DP-T rows as "budget-matched, our
 observation setup" or drop them once the official rows exist (owner's call).
 
+**Data check (2026-09-11).** The training files' cameras: `toolhang.h5` `pixels` is the
+robosuite `agentview` camera (re-rendered from the recorded states through our env: mean
+absolute pixel difference 3.5, against 33-43 for `sideview`), `toolhang_eih.h5` is
+`robot0_eye_in_hand` (0.6); `drawer_3view.h5` and `transport_3view.h5` carry `agentview` plus
+both wrist cameras at 224 (1,026 / 1,029 episodes). The official toolhang checkpoints take
+`sideview`, which the adapter renders from the live env, so the datasets are unaffected. To
+check when the drawer BC-RNN is trained: the dexterous hands render pure black in all three
+drawer views.
+
 **Result.** Not run.
 
 **Deliverable.** Official-checkpoint rows for toolhang and transport (BC-RNN, DP-C x 3 seeds),
