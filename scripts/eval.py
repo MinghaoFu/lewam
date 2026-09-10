@@ -3,6 +3,7 @@ import os
 
 os.environ["MUJOCO_GL"] = "egl"
 
+import json
 import time
 from pathlib import Path
 
@@ -203,7 +204,6 @@ def run(cfg: DictConfig):
 
     print(metrics)
     if timer is not None:
-        import json
         timing = dict(policy=str(cfg.policy), seed=int(cfg.seed), num_envs=int(world.num_envs), planner="cem",
                       horizon_blocks=int(cfg.plan_config.horizon), receding_blocks=int(cfg.plan_config.receding_horizon),
                       action_block=int(cfg.plan_config.action_block), cem_samples=int(cfg.solver.num_samples),
@@ -212,6 +212,8 @@ def run(cfg: DictConfig):
                       random_start=bool(cfg.eval.get("random_start", True)), min_episode_len=int(cfg.eval.get("min_episode_len", 0)),
                       gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
                       wall_total_s=float(end_time - start_time), success_rate=float(metrics.get("success_rate", float("nan"))),
+                      episodes=[int(e) for e in np.asarray(eval_episodes)], starts=[int(s) for s in np.asarray(eval_start_idx)],
+                      episode_successes=[bool(x) for x in np.asarray(metrics.get("episode_successes", [])).reshape(-1)],
                       **timer.summary())
         tag = f"{cfg.policy}_H{int(cfg.eval.goal_offset_steps)}_seed{int(cfg.seed)}"
         (results_path / f"timing_{tag}.json").write_text(json.dumps(timing, indent=1))

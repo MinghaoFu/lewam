@@ -17,12 +17,14 @@ import numpy as np
 
 
 def load_records(path):
+    """Records from an eval log's `[timing-record]` lines, or every line of a .jsonl file."""
     records = []
+    jsonl = str(path).endswith(".jsonl")
     with open(path, errors="ignore") as f:
         for line in f:
             if line.startswith("[timing-record] "):
                 records.append(json.loads(line[len("[timing-record] "):]))
-            elif line.startswith("{"):
+            elif jsonl and line.startswith("{"):
                 records.append(json.loads(line))
     return [r for r in records if r.get("envs_planned")]
 

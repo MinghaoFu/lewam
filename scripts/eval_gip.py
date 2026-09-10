@@ -591,6 +591,8 @@ def run(cfg: DictConfig):
                       task_only=bool(task_only),
                       gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
                       wall_total_s=float(dt), success_rate=float(metrics.get("success_rate", float("nan"))),
+                      episodes=[int(e) for e in episodes], starts=[int(s) for s in starts],
+                      episode_successes=[bool(x) for x in np.asarray(metrics.get("episode_successes", [])).reshape(-1)],
                       note="batched over num_envs; amortized = call seconds / envs served in that call",
                       **timer.summary())
         (results_path / f"timing_{cfg.policy}_seed{int(cfg.seed)}.json").write_text(json.dumps(timing, indent=1))

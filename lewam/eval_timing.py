@@ -8,7 +8,8 @@ episode, per successful episode) is computed afterwards from the records.
 
 Both harnesses batch the episodes: one call plans every env whose action buffer is empty, so a
 record's `t_plan_s` is the batched cost of `len(envs_planned)` plans; `t_plan_s / len(envs_planned)`
-is the amortized cost of one.
+is the amortized cost of one, a throughput number, not the time one plan takes alone. For that,
+run the harness with a single env (`eval.num_eval=1`) on a few seeds: every record is then one plan.
 """
 import json
 import time
@@ -52,8 +53,10 @@ class PlanTimer:
 
     plan_attr:       dotted attribute of the callable that runs the plan (our planners "_propose",
                      stable-worldmodel's planning policy "solver"); absent -> t_plan_s is None
-    encode_attr:     dotted attribute of the encoder callable; its time inside the plan phase is
-                     goal encoding, outside it observation encoding
+    encode_attr:     dotted attribute of the encoder callable; its time is split by whether it ran
+                     inside the plan phase (our planners: the goal; LeWM: observation history and
+                     goal, both encoded inside the solver) or outside it (our planners: the
+                     observation)
     imagined_attr:   policy attribute holding the dynamics steps imagined by the last plan
     steps_left_attr: policy attribute holding each env's time to goal in blocks
     horizon_blocks:  the imagined length when the policy does not expose it (LeWM: its horizon)
@@ -135,7 +138,7 @@ class PlanTimer:
             steps_left=([float(steps_left[i]) for i in planned] if steps_left is not None else None),
             imagined_blocks=(int(imagined) if imagined is not None else self.horizon_blocks) if planned else None,
             t_call_s=seconds, t_plan_s=(self._t_plan if self._plan_wrapper is not None and planned else None),
-            t_encode_obs_s=self._t_encode_outside, t_encode_goal_s=self._t_encode_in_plan))
+            t_encode_outside_plan_s=self._t_encode_outside, t_encode_inside_plan_s=self._t_encode_in_plan))
         if alive:
             self.time_per_env[alive] += seconds / len(alive)
         for i in planned:
@@ -172,7 +175,7 @@ class PlanTimer:
                     steps_left=(r["steps_left"][row] if r["steps_left"] is not None else None),
                     imagined_blocks=r["imagined_blocks"],
                     t_call_s=r["t_call_s"], t_plan_s=r["t_plan_s"],
-                    t_encode_obs_s=r["t_encode_obs_s"], t_encode_goal_s=r["t_encode_goal_s"],
+                    t_encode_outside_plan_s=r["t_encode_outside_plan_s"], t_encode_inside_plan_s=r["t_encode_inside_plan_s"],
                     t_call_amortized_s=r["t_call_s"] / batch,
                     t_plan_amortized_s=(r["t_plan_s"] / batch if r["t_plan_s"] is not None else None)))
         return plans

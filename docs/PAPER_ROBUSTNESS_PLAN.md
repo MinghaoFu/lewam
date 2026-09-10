@@ -24,8 +24,9 @@ then E5, E6, E1 last.
 - [ ] **E5** Perturbation eval hook (pixel noise, brightness, occlusion, action noise, env
       variations on swm cells); not started.
 - [ ] **E6** Gradient rescaling flag `--grad_balance d_to_p`, one cell, three seeds; not started.
-- [ ] **E7** Done for LeWAM on PushT. Open: the LeWM row on the same episodes (Minghao; needs
-      frame-0 starts and the 101-frame filter), other cells, GC-IDM row.
+- [ ] **E7** Done for LeWAM on PushT. In progress (ours; Minghao could not run LeWM): the LeWM
+      row on the same episodes with per-plan timing records and separate batch-1 runs (five
+      seeds); both smoke cells passed 2026-09-10, the grids are next. Open: other cells, GC-IDM row.
 
 ## Story
 
@@ -377,11 +378,20 @@ LeWM under its own scheme: 88.7. The closed-loop rows are the method, this row t
 SIGReg gradient-TR beats LeWM under LeWM's own rules. Scoring the retry at the goal time
 instead moves at most 2 episodes per 150.
 
-**Open.** The LeWM row on the same grid (Minghao; his evaluator needs frame-0 starts, the
-101-frame filter and the draw above; A2's random-start row is paired with ours, the
-stable-worldmodel `eval_wm.py` draw is not); other cells (tworoom, reacher, pointmaze with
-their own ladders); GC-IDM as the one goal-conditioned baseline that can run the ladder; the
-repo significance script (E2).
+**Open.** The LeWM row on the same grid is ours now (Minghao could not run LeWM). Our port of
+LeWM's evaluator (`scripts/eval.py`, the authors' released PushT checkpoint) draws the episodes
+above (frame-0 starts, 101-frame filter; a guard calls our sampler and asserts the identical
+draw), and both harnesses now record every plan cycle: the whole policy call, the plan phase
+alone (proposal to finalized chunk), the envs planned in that call, the imagined length; plus
+separate batch-1 runs (`eval.num_eval=1`, five seeds, the same single episode on both sides),
+because a batched call's time divided by the batch is throughput, not the time one plan takes.
+Smoke cells at H = 25, seed 42: LeWM 72.0
+(CEM 300 x 30, 24 s for 50 plans batched), ours 100.0 (SIGReg best-of-K, 0.96 s for 50). The
+LeWM grid (11 remaining cells) and the LeWAM grid rerun with records (47 cells) are next; the
+timing report (`scripts/plan_timing_report.py`) then gives the time to complete a successful
+episode, the time of one 25-step plan, and the per-replan curve at H = 100, in both regimes.
+Also open: other cells (tworoom, reacher, pointmaze with their own ladders); GC-IDM as the one
+goal-conditioned baseline that can run the ladder; the repo significance script (E2).
 
 ## Open decisions
 

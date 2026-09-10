@@ -2671,3 +2671,32 @@ time per replan at H=100 at t=0/25/50/75, total time of successful plans; batchi
 in-episode shuffle, expert + noise 0.25 / 0.5 / 1, uniform, 8 own samples; 200 anchors, 64 Euler steps, exact
 trace by 20 VJPs) running alongside (noreg arm medians so far: expert +0.8, noise 0.25 -14.5, noise 0.5 -26.8,
 noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
+  SMOKE JOBS (2026-09-10, code 2b5805f, bi_algorithm aigcp H100, research had 1 free card). LeWAM mf-d297706b job
+  23f2f3e103a4e7d7 (pusht fx_vsig192_s42, best-of-K, H 25, eval seed 42, frame-0 starts, 101-frame filter, execute 25):
+  100.0, 19 s wall; records: call 0 planned 50 envs, 1.45 s call / 0.96 s plan / 0.44 s observation encoding (the
+  first call also carries the CUDA warm-up); call 25 replanned the 2 live envs, 0.25 / 0.19 s; imagined 5 blocks at
+  both (gip.py _n_dyn_steps_needed = max(1, min(goal horizon, max(blocks to the goal, blocks executed))): with 25
+  actions executed per replan the imagined length never drops below 5 blocks; at H 100 it goes 20/15/10/5). LeWM
+  mf-0ec21fbe job 078f091b14723345 FAILED ("Error locating target 'jepa.JEPA'"): the entry staged
+  ckpts/hf_official/pusht_lewm_base, which is OUR repro (config targets the old le-wm classes, only under
+  lewam/models/ in the tarball), and its reconstruction step was not exit-checked. Retry mf-ae675aa3 job
+  e6726225ce919080 with the authors' release code/lewm_main_eval/hf_release_native/pusht staged natively as
+  policy=pusht_lewm_release (303 tensors, 0 missing / 0 unexpected; entry lewm_grid_2b5805f_v2.sh, load exit-checked):
+  72.0 at H 25 seed 42 under the frame-0 protocol (its random-start number is 88.7), pairing guard passed (the same
+  50 episodes and starts as gip.sample_eval_episodes); records: call 0 planned 50 envs, 24.2 s call / 24.1 s solver /
+  0.77 s encoding inside the solver; call 25 replanned 23 envs, 10.5 s. CEM 300 x 30 is near-linear in the batch
+  (0.48 / 0.46 s amortized) where our best-of-K amortizes to 19 ms at batch 50. Both cells count in the grids (the
+  entries skip a (cell, seed) whose log already holds a success rate).
+  BATCH-1 RUNS (owner: a batched call's time over the batch is throughput, not per-episode latency; a batch-1 full
+  eval is not worth 50x, "maybe for like 5 eps"; and NO new flag in the 2k-line harnesses, so the latency_episodes
+  pass drafted first was removed): latency is a separate run of the unchanged harness with eval.num_eval=1 (the eval
+  configs set num_envs from it, so batch size 1) on five seeds (42 0 1 2 3). Both harnesses share the episode draw,
+  so num_eval=1 + seed picks the same single episode on both sides (paired). The plan cost per cycle does not depend
+  on the episode (fixed K / gradient steps / CEM iterations; the imagined length is the cycle's), so LeWAM batch-1 runs
+  at H 25 and 100 cover every imagined length (5; 20/15/10/5) and LeWM (horizon fixed per run) runs all four H.
+  [timing-json] also carries the episode draw and the per-episode success flags, so the logs are self-contained; the
+  record fields are t_encode_outside_plan_s / t_encode_inside_plan_s (LeWM encodes observation history and goal inside
+  the solver). scripts/plan_timing_report.py: per (harness, arm, planner, H) the plan seconds per replan cycle, the
+  first plan and the per-successful-episode total; batched runs (mean +- std over seeds) and batch-1 runs (num_envs ==
+  1; mean +- std over the single-episode runs) side by side; --phase call for the whole call.
+  plan_timing_stats.load_records parses bare json lines from .jsonl only (the printed metrics dict starts with "{").
