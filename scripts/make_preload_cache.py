@@ -40,11 +40,16 @@ p.add_argument("--u8", action="store_true",
                     "half the bytes, no fp16 intermediate, no second local copy")
 p.add_argument("--anchor_rate", choices=["obs", "raw"], default="obs",
                help="anchor every frameskip-th frame, or every frame in raw mode")
+p.add_argument("--pixels_key", default="pixels",
+               help="the h5 image column to cache; a camera other than `pixels` gets its own frames file "
+                    "(tag suffix .<key>) beside the same aux, for multi-view training")
 args = p.parse_args()
 raw_mode = args.anchor_rate == "raw"
 
 stem = os.path.basename(args.h5).replace(".h5", "")
 tag = f"{stem}_fs{args.frameskip}_i{args.img_size}" + ("_raw" if raw_mode else "")
+if args.pixels_key != "pixels":
+    tag = f"{tag}.{args.pixels_key}"
 tmp = f"/tmp/preload_cache/{tag}"
 os.makedirs(tmp, exist_ok=True)
 os.makedirs(args.out, exist_ok=True)
@@ -151,11 +156,11 @@ if args.patch_terminal:
     sys.exit(0)
 
 # Raw mode loads every pixel frame; frameskip remains the semantic stride used by the cache.
-load_keys = ["pixels", "action"]
+load_keys = [args.pixels_key, "action"]
 load_frameskip = 1 if raw_mode else args.frameskip
 base = swm.data.load_dataset(args.h5, transform=None, cache_dir=None, num_steps=4,
                              frameskip=load_frameskip, keys_to_load=load_keys,
-                             keys_to_cache=[n_frames for n_frames in load_keys if n_frames != "pixels"],
+                             keys_to_cache=[n_frames for n_frames in load_keys if n_frames != args.pixels_key],
                              format="hdf5")
 assert int(base.frameskip) == load_frameskip
 
@@ -163,7 +168,7 @@ act_norm = get_column_normalizer(base, "action", "action")
 action_normalizer = act_norm.lambd
 act_mean = action_normalizer.mean.squeeze(0).cpu().numpy().tolist()
 act_std = action_normalizer.std.squeeze(0).cpu().numpy().tolist()
-img_t = get_img_preprocessor(source="pixels", target="pixels", img_size=args.img_size)
+img_t = get_img_preprocessor(source=args.pixels_key, target="pixels", img_size=args.img_size)
 _U8_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 _U8_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 action_mean = torch.tensor(act_mean, dtype=torch.float32)
@@ -179,7 +184,7 @@ def episode_tensors(ep):
     """Load and preprocess one episode."""
     episode_length = int(base.lengths[ep])
     episode_data = base._load_slice(ep, 0, episode_length)
-    pixels, raw_actions = episode_data["pixels"], episode_data["action"]
+    pixels, raw_actions = episode_data[args.pixels_key], episode_data["action"]
     if not torch.is_tensor(pixels):
         pixels = torch.as_tensor(np.asarray(pixels))
     raw_actions = raw_actions if torch.is_tensor(raw_actions) else torch.as_tensor(np.asarray(raw_actions))
@@ -197,7 +202,7 @@ def episode_tensors(ep):
             frames = frames.to(torch.uint8)
         actions = ((raw_actions.float() - action_mean) / action_std).half()               # (L, adim) per-step
         return frames, actions
-    frames = img_t({"pixels": pixels})["pixels"].float()
+    frames = img_t({args.pixels_key: pixels})["pixels"].float()
     n_observations = episode_length // frameskip
     actions = raw_actions[:n_observations * frameskip].reshape(n_observations, frameskip, raw_actions.shape[1])
     actions = (actions - action_mean) / action_std

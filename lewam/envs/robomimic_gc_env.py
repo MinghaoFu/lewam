@@ -85,9 +85,14 @@ class RoboMimicGCEnv(gym.Env):
         adim = int(self.env.action_dimension)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(adim,), dtype=np.float32)
         sdim = int(np.asarray(self.env.get_state()["states"]).shape[0])
+        # extra cameras for a multi-view policy (ROBOMIMIC_VIEWS="robot0_eye_in_hand,..."): rendered
+        # into the observation dict as pixels.<camera>, which the World lifts into the policy's info
+        self.extra_views = [c for c in os.environ.get("ROBOMIMIC_VIEWS", "").split(",") if c]
         self.observation_space = spaces.Dict({
             "state": spaces.Box(-np.inf, np.inf, shape=(sdim,), dtype=np.float32),
             "proprio": spaces.Box(-np.inf, np.inf, shape=(len(self._proprio()),), dtype=np.float32),
+            **{f"pixels.{c}": spaces.Box(0, 255, shape=(self.res, self.res, 3), dtype=np.uint8)
+               for c in self.extra_views},
         })
         self.render_mode = "rgb_array"
         self._build_obj_slices()
@@ -176,7 +181,11 @@ class RoboMimicGCEnv(gym.Env):
         return self._proprio().astype(np.float64)[_EEF]
 
     def _obs(self):
-        return {"state": self._state(), "proprio": self._proprio()}
+        obs = {"state": self._state(), "proprio": self._proprio()}
+        for camera in self.extra_views:
+            obs[f"pixels.{camera}"] = np.asarray(self.env.render(
+                mode="rgb_array", height=self.res, width=self.res, camera_name=camera), np.uint8)
+        return obs
 
     def _goal_distance(self):
         """MAX over task objects, plus the eef term when goal proprio was supplied."""

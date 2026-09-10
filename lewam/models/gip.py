@@ -32,6 +32,7 @@ from hydra.utils import instantiate as hydra_instantiate
 from stable_worldmodel.policy import BasePolicy
 from stable_worldmodel.data.utils import get_cache_dir
 
+from lewam import views
 from lewam.models.module import MLP
 
 #####################################
@@ -1153,6 +1154,12 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         self.num_actions = int(cfg["num_actions_pred"])
         self._append_every_step = True
         self._lat_buf = None
+        # a multi-view checkpoint lists its cameras; the env serves the extra ones as pixels.<camera>
+        # info keys, normalized here exactly like `pixels` (the transform is looked up by key)
+        self.view_keys = views.info_keys(list(cfg.get("views") or ["pixels"]))
+        for key in self.view_keys[1:]:
+            if "pixels" in self.transform:
+                self.transform[key] = self.transform["pixels"]
 
     def _enc(self, x):
         """Encode eval pixels at the checkpoint's training scale (see pixel_scale above)."""
@@ -1191,23 +1198,29 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
         active = ([i for i in range(num_envs) if not dead[i]]
                   if self._append_every_step else replan)
+        n_views = len(self.view_keys)
         if active:
-            curr = info_dict["pixels"][active]
-            c_obs = curr[:, -1] if curr.ndim == 5 else curr
-            z_cur = self._enc(c_obs.to(device).float())
+            frames = []
+            for key in self.view_keys:
+                curr = info_dict[key][active]
+                frames.append(curr[:, -1] if curr.ndim == 5 else curr)
+            c_obs = torch.stack(frames, dim=1)                                   # (R, views, C, H, W)
+            z_cur = self._enc(c_obs.flatten(0, 1).to(device).float()).view(len(active), n_views, -1)
             for row, i in enumerate(active):
-                self._lat_buf[i].append(z_cur[row])
+                self._lat_buf[i].append(z_cur[row])                              # (views, z) per step
                 if len(self._lat_buf[i]) > hl:
                     self._lat_buf[i] = self._lat_buf[i][-hl:]
 
         if replan:
             R, D = len(replan), self.model.z_dim
-            history = torch.zeros(R, hl, D, device=device)
+            history = torch.zeros(R, n_views, hl, D, device=device)              # view-major, as the model reads it
             history_pad = torch.ones(R, hl, dtype=torch.bool, device=device)
             for row, i in enumerate(replan):
                 buf = self._lat_buf[i][-hl:]
-                history[row, hl - len(buf):] = torch.stack(buf)
+                history[row, :, hl - len(buf):] = torch.stack(buf, dim=1)
                 history_pad[row, hl - len(buf):] = False
+            if n_views == 1:
+                history = history[:, 0]
             action_chunk = self._propose(info_dict, replan, history, history_pad)
             raw = (action_chunk * self._astd + self._amean).cpu()      # (R, num_actions, raw_adim)
             take = self._n_actions_to_execute()
@@ -1327,6 +1340,7 @@ class JointFlowGCPolicy(JointFlowPolicy):
     frame and passes h_norm from the inherited horizon countdown into the joint sample."""
 
     def __init__(self, model, cfg, *args, **kwargs):
+        assert len(cfg.get("views") or ["pixels"]) == 1, "goal-conditioned policies run single-view"
         # diagnostic: hand each env another env's goal (roll across the replan batch), so SR
         # measures how much of the policy is actually goal-driven vs goal-blind behavior
         self.shuffle_goal = bool(kwargs.pop("shuffle_goal", False))
@@ -1498,6 +1512,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     """
 
     def __init__(self, model, cfg, *args, **kwargs):
+        assert len(cfg.get("views") or ["pixels"]) == 1, "the planners imagine one view; multi-view is the reactive policy"
         self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
         self.plan_k = int(kwargs.pop("plan_k", 32))
         self.pm_steps = int(kwargs.pop("pm_steps", 20))

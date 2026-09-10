@@ -37,6 +37,9 @@ def parse_args():
     ap.add_argument("--cache_mmap", action="store_true")
     ap.add_argument("--frameskip", type=int, default=5)
     ap.add_argument("--img_size", type=int, default=224)
+    ap.add_argument("--views", default="pixels",
+                    help="comma list of the h5 image columns to train on (cameras); each needs its own raw "
+                         "cache from make_preload_cache.py --pixels_key; the model gets num_views = len")
     ap.add_argument("--epochs", type=int, default=120)
     ap.add_argument("--warmup_epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=64)
@@ -193,6 +196,43 @@ def parse_args():
                          "protect_p = only D/S are projected away from P. Per-epoch conflict "
                          "rates and cosines are logged. Costs one backward per task.")
     return ap.parse_args()
+
+
+class MultiViewFrames:
+    """The frame arrays of several cameras behind one index: `frames[i]` is (views, 3, H, W) and
+    `frames[a:b]` is (b - a, views, 3, H, W), so the datasets index it exactly like one camera's array."""
+
+    def __init__(self, views):
+        self.views = views
+        self.shape = (views[0].shape[0], len(views), *views[0].shape[1:])
+        self.dtype = views[0].dtype
+        assert all(v.shape == views[0].shape for v in views), "every camera's cache has the same frames"
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, index):
+        return torch.stack([v[index] for v in self.views], dim=-4)
+
+
+def load_cache_views(args):
+    """The raw cache of every camera in args.views (the first one also carries the aux arrays);
+    a camera other than `pixels` sits at the tag suffix .<column> make_preload_cache.py writes."""
+    from train_crossattn import load_cache
+    views = [v for v in args.views.split(",") if v]
+    if views == ["pixels"]:
+        return load_cache(args)
+    cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
+        "LEWAM_CACHE_DIR", "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
+    stem = os.path.basename(args.dataset_name).replace(".h5", "")
+    tags = [f"{stem}_fs{args.frameskip}_i{args.img_size}_raw" + ("" if v == "pixels" else f".{v}") for v in views]
+    frames = [torch.from_numpy(np.load(f"{cdir}/{stem}/{tag}.frames.npy",
+                                       mmap_mode="r" if args.cache_mmap else None)) for tag in tags]
+    aux = np.load(f"{cdir}/{stem}/{tags[0]}.aux.npz")
+    a_frame = torch.from_numpy(aux["A_flat"])
+    assert a_frame.shape[0] == frames[0].shape[0], "raw cache A_flat must be frame-aligned"
+    return (MultiViewFrames(frames), a_frame, torch.from_numpy(aux["t_gidx"]), torch.from_numpy(aux["ep_base"]),
+            torch.from_numpy(aux["frames_to_terminal"]), (aux["act_mean"].tolist(), aux["act_std"].tolist()))
 
 
 def load_cache_obs(args):
@@ -370,13 +410,15 @@ def main():
     else:
         assert not (args.goal_conditioning and not args.fs_strided), \
             "--goal_conditioning needs --fs_strided (or --goal_terminal for the TC goal mode)"
+    views = [v for v in args.views.split(",") if v]
     if args.fs_strided:
+        assert views == ["pixels"], "multi-view training runs on the raw cache"
         frames, a_block, t_gidx, maxh, ep_base, action_stats = load_cache_obs(args)
         raw_adim = a_block.shape[1] // args.frameskip
         n_starts = t_gidx.shape[0]
         tail = maxh
     else:
-        frames, a_frame, t_gidx, ep_base, frames_to_terminal, action_stats = load_cache(args)
+        frames, a_frame, t_gidx, ep_base, frames_to_terminal, action_stats = load_cache_views(args)
         raw_adim = a_frame.shape[1]
         n_starts = t_gidx.shape[0]
         tail = frames_to_terminal
@@ -431,6 +473,7 @@ def main():
                state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None),
                sep_policy_state=bool(args.sep_policy_state),
                policy_proj_rank=int(args.policy_proj_rank),
+               num_views=len(views), views=views,
                sigreg_pertime=bool(args.sigreg_pertime),
                # no reg -> no projection module (keeps noreg checkpoints free of dead params)
                sigreg_proj_dim=(0 if args.w_reg == 0
@@ -568,18 +611,30 @@ def main():
         B, n_history = history_frames.shape[0], history_frames.shape[1]
         was_uint8 = history_frames.dtype == torch.uint8
         norm = lambda x: (x / 255.0 - mean) / std if was_uint8 else x
+        # multi-view samples carry a camera axis after the frame axis: (B, frames, views, 3, H, W); every
+        # frame of every camera goes through the encoder once, and the latents are laid out view-major
+        # (camera 0's frames, then camera 1's, ...) as the model expects
+        n_views = history_frames.shape[2] if history_frames.dim() == 6 else 1
+        image_shape = history_frames.shape[-3:]
 
-        pix = [history_frames.reshape(B * n_history, *history_frames.shape[2:]),
-               state_frames.reshape(B * n_states, *state_frames.shape[2:])]
+        pix = [history_frames.reshape(B * n_history * n_views, *image_shape),
+               state_frames.reshape(B * n_states * n_views, *image_shape)]
         if args.goal_conditioning:
-            pix.append(goal_frames)
+            pix.append(goal_frames.reshape(B * n_views, *image_shape))
         pixels = norm(torch.cat(pix).float())
         z = model.encode(pixels)
-        z_history = z[:B * n_history].reshape(B, n_history, args.z_dim)
-        z_state_online = z[B * n_history:B * (n_history + n_states)].reshape(B, n_states, args.z_dim)
+
+        def view_major(latents, n_frames):
+            """(B * n_frames * views, z) encoder output -> (B, views * n_frames, z), camera 0 first."""
+            return latents.reshape(B, n_frames, n_views, args.z_dim).transpose(1, 2).reshape(B, n_views * n_frames, args.z_dim)
+
+        z_history = view_major(z[:B * n_history * n_views], n_history)
+        z_state_online = view_major(z[B * n_history * n_views:B * (n_history + n_states) * n_views], n_states)
+        if n_views > 1:
+            state_valid = state_valid.repeat(1, n_views)
         z_goal = goal_keep = None
         if args.goal_conditioning:
-            z_goal = z[B * (n_history + n_states):]
+            z_goal = z[B * (n_history + n_states) * n_views:].reshape(B, n_views, args.z_dim)[:, 0]   # GR stays single-view
             if args.detach_goal_grad:
                 # goal still conditions the policy/dynamics, but its gradient cannot reshape
                 # the encoder (also removes the goal group from SIGReg's encoder push, since
@@ -590,8 +645,8 @@ def main():
         if tgt_encoder is not None:
             with torch.no_grad():
                 z_target_raw = tgt_encoder(
-                    norm(state_frames.reshape(B * n_states, *state_frames.shape[2:]).float()))
-            state_target = F.layer_norm(z_target_raw, (args.z_dim,)).reshape(B, n_states, args.z_dim)
+                    norm(state_frames.reshape(B * n_states * n_views, *image_shape).float()))
+            state_target = view_major(F.layer_norm(z_target_raw, (args.z_dim,)), n_states)
         else:
             state_target = z_state_online          # the encoder learns from being the target
         if args.state_residual:
@@ -599,7 +654,7 @@ def main():
             # sample/inpaint add z_t back, so imagination stays anchored to the current state.
             # Encoder collapse now forces the flow toward a point mass at delta=0 -- visible
             # directly as the sampled ||delta|| (legible, unlike z-space collapse).
-            state_target = state_target - z_history[:, -1:]
+            state_target = state_target - (model._last_frames(z_history) if n_views > 1 else z_history[:, -1:])
 
         loss_action, loss_state = model.loss(z_history, history_pad, action_target, action_valid,
                                              state_target, state_valid,
@@ -607,8 +662,8 @@ def main():
         loss = loss_action + loss_state
         parts = {"P": loss_action, "D": loss_state}      # per-task losses for --pcgrad
         loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
-        if idm_head is not None:
-            idm_in = torch.cat([z_history[:, -1], z_state_online[:, 0]], dim=-1)
+        if idm_head is not None:                   # camera 0's newest frame and first predicted state
+            idm_in = torch.cat([z_history[:, n_history - 1], z_state_online[:, 0]], dim=-1)
             loss_idm = F.mse_loss(idm_head(idm_in),
                                   action_target[:, :args.frameskip].reshape(B, -1))
             loss = loss + args.w_idm * loss_idm

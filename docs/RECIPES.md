@@ -2734,3 +2734,64 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   Hypothesis: the approach phase -- the block does not move in the first 25 frames, so success is the agent's final
   position under the pooled 20 px criterion, which LeWM's block-dominated latent cost resolves poorly. Check if
   wanted: per-episode agent/block error at the end (the LeWM port would need to log final states).
+- **B1 PUBLISHED TOOLHANG BASELINES (owner "let's move on to B1/B2", 2026-09-11).** Data check first (owner: "inspect
+  the data"): wf8/train has drawer_3view.h5 (1,026 eps, 298,235 frames, pixels_agentview/r0eih/r1eih 224, action 22,
+  proprio 38, state 92) and transport_3view.h5 (1,029 eps, 419,712 frames, same views, action 14); toolhang.h5 (200
+  eps, 95,962 frames) + toolhang_eih.h5 row-aligned; per-frame gzip chunks read 18 random frames in 0.5 s. Figures
+  views_{drawer_3view,transport_3view,toolhang_2view}.png (job tmp). toolhang.h5 pixels = robosuite agentview
+  (re-render from recorded states through RoboMimicEnv, osmesa on the devbox, mean |diff| 3.5 vs 33-43 for sideview;
+  toolhang_eih = robot0_eye_in_hand, 0.6) -- the owner was right. Drawer's dexterous hands render pure black in all
+  three views (to check against DexMimicGen's renders before the drawer BC-RNN retrain). DexMimicGen's transport
+  scene defines shouldercamera0/1 + both wrists (two Pandas, TwoArmTransport), so the published transport
+  checkpoints can be rendered for later; drawer has no published policy. Official checkpoints downloaded to
+  ckpts/official_baselines/tool_hang/: bc_rnn/tool_hang_ph_image_epoch_440_succ_74.pth (0.14 GB; BC + LSTM horizon 10,
+  obs sideview_image + robot0_eye_in_hand_image crop 216, eef pos/quat, gripper qpos) and
+  dp_cnn_train_0/epoch=2150-test_mean_score=0.955.ckpt (4.6 GB; DiffusionUnetHybridImagePolicy, n_obs 2, n_act 8,
+  horizon 16, abs_action True on image_abs.hdf5, 240x240 cameras, crop 216 eval_fixed, 100 DDPM steps, training.use_ema
+  True and DP's eval.py evaluates ema_model when it is on; the owner asked for the raw model weights: "DP-C no EMA").
+  CODE scripts/eval_official_baseline.py (ff35a75; design reviewed): standalone, our task-only protocol
+  (rng(seed).choice(200, 50), demo initial states, env task predicate latched, budget 2x), the checkpoint's cameras
+  rendered from the live env at 240 + eef/gripper from the GC env's proprio; BC-RNN via robomimic's RolloutPolicy with
+  two shims for the 2021 model-zoo checkpoint (config merged into robomimic 0.3's default -- it lacks algo.transformer;
+  image-encoder weights renamed vis_core->backbone, pool_net->pool), images processed as EnvRobosuite does; DP via
+  dill + hydra, --weights model|ema (default model), abs chunks -> position, axis-angle, gripper (DP's
+  RotationTransformer inverse), OSC use_delta=False set on the live controllers. Devbox CPU smoke (osmesa,
+  robosuite 1.4.1, mujoco_py stub): loads and steps; killed after 8 min (the owner: CPU is not benign).
+  LAUNCH (owner "Go. No need to run EMA"): research queue, 11 free; mf-d8deca68 job 69bc48829bb590ad BC-RNN seeds
+  42/0/1 in one job; DP-C raw weights one job per seed: mf-63ec8419 job 5e1d6b973f001962 (s42), mf-77916870 job
+  2509a51826fda00b (s0), mf-7c9cfa43 job 18eb0a82d7612e79 (s1). Entry baseline_ev_ff35a75.sh (DP-T stack);
+  outputs ckpts/official_baselines/tool_hang/eval/{hb_<tag>.log, ev_<tag>_e<seed>.log, baseline_<tag>_<kind>_s<seed>.json}.
+  ALL FOUR FAILED AT LOAD (minutes; the stack differs from the devbox). DP-C: robosuite 1.5's OSC part controllers
+  carry the mode as input_type ("delta"/"absolute"), not 1.4's use_delta -> the switch handles both (273a0b1);
+  resubmitted mf-14dac523 job de73ba9c33cb5fe9 (s42), mf-9c2af60e job cb6f2b05d53d7754 (s0), mf-b37c7a9d job
+  fa97ec22bc7c72bc (s1). BC-RNN: the zoo checkpoint's config is robomimic v0.1 -- modality `image` (now `rgb`) and one
+  flat encoder block (visual_core, visual_core_kwargs, visual_feature_dimension, use_spatial_softmax,
+  spatial_softmax_kwargs, obs_randomizer_*); merging it raw made the pod's robomimic 0.3.1 index a string
+  (TypeError) and, on the devbox 0.3.0, built the encoder without the crop (SpatialSoftmax grids 64 = 8x8 on 240 vs
+  the checkpoint's 49 = 7x7 on 216). lewam/robomimic_checkpoint.py (ad0f98a) translates both (image->rgb in every
+  modality group; encoder -> rgb.core_class VisualCore, core_kwargs {feature_dimension 64, backbone ResNet18Conv,
+  pool SpatialSoftmax num_kp 32}, CropRandomizer 216) plus the weight rename; devbox test: RolloutPolicy over
+  BC_RNN_GMM loads and returns a 7-d action. Resubmitted mf-0789fd28 job 65e81e5a8128f103 (seeds 42/0/1).
+  Third failure: the pod's robomimic 0.3.1 deserializes {nets, optimizers, lr_schedulers} (0.3.0: the bare state
+  dict) -> the loader emits the installed version's layout (fa2f605); resubmitted mf-18478a6f job 6c30468a9a5b49af.
+- **MULTI-VIEW LEWAM (owner 2026-09-11: N views = N x history tokens the policy reads, N x S state slots each
+  reading all history, every view's slots at steps <= its own, and the clean actions of its step; GR stays one
+  view).** History stays bidirectional; the rule that justifies the asymmetry (owner asked): a token block is
+  causal exactly where a consumer may see only a prefix of it (clean actions: state slot q reads a_{<= q*fs}; with
+  a bidirectional block a_1 would carry later actions) or where its positions are prediction sites with targets
+  to protect (state slots in q, action slots); the history is clean context read in full by every consumer, so
+  nothing needs protecting. Maps drawn from model.attends (attention_map_3view_S{1,2}.png, job tmp) approved.
+  CODE motflow.py num_views (09137de): view-major layout, learned view_pos on history and state slots, the mask
+  above, per-view prev-prior/residual anchors (_last_frames), shapes in loss/sampling; num_views=1 bit-identical
+  to the previous file under the same weights (test_motflow_views.py: map, loss, samples). Data/eval:
+  make_preload_cache.py --pixels_key (tag suffix .<column>), train_jointflow.py --views (MultiViewFrames: caches
+  behind one index, samples (frames, views, 3, H, W); run_batch encodes every camera's frames once, latents
+  view-major; config num_views/views), lewam/views.py (column -> camera -> info key), robomimic_gc_env.py /
+  dexmimicgen_env.py ROBOMIMIC_VIEWS / DEXMG_VIEWS render extra cameras into the obs dict as pixels.<camera>
+  (the World lifts obs keys into info; AddPixels resizes only render()), JointFlowPolicy normalizes them with the
+  `pixels` transform (the library transform is keyed by name), one latent per camera and step, history (R, views,
+  H, z). Planners and the GC policy assert single-view. Toolhang 2-view cache: wf8/train/_views/tool_hang.h5 =
+  external links joining toolhang.h5 and toolhang_eih.h5 (the eval-view file pattern; stem tool_hang so the
+  existing primary raw cache is reused); make_preload_cache.py --pixels_key pixels_r0eih --anchor_rate raw on the
+  devbox (I/O: 95,962 frames streamed in 99 s, 14.4 GB written) -> preload_cache/tool_hang/
+  tool_hang_fs5_i224_raw.pixels_r0eih.{frames.npy,aux.npz}.
