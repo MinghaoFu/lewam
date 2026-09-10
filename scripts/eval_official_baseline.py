@@ -81,36 +81,7 @@ def set_absolute_control():
 if args.kind == "bc_rnn":
     import robomimic.utils.file_utils as file_utils
     import robomimic.utils.obs_utils as obs_utils
-    from robomimic.config import config_factory
-
-    def merge_into(config, saved):
-        """Set every leaf of the saved config into `config`, recursing through nested sections."""
-        for key, value in saved.items():
-            if isinstance(value, dict) and isinstance(config.get(key), dict):
-                merge_into(config[key], value)
-            else:
-                config[key] = value
-
-    # module names of the image encoder in robomimic 0.2 checkpoints -> the installed robomimic
-    RENAMED_MODULES = ((".vis_core.", ".backbone."), (".pool_net.", ".pool."))
-
-    def load_rollout_policy(ckpt_path, device):
-        """A model-zoo checkpoint predates config keys the installed robomimic reads (algo.transformer,
-        ...) and names its image encoder modules differently: merge its config into the current
-        default config of its algorithm, rename the weights, then build the policy."""
-        ckpt_dict = file_utils.maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
-        saved = json.loads(ckpt_dict["config"])
-        config = config_factory(saved["algo_name"])
-        with config.unlocked():
-            merge_into(config, saved)
-        ckpt_dict["config"] = config.dump()
-        weights = {}
-        for key, value in ckpt_dict["model"].items():
-            for old, new in RENAMED_MODULES:
-                key = key.replace(old, new)
-            weights[key] = value
-        ckpt_dict["model"] = weights
-        return file_utils.policy_from_checkpoint(ckpt_dict=ckpt_dict, device=device, verbose=False)
+    from lewam.robomimic_checkpoint import load_rollout_policy
 
     policy, ckpt_dict = load_rollout_policy(args.ckpt, args.device)
     config, _ = file_utils.config_from_checkpoint(ckpt_dict=ckpt_dict)
