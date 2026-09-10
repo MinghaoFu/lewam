@@ -353,9 +353,11 @@ for reproduction: eligible episodes in h5 order, picks =
 
 LeWM = the authors' released PushT checkpoint under its own planner (CEM 300 x 30, horizon H/5
 blocks, all 25 actions of each plan executed, then replan), run through our port of its
-evaluator on the same episodes (a guard asserts the identical draw); its random-start H = 25
-number is 88.7. The LeWAM cells were rerun on 2026-09-10 with per-plan timing records and agree
-with the table within seed noise (per-seed values in RECIPES).
+evaluator on the same episodes (a guard asserts the identical draw). Control: under LeWM's own
+random-start protocol the same port and code give 94/90/84 = 89.3 +- 5.0 (reference run
+94/90/82 = 88.7), so the frame-0 numbers are LeWM's behavior, not the port. The LeWAM cells
+were rerun on 2026-09-10 with per-plan timing records and agree with the table within seed
+noise (per-seed values in RECIPES).
 
 Paired McNemar on the same 150 episodes: 50 vs 75 is a significant drop in every cell (p =
 0.003, 0.004, 0.004, 0.000); 75 vs 100 is not different in any cell (p = 1.0, 1.0, 0.64,
@@ -370,7 +372,10 @@ gradient refinement. The pusht arms were trained with goals at most 50 steps ahe
 is out of distribution for the goal conditioning only; label it "beyond the trained goal
 horizon". LeWM, with its own planner on the same episodes, sits below both arms at every H:
 68.7 at H = 25 against 96-99, and at the floor from H = 50 (12, 3, 3) where SIGReg gradient-TR
-holds 71, 47, 45.
+holds 71, 47, 45. The frame-0 protocol is the approach phase: in the first 25 frames the block
+has not moved, so the pooled 20 px criterion is decided by where the agent ends, which our
+policies imitate from the demos while LeWM's latent-distance cost, dominated by the block,
+resolves poorly (hypothesis; the per-episode agent/block error at the end is the check).
 
 **Control: LeWAM under LeWM's open-loop scheme at the standard offset** (random starts,
 H = 25, budget 50; plan 5 blocks with a last-step cost, execute all 25, one retry):

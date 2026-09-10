@@ -2725,3 +2725,12 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   (0.34-0.44 s as a first call); LeWM's 0.77 s of encoding sits inside its 24 s first batched call at H 25. A batched
   call's cost also falls with the number of live envs (5-block plans 0.19 s at 2-3 envs vs 0.63 s at ~46), so the
   report's batched warm-by-length entries carry the mean envs per call.
+  CONTROL (owner: "Surprised LeWM does so bad from start = 0"; go 2026-09-11): mf-2019e7c1 job b1a7c4ac1b938c2c,
+  lewm_ctrl_ed314d6.sh = the grid entry under LeWM's own random-start protocol (+eval.random_start=true, no length
+  filter = A2's config), H 25 seeds 42/0/1, research queue, 15 min: 94/90/84 = 89.3 +- 5.0 vs A2 94/90/82 = 88.7
+  (logs ckpts/lewm_grid/ev_lewmrs_H25_s*.log). The port + PlanTimer reproduce LeWM's own number, so 68.7 from frame 0
+  is LeWM's behavior under that protocol; ruled out beforehand: the draw (guard), the timer wrappers (no attribute
+  writes on solver/encode; syncs only), the config (byte-identical; H 25 = horizon 5 / receding 5 / budget 50).
+  Hypothesis: the approach phase -- the block does not move in the first 25 frames, so success is the agent's final
+  position under the pooled 20 px criterion, which LeWM's block-dominated latent cost resolves poorly. Check if
+  wanted: per-episode agent/block error at the end (the LeWM port would need to log final states).
