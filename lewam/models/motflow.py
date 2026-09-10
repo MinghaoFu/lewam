@@ -18,6 +18,13 @@ Attention map (row attends to columns)
 a* never sees the clean actions or z* (no target leakage into the policy); z* never sees a* or
 z_g (clean-action conditioning, goal-free dynamics); z_hist sees no target.
 
+Views (num_views = N > 1): every camera is encoded by the same encoder and gets a learned view
+embedding. The history holds N*H tokens (view-major: view 0's frames, then view 1's, ...), and the
+policy reads all of them. The dynamics predicts one latent per view and step: N*S state slots,
+slot (v, q) predicting view v at step q. Its map keeps the chain in q and reads every view:
+  z*_{v,q} -> z_hist (all views), z*_{v',q'} for every v' and q' <= q, a_{<= q*fs}
+With N = 1 the layout and the map are the single-view ones above.
+
 Conditioning: tau_a via AdaLN on a* only, tau_s on z* only, h on a* only; clean tokens get the
 fixed tau=1 embedding. The goal reaches the policy as the z_g token, not through the readout.
 
@@ -183,6 +190,8 @@ class MoTFlow(nn.Module):
         self.tau_alpha = float(cfg.get("tau_alpha", 1.0))
         self.tau_alpha_state = float(cfg.get("tau_alpha_state", 0) or self.tau_alpha)
         self.n_clean_actions = self.num_states * self.fs
+        self.num_views = int(cfg.get("num_views", 1))          # cameras; each adds H history and S state tokens
+        self.n_state_tokens = self.num_states * self.num_views
 
         self.encoder = VisionEncoder(size=cfg["encoder_size"], output_type="cls",
                                      output_dim=self.z_dim, img_size=cfg["img_size"],
@@ -196,6 +205,8 @@ class MoTFlow(nn.Module):
         self.state_in = nn.Linear(self.z_dim, d)
         self.state_pos = nn.Parameter(torch.zeros(1, self.num_states, d))
         self.state_query = nn.Parameter(torch.randn(1, self.num_states, d) * 0.02)   # mse head
+        if self.num_views > 1:            # single-view checkpoints keep their parameter set
+            self.view_pos = nn.Parameter(torch.zeros(1, self.num_views, d))
         if self.goal_cond == "token":     # also the goal-free layout: existing checkpoints carry these
             self.goal_in = nn.Linear(self.z_dim, d)
             self.null_goal = nn.Parameter(torch.zeros(1, 1, d))
@@ -245,8 +256,8 @@ class MoTFlow(nn.Module):
             self.action_out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, self.action_raw_dim))
         self.state_out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, self.z_dim))
 
-        # ---- token layout and the attention map (fixed) ----
-        n_hist, n_state_slots = self.history_len, self.num_states
+        # ---- token layout and the attention map (fixed); history and state slots are view-major ----
+        n_hist, n_state_slots = self.history_len * self.num_views, self.n_state_tokens
         n_clean_actions, n_action_slots = self.n_clean_actions, self.num_actions
         idx = {}
         offset = 0
@@ -273,9 +284,11 @@ class MoTFlow(nn.Module):
         for row in policy_hist:
             attends[row, policy_hist] = True
         for slot_idx, row in enumerate(state_slots):
+            step = slot_idx % self.num_states                    # slot (view, step), view-major
             attends[row, hist] = True
-            attends[row, state_slots[:slot_idx + 1]] = True
-            attends[row, clean_actions[:(slot_idx + 1) * self.fs]] = True
+            attends[row, [state_slots[view * self.num_states + earlier]
+                          for view in range(self.num_views) for earlier in range(step + 1)]] = True
+            attends[row, clean_actions[:(step + 1) * self.fs]] = True
         for row in goal:
             attends[row, policy_context] = True
             attends[row, goal] = True
@@ -298,13 +311,36 @@ class MoTFlow(nn.Module):
         attends = self.attends[None].expand(B, -1, -1).clone()
         if history_pad.any():
             key_pad = torch.zeros(B, self.n_tokens, dtype=torch.bool, device=history_pad.device)
-            key_pad[:, self.idx["hist"]] = history_pad
+            key_pad[:, self.idx["hist"]] = history_pad.repeat(1, self.num_views)      # the same frames per view
             if self.idx["policy_hist"]:
-                key_pad[:, self.idx["policy_hist"]] = history_pad
+                key_pad[:, self.idx["policy_hist"]] = history_pad.repeat(1, self.num_views)
             attends = attends & ~key_pad[:, None, :]
         mask = torch.zeros(B, self.n_tokens, self.n_tokens, device=history_pad.device)
         mask[~attends] = float("-inf")
         return mask[:, None]
+
+    def _history_pos(self):
+        """(1, views*H, d): the frame position of every history token plus its view embedding."""
+        pos = self.frame_pos.repeat(1, self.num_views, 1)
+        if self.num_views > 1:
+            pos = pos + self.view_pos.repeat_interleave(self.history_len, dim=1)
+        return pos
+
+    def _state_slot_pos(self):
+        """(1, views*S, d): the step position of every state slot plus its view embedding."""
+        pos = self.state_pos.repeat(1, self.num_views, 1)
+        if self.num_views > 1:
+            pos = pos + self.view_pos.repeat_interleave(self.num_states, dim=1)
+        return pos
+
+    def _last_frames(self, z_history):
+        """(B, views*S, z): each view's newest history latent repeated for that view's state slots
+        (the prev prior and the residual anchor of the state flow)."""
+        if z_history.dim() == 4:
+            z_history = z_history.flatten(1, 2)
+        B = z_history.shape[0]
+        last = z_history.view(B, self.num_views, self.history_len, self.z_dim)[:, :, -1:]
+        return last.expand(-1, -1, self.num_states, -1).reshape(B, self.n_state_tokens, self.z_dim)
 
     def _slot_conditioning(self, tau_a, tau_s, h_norm, B, device):
         """Per-branch conditioning vectors, (B, dim) or None. A tau exists only for a flow branch: tau_s on
@@ -321,23 +357,29 @@ class MoTFlow(nn.Module):
 
     def forward_tokens(self, z_history, history_pad, clean_actions, noisy_actions, noisy_state,
                        tau_a, tau_s, z_goal=None, h_norm=None, goal_keep=None):
-        """One pass of the stack. clean_actions (B, n_clean_actions, adim) z-scored; noisy_actions
-        (B, A, adim) (ignored under the mse action head: a learned query fills the slots);
-        noisy_state (B, S, z_dim) (ignored under the mse state head, likewise). Returns
-        (action_pred (B, A, adim), state_pred (B, S, z_dim)): each is the flow velocity under a flow
-        head and the prediction itself under an mse head."""
+        """One pass of the stack. z_history (B, views*H, z_dim) view-major, or (B, views, H, z_dim);
+        clean_actions (B, n_clean_actions, adim) z-scored; noisy_actions (B, A, adim) (ignored under
+        the mse action head: a learned query fills the slots); noisy_state (B, views*S, z_dim)
+        (ignored under the mse state head, likewise). Returns (action_pred (B, A, adim),
+        state_pred (B, views*S, z_dim)): each is the flow velocity under a flow head and the
+        prediction itself under an mse head."""
+        if z_history.dim() == 4:
+            z_history = z_history.flatten(1, 2)
         B = z_history.shape[0]
         d = self.dim
         x = z_history.new_zeros(B, self.n_tokens, d)
         state_type_embed = self.state_type.weight
-        x[:, self.idx["hist"]] = self.frame_in(z_history) + self.frame_pos + state_type_embed[0]
+        history_pos = self._history_pos()
+        x[:, self.idx["hist"]] = self.frame_in(z_history) + history_pos + state_type_embed[0]
         if self.sep_policy_state:
             x[:, self.idx["policy_hist"]] = self.frame_in(self.policy_proj(z_history)) \
-                + self.frame_pos + state_type_embed[0]
+                + history_pos + state_type_embed[0]
+        slot_pos = self._state_slot_pos()
         if self.state_head == "mse":
-            x[:, self.idx["state_slots"]] = self.state_query.expand(B, -1, -1) + self.state_pos + state_type_embed[1]
+            x[:, self.idx["state_slots"]] = self.state_query.repeat(1, self.num_views, 1).expand(B, -1, -1) \
+                + slot_pos + state_type_embed[1]
         else:
-            x[:, self.idx["state_slots"]] = self.state_in(noisy_state) + self.state_pos + state_type_embed[1]
+            x[:, self.idx["state_slots"]] = self.state_in(noisy_state) + slot_pos + state_type_embed[1]
         if self.goal_conditioning and z_goal is not None and self.sep_policy_state:
             z_goal = self.policy_proj(z_goal)          # the policy's view of the goal (both modes)
         if self.goal_token:
@@ -382,7 +424,7 @@ class MoTFlow(nn.Module):
         if self.state_head == "flow":
             tau_s = self._draw_tau_state(B, dev)
             if self.state_prior == "prev":
-                noise_s = z_history[:, -1:].expand_as(state_target).to(state_target.dtype)     # x_0 = z_t
+                noise_s = self._last_frames(z_history).to(state_target.dtype)                  # x_0 = z_t
                 if self.state_prior_sigma > 0:
                     noise_s = noise_s + self._prior_scale(z_history) * torch.randn_like(state_target)
             else:
@@ -411,8 +453,9 @@ class MoTFlow(nn.Module):
         return torch.rand(B, device=dev) ** (1.0 / self.tau_alpha_state)
 
     def _prior_scale(self, z_history):
-        """sigma * rms(z_t) per sample (detached): the prev-prior noise scale in latent units."""
-        rms = z_history[:, -1:].detach().float().pow(2).mean(-1, keepdim=True).sqrt()
+        """sigma * rms(z_t) per state slot (detached), z_t being its view's newest history latent: the
+        prev-prior noise scale in latent units."""
+        rms = self._last_frames(z_history).detach().float().pow(2).mean(-1, keepdim=True).sqrt()
         return self.state_prior_sigma * rms.to(z_history.dtype)
 
     def _x_to_v(self, z_hat, x_tau, tau):
@@ -430,14 +473,14 @@ class MoTFlow(nn.Module):
             _, state = self.forward_tokens(z_history, history_pad, clean_actions, zero_action_slots, None, one, one, z_goal, h_norm)
         else:
             if self.state_prior == "prev":
-                state = z_history[:, -1:].expand(B, self.num_states, self.z_dim)            # ODE starts at z_t
+                state = self._last_frames(z_history)                                         # ODE starts at z_t
                 if self.state_prior_sigma > 0:
                     eps = noise_state if noise_state is not None else \
-                        torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
+                        torch.randn(B, self.n_state_tokens, self.z_dim, device=dev, generator=generator)
                     state = state + self._prior_scale(z_history) * eps
             else:
                 state = noise_state if noise_state is not None else \
-                    torch.randn(B, self.num_states, self.z_dim, device=dev, generator=generator)
+                    torch.randn(B, self.n_state_tokens, self.z_dim, device=dev, generator=generator)
             for i in range(self.n_flow_steps):
                 tau = torch.full((B,), i / self.n_flow_steps, device=dev)
                 _, v_s = self.forward_tokens(z_history, history_pad, clean_actions, zero_action_slots, state, one, tau, z_goal, h_norm)
@@ -445,7 +488,7 @@ class MoTFlow(nn.Module):
                     v_s = self._x_to_v(v_s, state, tau)
                 state = state + v_s / self.n_flow_steps
         if self.state_residual and self.num_states:
-            state = state + z_history[:, -1:]
+            state = state + self._last_frames(z_history)
         return state
 
     def _sample_impl(self, z_history, history_pad, generator=None, z_goal=None, h_norm=None,
@@ -455,7 +498,7 @@ class MoTFlow(nn.Module):
         action = noise_action if noise_action is not None else \
             torch.randn(B, self.num_actions, self.action_raw_dim, device=dev, generator=generator)
         zero_clean_actions = torch.zeros(B, self.n_clean_actions, self.action_raw_dim, device=dev, dtype=action.dtype)
-        zero_state_slots = torch.zeros(B, self.num_states, self.z_dim, device=dev, dtype=z_history.dtype)
+        zero_state_slots = torch.zeros(B, self.n_state_tokens, self.z_dim, device=dev, dtype=z_history.dtype)
         one = torch.ones(B, device=dev)
         if self.action_head == "mse":                            # mirror of the mse state head: one pass at tau one
             action, _ = self.forward_tokens(z_history, history_pad, zero_clean_actions, None, zero_state_slots, one, one, z_goal, h_norm)
@@ -486,7 +529,7 @@ class MoTFlow(nn.Module):
         needs_state_noise (else None). A caller that imagines several steps can draw them all first
         and pass them to _sample_impl, keeping the generator stream identical to calling `sample`."""
         act_noise = torch.randn(batch_size, self.num_actions, self.action_raw_dim, device=device, generator=generator)
-        state_noise = torch.randn(batch_size, self.num_states, self.z_dim, device=device, generator=generator) \
+        state_noise = torch.randn(batch_size, self.n_state_tokens, self.z_dim, device=device, generator=generator) \
             if self.needs_state_noise else None
         return act_noise, state_noise
 
@@ -535,5 +578,5 @@ def build_model(cfg):
                     img_size=224, z_dim=384, proj_hidden=768, d_model=384, n_heads=6, depth=8,
                     dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=10, num_states_pred=1,
                     policy_history_len=2, goal_conditioning=False, goal_cond="token", state_head="flow",
-                    state_residual=False, tau_alpha=1.0, tau_alpha_state=0.0)
+                    state_residual=False, tau_alpha=1.0, tau_alpha_state=0.0, num_views=1)
     return MoTFlow({**defaults, **cfg})
