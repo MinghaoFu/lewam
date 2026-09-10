@@ -11,6 +11,15 @@ CAMERA_OF_COLUMN = {
 }
 
 
+def columns(spec):
+    """The view columns of a checkpoint config: a list, a comma string, or nothing (one view, `pixels`)."""
+    if not spec:
+        return ["pixels"]
+    if isinstance(spec, str):
+        return [v for v in spec.split(",") if v]
+    return list(spec)
+
+
 def camera_of(column):
     """The robosuite camera behind an h5 image column (`pixels_<name>` falls back to `<name>`)."""
     return CAMERA_OF_COLUMN.get(column, column[len("pixels_"):] if column.startswith("pixels_") else column)

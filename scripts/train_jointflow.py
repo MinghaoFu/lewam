@@ -486,6 +486,7 @@ def main():
     # vars(args) carries the RAW -1 sentinel; the loader must see the resolved width or it
     # rebuilds without the projection module and the state-dict assert fires
     dumped["sigreg_proj_dim"] = cfg["sigreg_proj_dim"]
+    dumped["views"] = views          # the list, not the comma string vars(args) carries
     (run_dir / "jointflow_config.json").write_text(json.dumps(dumped, indent=1))
     n_params = sum(p.numel() for p in model.parameters())
     assert not (args.tau_alpha_state and not args.split_tau), \

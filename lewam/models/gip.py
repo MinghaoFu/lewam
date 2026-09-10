@@ -1156,7 +1156,7 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         self._lat_buf = None
         # a multi-view checkpoint lists its cameras; the env serves the extra ones as pixels.<camera>
         # info keys, normalized here exactly like `pixels` (the transform is looked up by key)
-        self.view_keys = views.info_keys(list(cfg.get("views") or ["pixels"]))
+        self.view_keys = views.info_keys(views.columns(cfg.get("views")))
         for key in self.view_keys[1:]:
             if "pixels" in self.transform:
                 self.transform[key] = self.transform["pixels"]
@@ -1340,7 +1340,7 @@ class JointFlowGCPolicy(JointFlowPolicy):
     frame and passes h_norm from the inherited horizon countdown into the joint sample."""
 
     def __init__(self, model, cfg, *args, **kwargs):
-        assert len(cfg.get("views") or ["pixels"]) == 1, "goal-conditioned policies run single-view"
+        assert len(views.columns(cfg.get("views"))) == 1, "goal-conditioned policies run single-view"
         # diagnostic: hand each env another env's goal (roll across the replan batch), so SR
         # measures how much of the policy is actually goal-driven vs goal-blind behavior
         self.shuffle_goal = bool(kwargs.pop("shuffle_goal", False))
@@ -1512,7 +1512,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     """
 
     def __init__(self, model, cfg, *args, **kwargs):
-        assert len(cfg.get("views") or ["pixels"]) == 1, "the planners imagine one view; multi-view is the reactive policy"
+        assert len(views.columns(cfg.get("views"))) == 1, "the planners imagine one view; multi-view is the reactive policy"
         self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
         self.plan_k = int(kwargs.pop("plan_k", 32))
         self.pm_steps = int(kwargs.pop("pm_steps", 20))
