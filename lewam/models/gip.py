@@ -329,16 +329,21 @@ def load_crossattn_model(run_name, which="best"):
 
 
 def load_dp_model(run_name):
-    """Load a diffusion_policy checkpoint (dill payload: hydra cfg + EMA weights) from
-    $STABLEWM_HOME/checkpoints/<run_name>/dp.ckpt. Needs the diffusion_policy repo on
-    PYTHONPATH."""
+    """Load a diffusion_policy checkpoint from $STABLEWM_HOME/checkpoints/<run_name>: our DP-C port
+    (dp_config.json + dp_best.pt, see lewam.models.dp_policy) or the DP-T format (dp.ckpt, a dill payload
+    with the hydra cfg and EMA weights). Needs the diffusion_policy repo on PYTHONPATH."""
+    run_dir = Path(get_cache_dir(sub_folder="checkpoints")) / run_name
+    if (run_dir / "dp_config.json").exists():
+        from lewam.models import dp_policy
+        policy, config = dp_policy.load_trained(run_dir)
+        return policy, dp_policy.adapter_config(config)
     import dill
     import hydra as _hydra
     import robomimic.models.base_nets as _rmbn
     if not hasattr(_rmbn, "CropRandomizer"):   # robomimic 0.3 moved it out of base_nets
         import robomimic.models.obs_core as _rmoc
         _rmbn.CropRandomizer = _rmoc.CropRandomizer
-    ckpt = Path(get_cache_dir(sub_folder="checkpoints")) / run_name / "dp.ckpt"
+    ckpt = run_dir / "dp.ckpt"
     assert ckpt.exists(), f"no dp.ckpt in {ckpt.parent}"
     payload = torch.load(open(ckpt, "rb"), pickle_module=dill, map_location="cpu")
     cfg = payload["cfg"]
@@ -1257,16 +1262,23 @@ class JointFlowPolicy(LeWAMSplitPolicy):
 
 class DPTPolicy(BasePolicy):
     """Eval adapter for a diffusion_policy checkpoint (mode=dp_policy). Receding horizon
-    exactly as the DP codebase evals: stack the last n_obs_steps raw frames (plus proprio
-    keys when the checkpoint consumes them), predict_action, execute the first
-    n_action_steps actions raw -- the checkpoint carries its own normalizer. Pixels must
-    arrive UNTRANSFORMED (uint8 HWC); build_policy passes transform={} for this mode."""
+    exactly as the DP codebase evals: stack the last n_obs_steps raw frames of every camera
+    (plus proprio keys when the checkpoint consumes them), predict_action, execute the first
+    n_action_steps actions raw -- the checkpoint carries its own normalizer and crops inside
+    its encoder. Pixels must arrive UNTRANSFORMED (uint8 HWC); build_policy passes
+    transform={} for this mode. The cameras come from the config's camera_info_keys
+    (observation key -> info key); a config without it is the single-camera DP-T format,
+    whose one key is fed the `pixels` info."""
 
     def __init__(self, model, cfg, action_dim, **kwargs):
         super().__init__(**kwargs)
         self.type = "dp_policy"
         self.model = model
         self.obs_keys = set(cfg.task.shape_meta["obs"].keys())
+        self.camera_keys = {key: info_key
+                            for key, info_key in dict(getattr(cfg, "camera_info_keys", None)
+                                                      or {"sideview_image": "pixels"}).items()
+                            if key in self.obs_keys}
         self.n_obs = int(cfg.n_obs_steps)
         self.n_act = int(cfg.n_action_steps)
         self.action_dim = int(action_dim)
@@ -1297,26 +1309,29 @@ class DPTPolicy(BasePolicy):
         term = info_dict.get("terminated")
         dead = np.asarray(term, dtype=bool) if term is not None else np.zeros(num_envs, dtype=bool)
 
-        pixels = np.asarray(info_dict["pixels"])
-        if pixels.ndim == 5:
-            pixels = pixels[:, -1]
+        current = {}
+        for key, info_key in self.camera_keys.items():
+            frames = np.asarray(info_dict[info_key])
+            current[key] = frames[:, -1] if frames.ndim == 5 else frames       # (E, H, W, C) uint8
         proprio = np.asarray(info_dict["proprio"]) if "proprio" in info_dict else None
         for i in range(num_envs):
             if dead[i]:
                 continue
-            pr = proprio[i] if proprio is not None else None
+            step = ({key: frames[i] for key, frames in current.items()},
+                    proprio[i] if proprio is not None else None)
             if not self._hist[i]:
                 for _ in range(self.n_obs):   # first stack = n_obs repeats, as DP pads at reset
-                    self._hist[i].append((pixels[i], pr))
+                    self._hist[i].append(step)
             else:
-                self._hist[i].append((pixels[i], pr))
+                self._hist[i].append(step)
 
         replan = [i for i in range(num_envs) if len(self._action_buffer[i]) == 0 and not dead[i]]
         if replan:
-            frames = np.stack([np.stack([f for f, _ in self._hist[i]]) for i in replan])
-            frames = np.moveaxis(frames.astype(np.float32) / 255.0, -1, 2)   # (R, To, 3, H, W)
             t = lambda x: torch.from_numpy(np.ascontiguousarray(x)).to(device)
-            full = {"sideview_image": t(frames)}
+            full = {}
+            for key in current:
+                frames = np.stack([np.stack([cams[key] for cams, _ in self._hist[i]]) for i in replan])
+                full[key] = t(np.moveaxis(frames.astype(np.float32) / 255.0, -1, 2))   # (R, To, 3, H, W)
             if proprio is not None:
                 props = np.stack([np.stack([p for _, p in self._hist[i]])
                                   for i in replan]).astype(np.float32)

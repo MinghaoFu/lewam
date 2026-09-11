@@ -2782,6 +2782,48 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   which is why our own TC rows and BC-RNN never showed it. Fix: input_ref_frame = "world" with input_type =
   "absolute" (scripts/eval_official_baseline.py); DP-C resubmitted on the fix (seeds 0/1 of the base-frame runs
   were left to finish; they are the same 0).
+  KILLS (owner 2026-09-11 ~05:50: "Did you kill the old runs? ... slow down and take a deep look at where potential
+  bugs could come up rather than get stuck in launch -> fail -> debug -> repeat"): the fix-carrying DP-C resubmissions
+  (mf-22ff2441 job 5f448289ecdfc38c s42, job 69c742cec397e321 s0, mf-67124ae0 job 4788de77614ecc15 s1; an earlier
+  pair had hit the entry's SKIP_DONE guard on the base-frame ev logs, since moved to eval/base_frame/) were stopped
+  about ten minutes after EVAL_BEGIN, with the BC-RNN job 6c30468a9a5b49af, via
+  `yes | merlin-cli --control-plane i18n-tt job-v2 runs stop --json '{"sid":"<id>","stop_reason":"..."}'` (the
+  "jobs cannot be killed" claim in merlin/MERLIN.md and CLAUDE.md was wrong and is replaced). So no DP-C result on
+  the fix existed before the relaunch below. BC-RNN s42 (fa2f605 loader): 0/50, every episode at its budget.
+  OFFLINE DIAGNOSIS of the BC-RNN 0/50 (devbox, no launches; scripts in the job tmp):
+  (1) closed-loop rollout on demo 127 under robosuite 1.4.1 = the dataset's version (bcrnn_rollout_diag.py, osmesa,
+  10 s/step): the same failure as the 1.5.1 pods -- the policy heads toward the frame, overshoots it, drifts to eef
+  y = -0.48 and keeps the gripper open for all 400 steps. Not a 1.5.1 effect; the staged pod diagnostic
+  (b1-diag-obs-151.yaml, mf-2f004143) is dropped unsubmitted.
+  (2) the DP checkpoint's LinearNormalizer = its training-data statistics (dp_normalizer_stats.py) against our
+  proprio column (first 30 demos): eef pos mean (-0.081, -0.076, 1.011) vs (-0.074, -0.072, 1.010), ranges alike;
+  eef quat in the same order (first component 0.58..1.0 in both, mean (0.81, 0.35, -0.29, -0.01) vs (0.79, 0.36,
+  -0.31, 0.00)); gripper qpos (0.0008..0.041, -0.042..0) vs (0.001..0.040, -0.041..0); DP's absolute-action position
+  range equals its eef range, i.e. world-frame targets, which confirms the frame fix. The low-dim convention is
+  settled against the published training distribution, not only 1.4 vs 1.5.
+  (3) the translated BC-RNN instantiates exactly the v0.1 config (bcrnn_structure_check.py): CropRandomizer
+  240 -> 216 x 1, ResNet18Conv (no pretrain, no coord conv), SpatialSoftmax 32 keypoints, feature 64, LSTM 2 x 1000
+  horizon 10 open_loop off, GMM 5 modes low-noise eval; 524 tensors loaded strictly; a forward pass returns 7-d.
+  (4) open-loop replay of recorded actions from recorded starts under 1.4.1 (replay_demos_diag.py): eef drift 11 cm
+  (demo 125) and 4.6 cm (demo 101), both fail -- expected, the actions were recorded under robosuite 1.2 physics,
+  so action replay separates nothing; stopped.
+  (5) robomimic_raw/tool_hang/ph/image_384_v15.hdf5 is a 6 KB env-args stub: no published-render reference exists
+  here, so our sideview/wrist renders (diag_obs_141.png: upright, right cameras, 240) cannot be diffed against the
+  2021 training images. Leading explanation: both published checkpoints were trained on robosuite 1.2 / mujoco-py
+  renders and physics; ours is 1.4.1 (devbox) / 1.5.1 (pods) + mujoco 3.
+  Owner 2026-09-11 ~07:00: "Do DP. I think we should scrap BC-RNN. If we show competitiveness or beating DP, then
+  BCRNN is useless anyway" -> BC-RNN dropped (its action-agreement test, bcrnn_action_agreement.py, stopped
+  unfinished). RELAUNCH DP-C on the world-frame fix (75f0fa7, raw weights, 50 episodes per seed, one job per seed
+  to stay under the 3 h util kill), algorithm aigcp queue (33 free H100 vs 9 on research): mf-79f17417 job
+  543cd888a228de64 (s42), mf-f7efaee3 job dc6af8fab5157810 (s0), mf-8e01e5c4 job 9ae0f96dabe226aa (s1).
+  RESULT (all three finished 09:49-10:02, 2 h 47 min each): DP-C world-frame, raw weights, 50 episodes per seed:
+  0/50, 0/50, 0/50 = 0.0 +- 0.0 (n = 3 x 50), every episode at its 2x budget; ev logs confirm "1 OSC controller(s)
+  switched to absolute goals". Files ev_dpc_th_s{42,0,1}_e*.log, baseline_dpc_th_s*_dp_s*.json under
+  ckpts/official_baselines/tool_hang/eval/. So both published toolhang policies score 0 in our stack with their
+  own cameras, low-dim keys and controller convention. Open: the domain gap to robosuite 1.2 / mujoco-py renders
+  and physics (the training stack of both checkpoints), or a remaining difference in robosuite 1.5's absolute-pose
+  handling (the orientation path was read in 1.4 only; no 1.5 source on the devbox). Owner's call whether to read
+  the 1.5.1 controller code or take the 0 as the B1 row and fall back to retraining the baselines on our data.
 - **MULTI-VIEW LEWAM (owner 2026-09-11: N views = N x history tokens the policy reads, N x S state slots each
   reading all history, every view's slots at steps <= its own, and the clean actions of its step; GR stays one
   view).** History stays bidirectional; the rule that justifies the asymmetry (owner asked): a token block is
@@ -2803,3 +2845,69 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   existing primary raw cache is reused); make_preload_cache.py --pixels_key pixels_r0eih --anchor_rate raw on the
   devbox (I/O: 95,962 frames streamed in 99 s, 14.4 GB written) -> preload_cache/tool_hang/
   tool_hang_fs5_i224_raw.pixels_r0eih.{frames.npy,aux.npz}.
+  STAGED, NOT SUBMITTED (2026-09-11): training th-mvsig192-2view.yaml (mf-4297cde4; jf_tc_85b5df9.sh toolhang, the
+  fx_mvsig192 recipe + "--views pixels,pixels_r0eih", ARMTAG _fx_mvsig192_2v, SKIP_EVAL=1 because the chained eval
+  is single-view) and its eval jf_tc_ev_85b5df9_task_views.sh (= the b05a7f8_task2 task-only entry on tarball
+  85b5df9 + a 5th arg VIEWS exported as ROBOMIMIC_VIEWS / DEXMG_VIEWS; empty = unchanged single-view entry).
+  Eval path verified offline before any launch (test_policy_views.py, job tmp, on the 2-view smoke checkpoint):
+  swm's env_pool._stack_fresh gives EVERY array-valued info key the (envs, 1, ...) layout, so the lifted
+  pixels.<camera> keys reach the policy shaped like `pixels` (a 4-D fake in the first test draft crashed
+  _prepare_info's transpose -- the World never produces that); the adapter encodes both views per step into a
+  (views, z) latent, hands the model a view-major (envs, views, history, z) history at every replan (steps 0, fs,
+  2fs), flushes per env, raises KeyError without the second view, and the single-view checkpoint takes the same
+  path unchanged.
+  DRAWER 3-VIEW TRAINING (owner 2026-09-11: "drawer for sure only ever has 3 views (dexmimicgen ... image_keys
+  agentview, robot0_eye_in_hand, robot1_eye_in_hand). Thus, I think we should start training LeWAM on it";
+  SIGReg check: "view A and view B get their own SIGReg call across the batch? ... Perfect ... Training can
+  proceed"). SIGReg per (camera, time) slot across the batch, averaged over slots = the sigreg_pertime default;
+  the pooled --no-sigreg_pertime mode would flatten views into one set and, for N > 1, takes the last frame of
+  the LAST camera only as the history sample (not exercised). Caches: drawer_3view.h5 is row-aligned with
+  drawer.h5 (298,235 frames, 1,026 eps, same action/state/proprio); wf8/train/_views/drawer_cleanup_fixed.h5 =
+  external links (drawer.h5 columns + pixels_r0eih/pixels_r1eih from drawer_3view.h5; built in the job scratch,
+  h5py cannot write in place on the HDFS fuse mount, copied after) so the stem matches the existing agentview
+  cache; make_preload_cache.py --pixels_key <column> --anchor_rate raw per camera on the devbox (~7 min build +
+  5 min HDFS copy each; its --out is the STEM directory: passing preload_cache/ put the files one level up,
+  renamed into preload_cache/drawer_cleanup_fixed/). Result: drawer_cleanup_fixed_fs5_i224_raw.pixels_r{0,1}eih
+  .{frames.npy (298235, 3, 224, 224) uint8 44.9 GB, aux.npz, meta.json}, aux t_gidx/A_flat identical to the
+  primary cache's (row-aligned), VERIFY_OK 3 episodes byte-identical each. LAUNCH (owner go): dr-mvsig192-3view.yaml
+  mf-8759ca3c job 94e7bd3536128c2a, jf_tc_85b5df9.sh drawer drawer_cleanup_fixed.h5 drawer 42 120, the fx_mvsig192
+  flags verbatim + "--views pixels,pixels_r0eih,pixels_r1eih", ARMTAG _fx_mvsig192_3v, SKIP_EVAL=1, pod memory
+  200 GB (three caches RAM-preloaded = 135 GB), algorithm aigcp queue (42 free H100 at submit). Expected 25-30 h
+  (single-view drawer: 11 h for 120 epochs; three cameras triple the encoder work per sample). Outputs
+  ckpts/jointflow_tc/tc_drawer_fx_mvsig192_3v_s42/ + hb_tc_drawer_fx_mvsig192_3v_s42.log. Eval afterwards =
+  jf_tc_ev_85b5df9_task_views.sh drawer ... robot0_eye_in_hand,robot1_eye_in_hand (DEXMG_VIEWS; not yet run in a pod).
+  Progress: ep 1 603 s (single-view 282 s), ep 15 val act 0.265 vs single-view 0.315 at the same epoch, ep 20
+  0.250 vs 0.296, ep 40 0.224 vs 0.245; state loss equal; about 10 min per epoch -> done ~05:45 2026-09-12.
+  TRANSPORT 3-VIEW (owner "should we launch ours with transport first?" -> yes): transport_3view.h5 is row-aligned
+  with transport.h5 (419,712 frames, 1,029 eps, 14-d actions); _views/transport.h5 link file + the two wrist caches
+  built on the devbox 2026-09-11 (transport_views_cache.sh; 63 GB each, ~25 min build + copy per camera). Three
+  caches = 190 GB in RAM: the YAML asks a 320 GB pod first (unverified that the scheduler grants it), fallback =
+  the trainer's --cache_mmap on a local NVMe copy of the caches.
+- **DP-C PORT (owner 2026-09-11: "reusing their code (with credit) but under our repo and modified to work with our
+  data is way better ... Also gets rid of any data inconsistency issues").** Why: the DP-T rows came from the
+  official pipeline whose per-sample jpeg decode kept GPU util under the 3 h kill (drawer: 10 links, 44 h wall for
+  120 epochs at 7.3 min/epoch; conversion 17-26 min + cache build per link, redone on every link) and whose only
+  offline checkpoint rule was "last"; the published DP-C checkpoints score 0 here (B1). Design (approved):
+  scripts/train_dp.py + lewam/models/dp_policy.py train diffusion_policy's DiffusionUnetHybridImagePolicy
+  (imported unchanged from dp_repo.tar.gz, commit 5ba07ac; MIT, credited in the module docstring) with its
+  published image settings (DDPM 100 steps squared-cosine epsilon-prediction clip_sample, horizon 16, 2 obs
+  steps, 8 executed, one ResNet18+GroupNorm+spatial-softmax per camera, random 202 crop in training / center at
+  eval inside the encoder, UNet 512/1024/2048 kernel 5, FiLM step embedding 128, AdamW 1e-4 (0.95, 0.999) wd 1e-6,
+  cosine with 500 warmup steps stepped per batch, val every epoch in eval mode) on the LeWAM uint8 caches:
+  DP's windows exactly (episode of L frames -> starts s = -1 .. L-9, L-7 windows; obs = frames s, s+1 with frame 0
+  repeated before the start; target = 16 recorded actions from s with the last repeated past the end; executed
+  actions are the 8 from s+1, so the last observed frame is the current step), a 10% window split like the LeWAM
+  trainer's (owner: keep the trained data size equal), 120 epochs, batch 64, no EMA (owner: "EMA off since max is
+  reported better"), best-val checkpoint (owner: "using the last checkpoint doesn't seem fair"; DP's "max" needs
+  sim rollouts). Actions come from the cache (z-scored fp16 -> raw with the aux stats, identical to what LeWAM
+  trains on); normalizer rule: DP's identity when the recorded actions are within [-1, 1] (toolhang, transport;
+  fp16 rounding puts a recorded 1.0 at 1.0004, tolerance 1e-2), else DP's min-max range normalizer (drawer's hand
+  joints reach 1.57, and DP's DDPM clips samples to [-1, 1]); recorded in dp_config.json. Checkpoints dp_best.pt /
+  dp_latest.pt / dp_full.pt + dp_config.json, synced like the jointflow trainer's; the eval adapter
+  (gip.load_dp_model -> dp_policy.load_trained when dp_config.json exists; DPTPolicy reads every camera through
+  camera_info_keys, `pixels` + `pixels.<camera>`, and keeps the legacy single-key DP-T path). Cameras per cell:
+  toolhang agentview only (owner: "toolhang is as-is scene view (no wrist)"), drawer and transport three.
+  DEVBOX SMOKE (CPU, memory-mapped caches): toolhang single view -> windows 94,562 = 95,962 - 200 x 7 (DP's count),
+  train 85,106 / val 9,456, 262.61M params (the published DP-C size), 2 epochs of 2 steps + resume to a 3rd:
+  train/val losses finite, dp_best/dp_latest/dp_config written; two cameras (pixels,pixels_r0eih) -> 277.48M params,
+  identity normalizer, one step OK.

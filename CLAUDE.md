@@ -55,8 +55,8 @@ mlx worker launch --type A100-SXM-80GB --gpu 1 --resourcetype arnold \
 ```bash
 mlx job submitv2 -p <config>.yaml     # -p 指定 YAML(默认找 ./mlx_config.yaml)
 ```
-YAML 模板与 entry-script 模式见 `merlin/MERLIN.md` (含实测经验: 无 kill 子命令、job log 不可用、
-心跳/断点续传模式)。
+YAML 模板与 entry-script 模式见 `merlin/MERLIN.md` (含实测经验: kill 用 merlin-cli `job-v2 runs stop`、
+job log 不可用、心跳/断点续传模式)。
 
 ### 常见错误
 - `user is not in group XX` → `--usergroup` 用了数字, 改 `bi_algorithm`

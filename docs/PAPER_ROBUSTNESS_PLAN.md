@@ -7,10 +7,12 @@ then E5, E6, E1 last.
 
 ## TODO
 
-- [ ] **B1** Run the official DP-C (three seeds) and BC-RNN toolhang checkpoints through our
-      eval with the observation/controller adapter; then transport; train drawer BC-RNN with
-      DexMimicGen's script; write the one-page audit table. (owner + Minghao)
-- [ ] **B2** Nothing separate: covered by B1.
+- [ ] **B1** Official DP-C toolhang checkpoint through our eval with the observation/controller
+      adapter: 0/50 on all three seeds even with world-frame goals (2026-09-11); BC-RNN dropped
+      (owner). Open: the cause (domain gap to robosuite 1.2 or a 1.5 controller detail), the
+      audit table; DP-C retrained on our data replaces the published checkpoints (see the
+      port `scripts/train_dp.py`). (owner + Minghao)
+- [x] **B2** Dropped with BC-RNN (owner, 2026-09-11).
 - [ ] **E1** On hold, lowest priority (frozen-DINO patch baseline on the MoT).
 - [ ] **E2** Move the paired McNemar test from scratch into `scripts/sig_tests.py` with the
       coverage inventory; add p-values to every results table. (Minghao helping)
@@ -37,7 +39,7 @@ policy-only methods (DP, BC-RNN) have no dynamics model.
 
 | claim | evidence | status |
 |---|---|---|
-| baselines are trained the way their papers say | B1, B2 | audit pending |
+| baselines are trained the way their papers say | B1 | official DP-C running; BC-RNN dropped |
 | end-to-end beats a frozen pretrained encoder | E1 | on hold |
 | differences are significant, not seed noise | E2 | paired tests used for E7; repo script pending |
 | the flow head models the action distribution, not the mean | E3 | done (toy + PushT likelihood ranks) |
@@ -113,16 +115,32 @@ both wrist cameras at 224 (1,026 / 1,029 episodes). The official toolhang checkp
 check when the drawer BC-RNN is trained: the dexterous hands render pure black in all three
 drawer views.
 
-**Result.** Not run.
+**Result (2026-09-11, DP-C in progress).** BC-RNN toolhang: 0/50 on seed 42 under robosuite
+1.5.1, every episode at its budget, and the same failure on the devbox under 1.4.1, the
+version the dataset was built on: the policy heads toward the frame, overshoots it and never
+closes the gripper. Its low-dim inputs are in the published convention (the DP checkpoint's
+stored training statistics match our proprio ranges to a centimetre, same quaternion order,
+same gripper range), the translated network is exactly the released config, and the renders
+are the right cameras at 240. What remains is the gap between the robosuite 1.2 / mujoco-py
+renders and physics the checkpoints were trained on and our 1.4.1 / 1.5.1 + mujoco 3 stack;
+no published-render reference exists on our side to diff against. The owner dropped BC-RNN:
+if we are competitive with or beat DP-C, a BC-RNN row adds nothing. DP-C: the first completed
+runs (0/50) were wrong by construction, since robosuite 1.5's controllers read absolute goals
+in the robot base frame; with the goals in the world frame, raw (non-EMA) weights, and its own
+two cameras plus proprio, the result is 0/50 on each of three seeds (0.0 +- 0.0, n = 3 x 50),
+every episode at its budget. Both published toolhang policies therefore score zero in our
+stack. What separates them from their reported numbers is unresolved: the domain gap to the
+robosuite 1.2 / mujoco-py renders and physics they were trained on, or a remaining difference
+in robosuite 1.5's absolute-pose handling (job ids and logs in RECIPES).
 
-**Deliverable.** Official-checkpoint rows for toolhang and transport (BC-RNN, DP-C x 3 seeds),
-drawer BC-RNN from their script, all under our protocol with +- std and E2 p-values, plus the
-audit table.
+**Deliverable.** Official-checkpoint rows for toolhang and transport (DP-C x 3 seeds) under
+our protocol with +- std and E2 p-values, plus the audit table.
 
 ## B2. BC-RNN
 
-Covered by B1: official robomimic checkpoints for toolhang and transport, DexMimicGen's script
-for drawer. Nothing to train on the robomimic cells.
+Dropped by the owner on 2026-09-11: the official BC-RNN toolhang checkpoint scores 0/50 under
+our stack (B1), and a BC-RNN row is redundant once the DP-C comparison exists. No BC-RNN
+training on any cell.
 
 ## E1. End-to-end vs frozen pretrained encoder (on hold)
 

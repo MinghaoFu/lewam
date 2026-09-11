@@ -64,8 +64,9 @@ See `merlin/example_entry.sh` (= the real `merged_wam_v2.sh`). The load-bearing 
 - `mlx job list | grep <id8>` — status (STARTED/RUNNING/STOPPED/DONE). This is the reliable signal.
 - `mlx job log/describe <id>` — **broken from this CLI** (websocket); do not rely on it.
   Monitor through your own HDFS heartbeats + `ckpts_live/` epoch files instead.
-- **There is no `mlx job kill/stop/cancel` subcommand in this CLI** — stop jobs from the web UI
-  (the job link printed at submit time).
+- `mlx job` has no kill subcommand, but formal jobs CAN be stopped from the devbox:
+  `yes | merlin-cli --control-plane i18n-tt job-v2 runs stop --json '{"sid":"<mlx job id>","stop_reason":"<why>"}'`
+  (status becomes `killed` within a minute; confirm with `mlx job get <id>`). The web UI works too.
 
 ## Runtime facts (measured)
 
@@ -97,10 +98,13 @@ Needs a real TTY: launched from a background/no-TTY context it dies at "Login Wo
 
 ## Job-launch hard rules — learned the hard way (2026-07-21, a whole session lost to these)
 
-**1. `mlx job submitv2` jobs are IRREVERSIBLE — you cannot kill them.**
-- `mlx job` has NO stop/kill/cancel/delete subcommand (only `help`, `submitv2`, `list`).
-- Path-B workers on the aigcp/GCP cluster do NOT appear in `mlx worker list`, so `mlx worker kill` can't reach them either. Only Path-A `mlx worker launch` workers are killable (`mlx worker kill <id>`).
-- **Consequence: never launch casually.** Every submitv2 job is a contended H100 committed for hours with no undo. Think the whole pipeline through BEFORE submitting. Do NOT "just fire a quick diagnostic" — it is neither quick nor cancellable, and duplicates/waste accumulate with no way to clean them. Read logs/checkpoints to diagnose FIRST; launch only when you know exactly what the result buys.
+**1. `mlx job submitv2` jobs are killable, but only through merlin-cli.**
+- `mlx job` has NO stop/kill/cancel/delete subcommand and Path-B pods do NOT appear in `mlx worker list`. The
+  stop is `yes | merlin-cli --control-plane i18n-tt job-v2 runs stop --json '{"sid":"<mlx job id>","stop_reason":"<why>"}'`
+  (see Monitoring above). Kill only your own superseded or wrong jobs.
+- **Still: never launch casually.** Every submitv2 job is a contended H100 committed for hours, and a killed job
+  leaves stale locks and half-written outputs behind. Think the whole pipeline through BEFORE submitting. Read
+  logs/checkpoints to diagnose FIRST; launch only when you know exactly what the result buys.
 
 **2. Build instrumentation INTO the entry script before the first launch.**
 - Mirror the training stdout to HDFS DURING training (background `cp /tmp/train.log $CK/train_$TAG.log` every ~60s), not only at the end. Otherwise you fly blind on multi-hour runs — no loss curves, can't tell training from hung. (I launched five 5h jobs with metrics synced only at the end. Inexcusable.)
@@ -111,8 +115,8 @@ Needs a real TTY: launched from a background/no-TTY context it dies at "Login Wo
 - Never let two jobs write the same heartbeat/log. They interleave, and with backgrounded appends they RACE and DROP lines — I read two duplicate jobs' interleaved epoch lines as a single "diverging" trajectory and falsely declared a training collapse. Use per-run paths (`hb_<tag>.log`).
 - Use SYNCHRONOUS `echo >> LOG`, not backgrounded `( echo >> LOG ) &` — the bg write is lost when the container exits before it flushes (dropped final summary lines).
 
-**4. Resubmitting a "stuck" job creates un-killable duplicates.**
-- A job with no heartbeat is usually QUEUED for a card, not dead. Resubmitting risks a duplicate that ALSO schedules → two un-killable jobs, same tag, colliding on checkpoints. Only resubmit after `mlx job list` shows the original FAILED.
+**4. Resubmitting a "stuck" job creates duplicates.**
+- A job with no heartbeat is usually QUEUED for a card, not dead. Resubmitting risks a duplicate that ALSO schedules → two jobs, same tag, colliding on checkpoints. Only resubmit after `mlx job list` shows the original FAILED, or after stopping the original with merlin-cli.
 
 **5. Monitor for FAILURE, not just success — never stall.**
 - `mlx job list` shows RUNNING/FAILED. Poll it. A job can FAIL in ~2 min (e.g. a 256GB pod that can't schedule) and the heartbeat shows nothing. Watch best.pt mtime as a liveness signal. Set monitors whose grep catches FAILED / no-progress, not only the happy-path result line. Don't wait 20 min hoping — probe status actively.
