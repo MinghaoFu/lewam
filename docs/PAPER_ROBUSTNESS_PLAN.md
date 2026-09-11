@@ -133,8 +133,16 @@ stack. What separates them from their reported numbers is unresolved: the domain
 robosuite 1.2 / mujoco-py renders and physics they were trained on, or a remaining difference
 in robosuite 1.5's absolute-pose handling (job ids and logs in RECIPES).
 
-**Deliverable.** Official-checkpoint rows for toolhang and transport (DP-C x 3 seeds) under
-our protocol with +- std and E2 p-values, plus the audit table.
+**DP-C retrained on our data (2026-09-11).** With the published checkpoints at zero, the
+baseline row is DP-C trained by our port of diffusion_policy's image model on the same caches,
+windows, validation rule and epoch count as the LeWAM arms (`scripts/train_dp.py`, design and
+checks in RECIPES). Toolhang, one scene camera, task-only protocol, 3 x 50 episodes:
+**84.7 +- 3.1** {88, 84, 82}, best-validation checkpoint (epoch 114), no EMA. On the same
+episodes LeWAM scores 84.0 +- 4.0 (mse noreg) and 80.0 +- 3.5 (mse SIGReg); the old DP-T row
+was 68.0 +- 9.2. Drawer and transport DP-C rows (three cameras) are training.
+
+**Deliverable.** DP-C rows for toolhang, drawer and transport under our protocol with +- std
+and E2 p-values, plus the audit table.
 
 ## B2. BC-RNN
 

@@ -2910,4 +2910,51 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   DEVBOX SMOKE (CPU, memory-mapped caches): toolhang single view -> windows 94,562 = 95,962 - 200 x 7 (DP's count),
   train 85,106 / val 9,456, 262.61M params (the published DP-C size), 2 epochs of 2 steps + resume to a 3rd:
   train/val losses finite, dp_best/dp_latest/dp_config written; two cameras (pixels,pixels_r0eih) -> 277.48M params,
-  identity normalizer, one step OK.
+  identity normalizer, one step OK. Adapter (test_dp_adapter.py, job tmp): load_dp_model on the two-camera smoke
+  run dir -> both cameras reach predict_action as (envs, 2, 3, 224, 224) floats in [0, 1], reset pads the history
+  to n_obs_steps, one chunk of 8 raw actions per replan, flush restarts an env, the DP-T config keeps
+  {sideview_image: pixels}. Committed c461482 (+ 9b30306 handoff); tarball lewam_jointflow_c461482.tar.gz; entries
+  dp_tc_c461482.sh (train; the jf_tc entry's env/watcher/snapshots/resume + dp_repo/dp_env on the path; args CELL
+  POD_H5 SEED [EPOCHS] [CACHE_ROOT] [VIEWS] [ARMTAG] [EXTRA]) and dp_tc_ev_c461482.sh (task-only eval, mode=dp_policy,
+  stages dp_best.pt + dp_config.json, VIEWS -> ROBOMIMIC_VIEWS/DEXMG_VIEWS, tag DPCTASK, logs under ckpts/dp_tc/).
+  LAUNCH (owner "That order makes sense" / "Try to get the jobs running. Prioritize the faster ones"; the first
+  toolhang submit landed on the algorithm aigcp queue after its free count had dropped to 0 -> killed while queued,
+  everything resubmitted on research, 11 free -> 7): DP-C toolhang mf-b04b40d5 job 52c96455ac5100f2 (one camera,
+  120 GB pod), DP-C drawer mf-e4192c47 job 28c95fe605f4ce64 (three cameras, 200 GB), LeWAM transport 3-view
+  SIGReg arm mf-095c8562 job 18baf0e188407d8a (jf_tc_85b5df9.sh transport, the fx_mvsig192 flags + --views
+  pixels,pixels_r0eih,pixels_r1eih, ARMTAG _fx_mvsig192_3v, SKIP_EVAL=1, 320 GB pod requested), DP-C transport
+  mf-07c668cb job a8ada3bde3af1255 (three cameras, 320 GB). All 120 epochs, batch 64, seed 42; DP runs: best-val
+  checkpoint, no EMA, chunk 16/8/2, crop 202. Outputs ckpts/dp_tc/dp_<cell>_dpc_s42/ (+ hb_dp_<cell>_dpc_s42.log) and
+  ckpts/jointflow_tc/tc_transport_fx_mvsig192_3v_s42/.
+  16:05: DP-C toolhang TRAIN_BEGIN, DP-C drawer START; BOTH 320 GB TRANSPORT JOBS FAILED within 3 min with no
+  heartbeat (status 5, no reason in the record) = the single-GPU memory request is not granted (200 GB was granted
+  twice today, a 256 GB pod failed the same way in August). Fallback as planned: cache_local_wrapper.sh (HDFS
+  code/) copies the three transport caches (190 GB) to the pod's NVMe under /opt/tiger/cache_local/transport/,
+  refuses when the node has < need + 60 GB free (COPY_NO_SPACE, exit 28), logs COPY_BEGIN/COPY_OK into the entry's
+  heartbeat file, then execs the entry with CACHE_ROOT=/opt/tiger/cache_local and --cache_mmap (np.load mmap_mode=r
+  in both trainers; the page cache holds the hot set, the rest is NVMe reads). Resubmitted in 200 GB pods:
+  LeWAM transport 3-view mf-bfb7f1f1 (tr-mvsig192-3view-mm.yaml), DP-C transport mf-d3bf2340 (dpc-transport-mm.yaml)
+  = jobs 0715be283413baf4 / d860e9b4314814be; both scheduled 16:11-16:12 on separate nodes (297 / 338 GB free)
+  and began the 189 GB copies. DP-C first epochs: toolhang 76 s/epoch (94,562 windows, 262.61M params, identity
+  normalizer; 120 epochs ~2.5 h, done ~18:40), drawer 440 s/epoch (291,053 windows = 298,235 - 1,026 x 7,
+  292.40M params, range normalizer; ~14.7 h, done ~06:45 2026-09-12). Epoch-1 val loss 0.054 / 0.063.
+  Transport copies took ~24 min each (TRAIN_BEGIN 16:36 on both). DP-C transport on the memory-mapped local caches:
+  412,509 windows (= 419,712 - 1,029 x 7), identity normalizer, 292.37M params, epoch 1 625 s = 9.3 steps/s, the
+  same per-step rate as the RAM-loaded drawer run (the fallback costs nothing measurable); 120 epochs ~21 h, done
+  ~13:30 2026-09-12; epoch-1 val loss 0.065. LeWAM transport 3-view on the same memory-mapped caches: 414,567
+  starts, 15.97M params, epoch 1 782 s vs 403 s single-view (1.9x, the drawer pair's ratio in RAM), val act 0.831 vs
+  0.931 single-view, state 0.059 vs 0.037; 120 epochs ~26 h, done ~18:40 2026-09-12.
+  Wall per epoch is ~2x the trainer's epoch timer for the DP runs (toolhang 150 s vs 70 s): the full training
+  state (3.15 GB) + weights are written and synced to HDFS after every epoch, outside the timer. Left as is for
+  this wave (15% on the long runs); trim the per-epoch full-state sync later.
+  DP-C TOOLHANG TRAINED 20:53 (4 h 48 min wall): val loss 0.054 (ep 1) -> 0.036 (20) -> 0.033 (40) -> 0.027 (80)
+  -> 0.022 (100) -> 0.0216 (120); best val 0.0202 at epoch 114 = dp_best.pt (1.05 GB). Eval launched 20:57, the
+  DP-T split (seeds 42+0 in one job, seed 1 in another, ~85 min per seed under the 3 h wall): mf-adc702cb job
+  7003153c79a550b4, mf-886a5e91 job bd29adc0c971e51d; dp_tc_ev_c461482.sh toolhang tool_hang.h5 toolhang
+  dp_toolhang_dpc_s42 (one camera; mode=dp_policy, task-only, tag DPCTASK); logs ckpts/dp_tc/hb_evtask_dp_toolhang_dpc_s42.log
+  + evtask_dp_toolhang_dpc_s42_e<seed>.log.
+  RESULT (2026-09-11 22:18-23:37, ~78 min per seed of 50 episodes): DP-C toolhang task-only {42: 88.0, 0: 84.0,
+  1: 82.0} = 84.7 +- 3.1 (mean +- sample std over the 3 eval seeds, n = 3 x 50), tag DPCTASK. For comparison on the same protocol and episodes: LeWAM TC toolhang
+  84.0 +- 4.0 (mse noreg), 80.0 +- 3.5 (mse vanilla SIGReg); the old DP-T row 68.0 +- 9.2; the published DP-C
+  checkpoint 0/50. So the DP-C baseline trained on our data is competitive with or above our toolhang rows, and
+  the published checkpoints' zero was the domain gap, not our eval.
