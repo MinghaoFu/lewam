@@ -13,6 +13,30 @@ Roots:
 - `JOBS` = `/home/tiger/lewam_project/jobs` (Merlin YAMLs, the submit guard, copies of entry scripts)
 
 ---------------------------------------------------------------------------------------------------------------
+## 0. Status at the 2026-09-12 cutoff (server access ends 17:00 PST = 08:00 CST 2026-09-12)
+
+- **Backup directory (staged copy of the manifest tiers, full original paths preserved underneath):**
+  `/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam_backup_2026-09-12/` — e.g. the checkpoint
+  `HROOT/ckpts/x` is at `<backup>/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/x`. Tiers staged
+  in order: 1-results, 1-code, 4-devbox, 2-data (caches not staged: derived from the data by
+  `scripts/make_preload_cache.py`). Copy log: `workspace/scratch/backup_stage.log` on the workspace branch.
+- **GitHub:** branch `lewam-jointflow` (HEAD `cdc5b7f`, multi-view goal reaching) is the code. Branch
+  `workspace-2026-09-12` (`bd13d9e`) adds `workspace/`: the JOBS directory (YAMLs, submit guard), every HDFS
+  entry script from `HROOT/code/*.sh`, the session memory, the global instructions, the scratch scripts and
+  small logs, the coded-job-name map and the Merlin docs. Three external repos under `workspace/scratch`
+  (`dp_repo/diffusion_policy` = github.com/real-stanford/diffusion_policy at `5ba07ac`, `dreamzero`, `uwm`) are
+  stored as bare pointers, not content.
+- **Hugging Face:** unreachable from the devbox. TCP to huggingface.co connects, the TLS handshake is dropped
+  after 10 s (no proxy is configured; PyPI is blocked the same way and replaced by an internal mirror);
+  hf-mirror.com and hf.co redirect API calls back to huggingface.co; the CLI (`hf auth whoami`) fails identically.
+  The S3 hosts that receive large-file uploads do answer. Routes not yet tried at the time of writing: a reverse
+  SOCKS tunnel from a laptop, a Merlin pod (`JOBS/net-probe.yaml` probes it), GitHub Releases
+  (`workspace/scratch/gh_release_upload.sh`, 1.9 GB tar chunks, needs a token in `~/.gh_token`).
+- **Jobs running at the cutoff** sync their checkpoint files to HDFS after every epoch (`durable_sync` in both
+  trainers); the last synced state is what the backup holds. Sweeps of their checkpoint directories into the
+  backup at 15:30 and 16:30 PST; anything synced later is treated as lost. Job list and last epochs: section 3.
+
+---------------------------------------------------------------------------------------------------------------
 ## 1. The manifest: what to copy
 
 `REPO/docs/handoff_manifest.txt` lists every path, one per line, tab-separated `tier  bytes  path  note`
@@ -22,7 +46,7 @@ Roots:
 
 | tier | what | size |
 |---|---|---|
-| 1-results | the 34 training run dirs behind every reported number (best, latest, full-state, snapshots, config, train log), all eval logs, the DP-T checkpoints, the published toolhang checkpoints and their eval logs, the LeWM release, the E3/E4 probe outputs | 26.9 GB |
+| 1-results | the 34 training run dirs behind every reported number (best, latest, full-state, snapshots, config, train log), all eval logs, the DP-T checkpoints, the eval logs of the published toolhang checkpoints (their weights are public downloads, not migrated), the LeWM release, the E3/E4 probe outputs | 22.2 GB |
 | 1-code | the 11 code tarballs pods ran, the 692 entry scripts, helper scripts, DP task yamls, the diffusion_policy repo and env, the robosuite/dexmimicgen sim source, the LeWM code, the cube baselines code | 1.5 GB |
 | 2-data | the 12 training h5 files in use, the drawer source file, the eval views, the multi-view link files, env metadata, the dataset README | 453.5 GB |
 | 3-caches | the 17 preload caches the reported rows and the multi-view runs read (rebuildable from tier 2 with `scripts/make_preload_cache.py`: minutes for toolhang, hours for cube and pusht) | 730 GB |
@@ -57,7 +81,9 @@ Checkpoints (`HROOT/ckpts/`; each run dir holds `jointflow_best.pt` = the row, `
   `wf8_dp/transport/epoch=0120-train_loss=0.0476.ckpt` (+ `wf8_dp/cube/latest.ckpt`, no row).
 - DP-C trained on our caches (in progress): `dp_tc/dp_<cell>_dpc_s42/` (`dp_best.pt`, `dp_latest.pt`, `dp_full.pt`,
   `dp_config.json`, `train.log`).
-- Published toolhang checkpoints and their eval logs: `official_baselines/tool_hang/` (bc_rnn, dp_cnn_train_0, eval).
+- Eval logs of the published toolhang checkpoints: `official_baselines/tool_hang/eval/`. The weights themselves
+  (`bc_rnn/`, robomimic model zoo; `dp_cnn_train_0/`, diffusion_policy's published train_0) are public downloads and
+  are not migrated (owner, 2026-09-12).
 - LeWM authors' release: `HROOT/code/lewm_main_eval/hf_release_native/{pusht,cube,reacher,tworooms}/`.
 - Probe outputs: `probes_e3/`, `probes_e4/`.
 

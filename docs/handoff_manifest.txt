@@ -727,7 +727,7 @@
 1-results	412907095	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/wf8_dp/drawer/latest.ckpt	DP-T drawer row (epoch 120)
 1-results	412840535	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/wf8_dp/transport/epoch=0120-train_loss=0.0476.ckpt	DP-T transport row
 1-results	412766743	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/wf8_dp/cube/latest.ckpt	DP-T cube (no row; optional)
-1-results	4768289149	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/official_baselines/tool_hang	B1 published checkpoints + eval logs
+1-results	118584	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/official_baselines/tool_hang/eval	B1 eval logs of the published checkpoints (the weights are public downloads, not migrated)
 1-results	6033052	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/probes_e3	E3 outputs
 1-results	56326694	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/ckpts/probes_e4	E4 outputs
 1-results	290031344	/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/code/lewm_main_eval/hf_release_native	LeWM authors' checkpoints (E7 row)

@@ -2958,3 +2958,37 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   84.0 +- 4.0 (mse noreg), 80.0 +- 3.5 (mse vanilla SIGReg); the old DP-T row 68.0 +- 9.2; the published DP-C
   checkpoint 0/50. So the DP-C baseline trained on our data is competitive with or above our toolhang rows, and
   the published checkpoints' zero was the domain gap, not our eval.
+
+### 2026-09-12: multi-view goal reaching landed; server cutoff (17:00 PST) handling
+
+- Code `cdc5b7f` (pushed, branch lewam-jointflow): goal reaching with several cameras. One goal token per goal
+  view (`--goal_views`: empty = the scene camera, `all` = every camera, or a comma list of `--views` columns; config
+  keys `goal_views` / `goal_view_index`); the strided loader reads the per-camera caches (tag
+  `<stem>_fs5_i224.<column>`, aux arrays from the first camera); the trainer encodes only the goal views' frames and
+  runs one SIGReg group per goal view; planners slide every camera's history and score the goal views' imagined
+  latents (mean squared distance averaged over goal views); adapters read `goal_<column>` frames from the World for
+  wrist goal views (no harness change); `--encoder_checkpoint_chunks N` = chunked activation-checkpointed encoder
+  for memory. Single-view outputs bit-identical to the reference dump; two-camera adapter + four-planner test
+  passes; devbox smoke on the memory-mapped strided caches (tiny model, 2-camera toolhang: scene goal, then all
+  goal views + chunked encoder) both exit 0 with 1 and 2 goal tokens and correct dumped configs.
+- Strided wrist caches (fs5 fp16, `make_preload_cache.py --pixels_key <col>`): tool_hang r0eih (5.8 GB), drawer
+  r0eih + r1eih (18.1 GB each), transport r0eih + r1eih (25 GB each, building at 03:30 CST).
+- Entries on HDFS code/: `jf_gr_cdc5b7f.sh` (the 67e20e1d GR training entry verbatim on tarball cdc5b7f) and
+  `jf_grev_cdc5b7f_views.sh` (the 42560ab ladder entry with a 5th VIEWS arg exported as ROBOMIMIC_VIEWS /
+  DEXMG_VIEWS).
+- Four 3-view GR training YAMLs guard-checked, NOT launched (owner go still pending at the cutoff):
+  dr-gr-nm192-3view (mf-415271b5), dr-gr-vsig192-3view (mf-2aa2e02c), tr-gr-nm192-3view (mf-a6b9bb19),
+  tr-gr-vsig192-3view (mf-caf442bc) = `jf_gr_cdc5b7f.sh <cell> fx_{nm,vsig}192_3v 42 "<the single-view GR arm
+  flags> --views pixels,pixels_r0eih,pixels_r1eih" 1`: batch 128 as-is (owner: chunked encoder only if it blows
+  up), scene goal only, 200 GB pods, research queue. Estimated 2.5 h (drawer) / 3.5 h (transport) from the
+  single-view epoch times x3.3.
+- Cutoff handling: `docs/HANDOFF.md` section 0. Backup directory on HDFS (manifest tiers, full paths); GitHub
+  `workspace-2026-09-12` branch (outside-the-repo state); Hugging Face private dataset repos
+  `MinghaoFu/lewam-checkpoints-2026-09-12` (manifest results tier + dp_tc + the 3-view runs) and
+  `MinghaoFu/lewam-data-2026-09-12` (the data tier; files over 49 GB as `.part-NN`). The devbox's IPv6 egress is
+  broken: huggingface.co's AAAA records come first, the stock client and CLI hang in the TLS handshake; forcing
+  IPv4 in the resolver (scratch `hf_up.py`) fixes it; measured 49 MB/s end to end.
+- Wave at 03:30 CST: drawer 3-view TC at epoch 105+/120 (finishes ~03:35), DP-C drawer epoch 80 (finishes
+  ~08:35, past the cutoff), DP-C transport epoch 45, LeWAM transport 3-view epoch 45. All sync their checkpoint
+  files to HDFS every epoch; sweeps into the backup dir and HF at 06:30 and 07:30 CST (15:30 / 16:30 PST); the
+  owner's rule: nothing synced after 16:30 PST counts.

@@ -98,7 +98,7 @@ add("1-results", f"{CK}/wf8_uni/toolhang_dp_noprop/snap_ep120.ckpt", "DP-T toolh
 add("1-results", f"{CK}/wf8_dp/drawer/latest.ckpt", "DP-T drawer row (epoch 120)")
 add("1-results", f"{CK}/wf8_dp/transport/epoch=0120-train_loss=0.0476.ckpt", "DP-T transport row")
 add("1-results", f"{CK}/wf8_dp/cube/latest.ckpt", "DP-T cube (no row; optional)")
-add("1-results", f"{CK}/official_baselines/tool_hang", "B1 published checkpoints + eval logs")
+add("1-results", f"{CK}/official_baselines/tool_hang/eval", "B1 eval logs of the published checkpoints (the weights are public downloads: robomimic model zoo BC-RNN tool_hang, diffusion_policy tool_hang train_0; not migrated)")
 add("1-results", f"{CK}/probes_e3", "E3 outputs")
 add("1-results", f"{CK}/probes_e4", "E4 outputs")
 add("1-results", f"{CK}/dp_tc", "DP-C runs trained by train_dp.py (in progress)")
