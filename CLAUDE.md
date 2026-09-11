@@ -1,5 +1,11 @@
 # LeWAM Project Instructions (devbox working copy)
 
+> **Session started on minghao4 on 2026-09-12 before 08:00 CST? Read
+> `/home/tiger/.claude/jobs/5f788414/tmp/NEXT_SESSION.md` first: the live cutoff handoff (pending commands, paused
+> uploads, sweeps).** New machine or new cluster? Read `docs/RESTORE.md` first. The ByteDance/Merlin server this file describes
+> was cut off on 2026-09-12; that guide says where the code, checkpoints, datasets and working state went, what
+> the state of the research was, what remains, and which files below carry paths that must change.
+
 > Repo is PRIVATE; cluster/infra details are kept in-repo by the owner's choice (convenience
 > first). Companion how-to: `merlin/MERLIN.md`. The original handoff doc is `docs/CLAUDE.md`.
 
