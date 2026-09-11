@@ -174,3 +174,21 @@ the entry script named in `entry_<arm>_s<seed>.log`.
   from local NVMe (transport 3 x 63 GB); `--cache_mmap` costs nothing measurable.
 - Cluster copies over a fuse mount: plain `cp` streams at ~75 MB/s; `rsync` crawls at ~1 file/s. Hugging Face from
   the old devbox needed IPv4 forced (`workspace/scratch/hf_up.py`); check `curl -4` vs `curl -6` before blaming a block.
+
+## 7. Final state (server cleared 15:57 PDT, 2026-09-11 Pacific = 06:57 CST 2026-09-12 on the box)
+
+The HDFS tree `HROOT` and the repo checkout were deleted at 15:57 PDT, half an hour before the planned final sweep,
+and the three running trainings were killed. The last captured state is therefore the 15:30 PDT sweep (run
+15:31-15:36, verified byte-exact against the backup directory) and the HF re-uploads right after it:
+
+- DP-C drawer `ckpts/dp_tc/dp_drawer_dpc_s42`: last synced epoch ~104 of 120 (`dp_full.pt` resumes it; val loss
+  0.0230 at epoch 100, 0.0260 at 60, 0.0272 at 40).
+- DP-C transport `ckpts/dp_tc/dp_transport_dpc_s42`: ~epoch 68 of 120 (val loss 0.0353 at epoch 60).
+- LeWAM transport 3-view TC `ckpts/jointflow_tc/tc_transport_fx_mvsig192_3v_s42`: epoch 60 snapshot + the synced
+  latest/full state a few epochs later (val action loss 0.449 at epoch 60 vs 0.464 at 40).
+- Drawer 3-view TC eval (`tc_drawer_fx_mvsig192_3v_s42`, task protocol, both wrists rendered, 50 episodes per
+  seed): seed 1 = 58.0, seed 0 = 52.0; seed 42 finished at 15:56 PDT but its log was deleted before it could be
+  read, so the number is lost. Treat the cell as n = 2 x 50 (mean 55.0) until re-evaluated. The single-view drawer
+  rows for comparison are in `docs/RECIPES.md` and the board.
+- Everything else listed in section 1 was complete and verified before the deletion; the backup directory
+  `lewam_backup_2026-09-12/` was still present at 15:57 PDT and is redundant with the HF repos.

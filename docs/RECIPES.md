@@ -3003,3 +3003,4 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   per file, `upload_folder` follows symlinks (the `wf8/eval` links to the training files would have doubled the
   data), the whoami endpoint is rate-limited (cache it). Drawer 3-view TC evals (seeds 42/0/1) were still running
   3 h after launch at 15:30 PDT.
+- Server cleared at 15:57 PDT (06:57 CST), before the planned 16:30 sweep: HROOT and the checkout deleted, the three trainings killed. Last captured state = the 15:30 sweep (verified) + HF re-uploads; details in docs/RESTORE.md section 7. Drawer 3-view TC task-only: seed 1 = 58.0, seed 0 = 52.0, seed 42 lost with the log (n = 2 x 50).
