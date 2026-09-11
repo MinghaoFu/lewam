@@ -40,6 +40,12 @@ def parse_args():
     ap.add_argument("--views", default="pixels",
                     help="comma list of the h5 image columns to train on (cameras); each needs its own raw "
                          "cache from make_preload_cache.py --pixels_key; the model gets num_views = len")
+    ap.add_argument("--goal_views", default="",
+                    help="goal-conditioned models: the cameras whose goal frames condition the policy, one goal "
+                         "token each: a comma list of columns from --views, 'all', or empty = the first view")
+    ap.add_argument("--encoder_checkpoint_chunks", type=int, default=0,
+                    help="run the encoder in this many chunks with activation checkpointing (memory for "
+                         "many cameras at a large batch; 0 = one pass)")
     ap.add_argument("--epochs", type=int, default=120)
     ap.add_argument("--warmup_epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=64)
@@ -237,14 +243,18 @@ def load_cache_views(args):
 
 def load_cache_obs(args):
     """fs-strided (old GR) cache: one frame + one z-scored fs-block of actions per anchor,
-    anchor-space indexing (t_gidx into frames, maxh = anchors to terminal)."""
+    anchor-space indexing (t_gidx into frames, maxh = anchors to terminal). Several cameras (args.views)
+    sit behind one index like the raw caches: the first camera's tag carries the aux arrays, every other
+    camera at the tag suffix .<column>."""
     cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
         "LEWAM_CACHE_DIR", "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
     stem = os.path.basename(args.dataset_name).replace(".h5", "")
-    tag = f"{stem}_fs{args.frameskip}_i{args.img_size}"
-    frames = torch.from_numpy(np.load(f"{cdir}/{stem}/{tag}.frames.npy",
-                                      mmap_mode="r" if args.cache_mmap else None))
-    aux = np.load(f"{cdir}/{stem}/{tag}.aux.npz")
+    views = [v for v in args.views.split(",") if v]
+    tags = [f"{stem}_fs{args.frameskip}_i{args.img_size}" + ("" if v == "pixels" else f".{v}") for v in views]
+    arrays = [torch.from_numpy(np.load(f"{cdir}/{stem}/{tag}.frames.npy",
+                                       mmap_mode="r" if args.cache_mmap else None)) for tag in tags]
+    frames = arrays[0] if len(arrays) == 1 else MultiViewFrames(arrays)
+    aux = np.load(f"{cdir}/{stem}/{tags[0]}.aux.npz")
     a_block = torch.from_numpy(aux["A_flat"])
     t_gidx = torch.from_numpy(aux["t_gidx"])
     maxh = torch.from_numpy(aux["maxh"])
@@ -411,8 +421,12 @@ def main():
         assert not (args.goal_conditioning and not args.fs_strided), \
             "--goal_conditioning needs --fs_strided (or --goal_terminal for the TC goal mode)"
     views = [v for v in args.views.split(",") if v]
+    # goal views: which cameras' goal frames condition the policy (one goal token each); default the first
+    goal_views = (views if args.goal_views == "all"
+                  else [v for v in args.goal_views.split(",") if v] or views[:1])
+    assert all(v in views for v in goal_views), f"--goal_views {goal_views} must be among --views {views}"
+    goal_view_index = [views.index(v) for v in goal_views]
     if args.fs_strided:
-        assert views == ["pixels"], "multi-view training runs on the raw cache"
         frames, a_block, t_gidx, maxh, ep_base, action_stats = load_cache_obs(args)
         raw_adim = a_block.shape[1] // args.frameskip
         n_starts = t_gidx.shape[0]
@@ -473,7 +487,7 @@ def main():
                state_tau_logit=(tuple(args.state_tau_logit) if args.state_tau_logit else None),
                sep_policy_state=bool(args.sep_policy_state),
                policy_proj_rank=int(args.policy_proj_rank),
-               num_views=len(views), views=views,
+               num_views=len(views), views=views, goal_views=goal_views, goal_view_index=goal_view_index,
                sigreg_pertime=bool(args.sigreg_pertime),
                # no reg -> no projection module (keeps noreg checkpoints free of dead params)
                sigreg_proj_dim=(0 if args.w_reg == 0
@@ -486,7 +500,8 @@ def main():
     # vars(args) carries the RAW -1 sentinel; the loader must see the resolved width or it
     # rebuilds without the projection module and the state-dict assert fires
     dumped["sigreg_proj_dim"] = cfg["sigreg_proj_dim"]
-    dumped["views"] = views          # the list, not the comma string vars(args) carries
+    dumped["views"] = views          # the lists, not the comma strings vars(args) carries
+    dumped["goal_views"], dumped["goal_view_index"] = goal_views, goal_view_index
     (run_dir / "jointflow_config.json").write_text(json.dumps(dumped, indent=1))
     n_params = sum(p.numel() for p in model.parameters())
     assert not (args.tau_alpha_state and not args.split_tau), \
@@ -571,8 +586,8 @@ def main():
             return sigreg(proj(zs).unsqueeze(0))
         groups = [z_history[:, k] for k in range(z_history.shape[1])]
         groups += [state_target[:, q] for q in range(state_target.shape[1])]
-        if z_goal is not None:
-            groups.append(z_goal)         # goal grouped in as policy context (owner 2026-09-01)
+        if z_goal is not None:            # goal grouped in as policy context (owner 2026-09-01); one group per goal view
+            groups += [z_goal] if z_goal.dim() == 2 else [z_goal[:, g] for g in range(z_goal.shape[1])]
         return torch.stack([sigreg(proj(g).unsqueeze(0)) for g in groups]).mean()
     probe = None
     if args.grad_probe_every > 0:
@@ -620,10 +635,19 @@ def main():
 
         pix = [history_frames.reshape(B * n_history * n_views, *image_shape),
                state_frames.reshape(B * n_states * n_views, *image_shape)]
+        n_goal = len(goal_view_index)
         if args.goal_conditioning:
-            pix.append(goal_frames.reshape(B * n_views, *image_shape))
+            # only the goal views' frames are encoded: (B, views, 3, H, W) from a multi-camera sample,
+            # (B, 3, H, W) from a single camera
+            goal_sel = goal_frames[:, goal_view_index] if goal_frames.dim() == 5 else goal_frames[:, None]
+            pix.append(goal_sel.reshape(B * n_goal, *image_shape))
         pixels = norm(torch.cat(pix).float())
-        z = model.encode(pixels)
+        if args.encoder_checkpoint_chunks > 1 and train:
+            from torch.utils.checkpoint import checkpoint
+            z = torch.cat([checkpoint(model.encode, chunk, use_reentrant=False)
+                           for chunk in pixels.chunk(args.encoder_checkpoint_chunks)])
+        else:
+            z = model.encode(pixels)
 
         def view_major(latents, n_frames):
             """(B * n_frames * views, z) encoder output -> (B, views * n_frames, z), camera 0 first."""
@@ -635,7 +659,9 @@ def main():
             state_valid = state_valid.repeat(1, n_views)
         z_goal = goal_keep = None
         if args.goal_conditioning:
-            z_goal = z[B * (n_history + n_states) * n_views:].reshape(B, n_views, args.z_dim)[:, 0]   # GR stays single-view
+            z_goal = z[B * (n_history + n_states) * n_views:].reshape(B, n_goal, args.z_dim)
+            if n_goal == 1:
+                z_goal = z_goal[:, 0]                    # one goal view: the (B, z) latent the model always took
             if args.detach_goal_grad:
                 # goal still conditions the policy/dynamics, but its gradient cannot reshape
                 # the encoder (also removes the goal group from SIGReg's encoder push, since

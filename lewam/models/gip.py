@@ -1165,12 +1165,31 @@ class JointFlowPolicy(LeWAMSplitPolicy):
         for key in self.view_keys[1:]:
             if "pixels" in self.transform:
                 self.transform[key] = self.transform["pixels"]
+        # goal-conditioned checkpoints read the goal frames of their goal views (the scene camera by
+        # default): the World's `goal` for the scene column, `goal_<column>` for any other camera,
+        # normalized like `goal`; goal_view_index = those cameras' positions among the model's views
+        self.goal_keys = views.goal_info_keys(cfg.get("goal_views") or views.columns(cfg.get("views"))[:1])
+        self.goal_view_index = [int(view) for view in cfg.get("goal_view_index", [0])]
+        for key in self.goal_keys[1:]:
+            if "goal" in self.transform:
+                self.transform[key] = self.transform["goal"]
 
     def _enc(self, x):
         """Encode eval pixels at the checkpoint's training scale (see pixel_scale above)."""
         if self.pixel_scale == "raw255":
             x = (x * self._in_std.to(x.device) + self._in_mean.to(x.device)) * 255.0
         return self.model.encode(x)
+
+    def _goal_latents(self, info_dict, replan):
+        """The goal latents of the replanning envs: (R, z) for one goal view, (R, goal views, z) for several,
+        each view's goal frame encoded like a current frame."""
+        device = next(self.model.parameters()).device
+        latents = []
+        for key in self.goal_keys:
+            assert key in info_dict, f"goal-reaching eval needs info_dict[{key!r}]"
+            goal = info_dict[key][replan]
+            latents.append(self._enc((goal[:, -1] if goal.ndim == 5 else goal).to(device).float()))
+        return latents[0] if len(latents) == 1 else torch.stack(latents, dim=1)
 
     def set_env(self, env):
         super().set_env(env)
@@ -1355,7 +1374,6 @@ class JointFlowGCPolicy(JointFlowPolicy):
     frame and passes h_norm from the inherited horizon countdown into the joint sample."""
 
     def __init__(self, model, cfg, *args, **kwargs):
-        assert len(views.columns(cfg.get("views"))) == 1, "goal-conditioned policies run single-view"
         # diagnostic: hand each env another env's goal (roll across the replan batch), so SR
         # measures how much of the policy is actually goal-driven vs goal-blind behavior
         self.shuffle_goal = bool(kwargs.pop("shuffle_goal", False))
@@ -1377,11 +1395,8 @@ class JointFlowGCPolicy(JointFlowPolicy):
         self._append_every_step = self._goal_terminal
 
     def _propose(self, info_dict, replan, history, history_pad):
-        assert "goal" in info_dict, "jointflow_gc eval needs info_dict['goal'] (goal-reaching)"
         device = history.device
-        goal = info_dict["goal"][replan]
-        g_obs = goal[:, -1] if goal.ndim == 5 else goal
-        z_goal = self._enc(g_obs.to(device).float())
+        z_goal = self._goal_latents(info_dict, replan)
         if self.shuffle_goal:
             # identity when only one env is replanning (late-episode tail) -- acceptable
             # for the diagnostic since most replans carry the full batch
@@ -1527,7 +1542,6 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     """
 
     def __init__(self, model, cfg, *args, **kwargs):
-        assert len(views.columns(cfg.get("views"))) == 1, "the planners imagine one view; multi-view is the reactive policy"
         self.plan_mode = str(kwargs.pop("plan_mode", "best_of_k"))
         self.plan_k = int(kwargs.pop("plan_k", 32))
         self.pm_steps = int(kwargs.pop("pm_steps", 20))
@@ -1603,6 +1617,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             print(f"[extwm] external LeWM {ext_weights} (hist {self.ext_wm_hist} frames, action block {abd}) grades the "
                   f"policy's best-of-{self.plan_k} proposals; our dynamics still imagines the proposals", flush=True)
         assert self.plan_mode in ("best_of_k", "cem", "steer", "oracle_bok", "grad", "extwm_bok"), self.plan_mode
+        if self.plan_mode in ("oracle_bok", "extwm_bok"):
+            assert self.model.num_views == 1, "the oracle and external-grader modes imagine one camera"
         if self.subgoal_every > 0:
             assert self.plan_mode in ("best_of_k", "grad"), "subgoal cost: best_of_k / grad"
             assert self.subgoal_frames is not None, "subgoal planning needs the demo frames (eval_gip passes them)"
@@ -1673,6 +1689,34 @@ class JointFlowPlanPolicy(JointFlowPolicy):
     def _final_cost(z_imag, z_goal):
         return ((z_imag[:, -1] - z_goal) ** 2).mean(-1)
 
+    def _next_frames(self, z_imag):
+        """The imagined latent one block ahead per camera: from the (B, views*S, z) view-major state slots,
+        (B, 1, z) for one camera, (B, views, 1, z) for several (each camera's first-step slot): the shape
+        the history slides with."""
+        if self.model.num_views == 1:
+            return z_imag[:, :1]
+        return z_imag.view(z_imag.shape[0], self.model.num_views, self.model.num_states, -1)[:, :, :1]
+
+    @staticmethod
+    def _slide(history, history_pad, next_frames):
+        """Drop the oldest history latent and append the imagined one, per camera when there are several."""
+        time_axis = history.dim() - 2
+        history = torch.cat([history.narrow(time_axis, 1, history.shape[time_axis] - 1), next_frames], dim=time_axis)
+        return history, torch.cat([history_pad[:, 1:], torch.zeros_like(history_pad[:, :1])], dim=1)
+
+    def _goal_cost(self, z_at_goal, z_goal):
+        """Planning cost: the mean squared distance between the imagined latent at the goal step and the
+        goal latent, averaged over the goal views. z_at_goal (B, z) or (B, views, z); z_goal (B, z) or
+        (B, goal views, z)."""
+        if z_at_goal.dim() == 2:
+            return ((z_at_goal - z_goal) ** 2).mean(-1)
+        z_goal = z_goal[:, None] if z_goal.dim() == 2 else z_goal
+        return ((z_at_goal[:, self.goal_view_index] - z_goal) ** 2).mean(-1).mean(-1)
+
+    def _state_noise(self, n, device, generator):
+        """The state-branch noise of one dynamics step for n proposals: one draw per state slot of every camera."""
+        return torch.randn(n, self.model.n_state_tokens, self.model.z_dim, device=device, generator=generator)
+
     def _subgoal_latents(self, replan, device):
         """Encode, per replanning env, the demo frame subgoal_every raw steps ahead of the env's
         current step (clamped to the demo's last frame). Frames are fs-strided uint8 HWC."""
@@ -1699,11 +1743,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 # goal-conditioned ckpts trained with a goal on every sample: condition the
                 # policy on the env's real goal (goal_terminal convention, h_norm 0); the
                 # subgoal enters only the planner's cost
-                assert "goal" in info_dict, \
-                    "subgoal planning on a goal-conditioned ckpt needs info_dict['goal']"
-                goal = info_dict["goal"][replan]
-                g_obs = goal[:, -1] if goal.ndim == 5 else goal
-                z_cond = self._enc(g_obs.to(device).float())
+                z_cond = self._goal_latents(info_dict, replan)
                 h_norm = torch.zeros(len(replan), device=device, dtype=torch.float32)
             plan = (self._gradient_plan(history, history_pad, z_cond, None, cost_goal=z_cost)
                     if self.plan_mode == "grad"
@@ -1716,10 +1756,11 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 for row, i in enumerate(replan):
                     self._prev_plan[i] = plan[row]
             return plan
-        assert "goal" in info_dict, "jointflow_plan eval needs info_dict['goal'] (goal-reaching)"
-        goal = info_dict["goal"][replan]
-        g_obs = goal[:, -1] if goal.ndim == 5 else goal
-        z_goal = self._enc(g_obs.to(device).float())
+        z_goal = self._goal_latents(info_dict, replan)
+        g_obs = None
+        if self.plan_mode == "extwm_bok":                 # the external grader encodes the scene goal frame itself
+            goal = info_dict["goal"][replan]
+            g_obs = goal[:, -1] if goal.ndim == 5 else goal
         h_norm = steps_t = None
         if getattr(self.model, "goal_conditioning", False):
             steps = np.maximum(self._steps_left[replan], 1.0)
@@ -1859,13 +1900,13 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         every step of a full plan is drawn first, in plan order, so the seeded generator advances
         exactly as for a full rollout however many steps are predicted.
         Returns (act_chunks_per_step (total_proposals, n_dyn_steps, actions_per_chunk, action_dim),
-        pred_state_at_goal (total_proposals, z_dim))."""
+        pred_state_at_goal (total_proposals, z_dim), or (total_proposals, views, z_dim) with several cameras)."""
         actions_per_chunk, n_proposals = self.action_block, self.plan_k
         total_proposals = state_history.shape[0]
         n_episodes = total_proposals // n_proposals
         device = state_history.device
         n_actions_pred, action_dim = self.model.num_actions, self.model.action_raw_dim
-        n_states_pred, z_dim = self.model.num_states, self.model.z_dim
+        n_state_tokens, z_dim = self.model.n_state_tokens, self.model.z_dim
         is_goal_conditioned = getattr(self.model, "goal_conditioning", False)
         noise_generator = self._flow_generator(device)
         n_proposal_steps = 0 if candidate_actions is None else candidate_actions.shape[1]
@@ -1880,8 +1921,8 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             if step < n_proposal_steps:
                 act_noise = torch.randn(n_episodes, 1, n_actions_pred, action_dim, device=device, generator=noise_generator) \
                     .expand(n_episodes, n_proposals, n_actions_pred, action_dim).reshape(total_proposals, n_actions_pred, action_dim)
-                state_noise = torch.randn(n_episodes, 1, n_states_pred, z_dim, device=device, generator=noise_generator) \
-                    .expand(n_episodes, n_proposals, n_states_pred, z_dim).reshape(total_proposals, n_states_pred, z_dim)
+                state_noise = torch.randn(n_episodes, 1, n_state_tokens, z_dim, device=device, generator=noise_generator) \
+                    .expand(n_episodes, n_proposals, n_state_tokens, z_dim).reshape(total_proposals, n_state_tokens, z_dim)
                 noise_per_dyn_step.append((act_noise, state_noise))
             else:
                 noise_per_dyn_step.append(self.model.draw_sample_noise(total_proposals, device, generator=noise_generator))
@@ -1912,10 +1953,9 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                                                                 noise_state=state_noise)
                 curr_act_chunk = sampled[:, :actions_per_chunk]
             act_chunks_per_step.append(curr_act_chunk)
-            next_pred_state = pred_states[:, :1]
-            pred_states_per_step.append(next_pred_state.squeeze(1))
-            state_history = torch.cat([state_history[:, 1:], next_pred_state], dim=1)
-            history_pad = torch.cat([history_pad[:, 1:], torch.zeros_like(history_pad[:, :1])], dim=1)
+            next_frames = self._next_frames(pred_states)
+            pred_states_per_step.append(next_frames.squeeze(-2))
+            state_history, history_pad = self._slide(state_history, history_pad, next_frames)
         return torch.stack(act_chunks_per_step, 1), self._pred_state_at(torch.stack(pred_states_per_step, 1), self._goal_step_idx(goal_horizon))
 
     def _best_of_k_oracle(self, history, history_pad, z_goal, h_norm, replan, steps=None):
@@ -2016,15 +2056,15 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         R, fs, H = history.shape[0], self.action_block, self.plan_rollout
         K = self.pm_K if self.pm_K > 0 else self.plan_k
         A, adim = self.model.num_actions, self.model.action_raw_dim
-        S, D = self.model.num_states, self.model.z_dim
+        D = self.model.z_dim
         device = history.device
         gen = self._flow_generator(device)
         steps_t = steps if steps is not None else torch.full((R,), float(H), device=device)
         h0 = history.repeat_interleave(K, 0); p0 = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0); steps_rep = steps_t.repeat_interleave(K, 0)
         noise_a = [torch.randn(R * K, A, adim, device=device, generator=gen) for _ in range(H)]
-        noise_s = [torch.randn(R * K, S, D, device=device, generator=gen) for _ in range(H)]
-        gnorm = z_goal.norm(dim=-1, keepdim=True)
+        noise_s = [self._state_noise(R * K, device, gen) for _ in range(H)]
+        gnorm = z_goal.reshape(R, -1).norm(dim=-1, keepdim=True)       # over every goal view's latent
         rows = torch.arange(R, device=device)
 
         gidx = self._goal_step_idx(steps_rep)
@@ -2032,18 +2072,19 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self._last_n_dyn_steps = n_dyn_steps
 
         def rollout(delta):
-            zg = goal_rep + delta.repeat_interleave(K, 0)
+            bias = delta.repeat_interleave(K, 0)
+            zg = goal_rep + (bias if goal_rep.dim() == 2 else bias[:, None])        # the same bias on every goal view
             h, p, zs, blocks = h0, p0, [], []
             for k in range(n_dyn_steps):
                 hk = (steps_rep - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 action, z_imag = self.model._sample_impl(h, p, z_goal=zg, h_norm=hk,
                                                          noise_action=noise_a[k], noise_state=noise_s[k])
                 blocks.append(action[:, :fs])
-                zs.append(z_imag[:, 0])
-                h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
-                p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+                next_frames = self._next_frames(z_imag)
+                zs.append(next_frames.squeeze(-2))
+                h, p = self._slide(h, p, next_frames)
             z = self._pred_state_at(torch.stack(zs, 1), gidx)                          # latent at the goal time
-            cost = ((z - goal_rep) ** 2).mean(-1).view(R, K)              # vs the TRUE goal
+            cost = self._goal_cost(z, goal_rep).view(R, K)                # vs the TRUE goal
             return torch.stack(blocks, 1).view(R, K, n_dyn_steps, fs, adim), cost
 
         with torch.enable_grad():
@@ -2098,12 +2139,12 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                     (steps - k).clamp(min=1.0).clamp(max=float(self.H_max)) / float(self.H_max)
                 cond = dict(z_goal=z_goal, h_norm=hk)
             z_imag = self.model.imagine_step(h, p, U[:, k], noise_state=None if noise_s is None else noise_s[k], **cond)
-            zs.append(z_imag[:, 0])
-            h = torch.cat([h[:, 1:], z_imag[:, :1]], dim=1)
-            p = torch.cat([p[:, 1:], torch.zeros_like(p[:, :1])], dim=1)
+            next_frames = self._next_frames(z_imag)
+            zs.append(next_frames.squeeze(-2))
+            h, p = self._slide(h, p, next_frames)
         z = self._pred_state_at(torch.stack(zs, 1), self._goal_step_idx(steps))
         tgt = cost_goal if cost_goal is not None else z_goal
-        return ((z - tgt) ** 2).mean(-1)
+        return self._goal_cost(z, tgt)
 
     def _gradient_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
         """Gradient planning: start from the best of plan_k policy proposals (best-of-K), then refine
@@ -2118,16 +2159,15 @@ class JointFlowPlanPolicy(JointFlowPolicy):
             blocks, z_final = self._imagine_rollout(
                 h, p, goal_rep, steps_t.repeat_interleave(K, 0) if steps_t is not None else None)
             cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
-            cost0 = ((z_final - cg_rep) ** 2).mean(-1).view(R, K)
+            cost0 = self._goal_cost(z_final, cg_rep).view(R, K)
             pick = cost0.argmin(1)
             rows = torch.arange(R, device=device)
             U0 = blocks.view(R, K, blocks.shape[1], fs, -1)[rows, pick].detach()   # (R, n, fs, adim)
             c_warm = cost0[rows, pick].detach()
         if self.grad_steps <= 0:
             return U0.reshape(R, U0.shape[1] * fs, -1)
-        S, D = self.model.num_states, self.model.z_dim
         gen = self._flow_generator(device)
-        noise_s = [torch.randn(R, S, D, device=device, generator=gen) for _ in range(H)]   # flow state head: fixed per replan
+        noise_s = [self._state_noise(R, device, gen) for _ in range(H)]   # flow state head: fixed per replan
         best_U, best_c = U0.clone(), c_warm.clone()
         U = U0.clone().requires_grad_(True)
         opt = torch.optim.Adam([U], lr=self.grad_lr)
@@ -2180,7 +2220,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         with torch.no_grad():
             if self.cem_init == "policy":
                 blocks, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep)
-                cost0 = ((z_final - cg_rep) ** 2).mean(-1).view(R, P)
+                cost0 = self._goal_cost(z_final, cg_rep).view(R, P)
                 pick = cost0.argmin(1)
                 mean = blocks.view(R, P, blocks.shape[1], fs, adim)[rows, pick].clone()   # (R, n, fs, adim)
                 best_plan, best_cost = mean.clone(), cost0[rows, pick].clone()
@@ -2198,7 +2238,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                                                                   generator=self._flow_generator(device))
                 cand[:, 0] = mean
                 _, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep, candidate_actions=cand.reshape(R * P, H, fs, adim))
-                cost = ((z_final - cg_rep) ** 2).mean(-1).view(R, P)
+                cost = self._goal_cost(z_final, cg_rep).view(R, P)
                 iter_cost, iter_pick = cost.min(1)
                 better = iter_cost < best_cost
                 best_plan[better] = cand[rows, iter_pick][better]
@@ -2227,6 +2267,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         p = history_pad.repeat_interleave(K, 0)
         goal_rep = z_goal.repeat_interleave(K, 0)
         if self.plan_rollout <= 1:
+            assert self.model.num_views == 1, "one-block scoring imagines one camera"
             action, z_imag = self.model.sample(h, p, generator=self._flow_generator(h.device),
                                                **self._cond_args(z_goal, h_norm, K))
             if self.plan_score == "inpaint":
@@ -2258,7 +2299,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         # cost_goal (subgoal planning on goal-conditioned ckpts): the policy is conditioned on
         # z_goal, the planner scores against cost_goal
         cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
-        cost = ((z_final - cg_rep) ** 2).mean(-1).view(R, K)
+        cost = self._goal_cost(z_final, cg_rep).view(R, K)
         plan = blocks.reshape(R, K, blocks.shape[1] * fs, -1)
         pick = cost.argmin(1)
         return plan[torch.arange(R, device=plan.device), pick]

@@ -33,3 +33,9 @@ def info_keys(views):
 def extra_cameras(views):
     """The cameras an env must add to its observation dict for these views."""
     return [camera_of(view) for view in views[1:]]
+
+
+def goal_info_keys(goal_views):
+    """The info keys of a model's goal views, as the World names the goal frame of each dataset column:
+    `goal` for the scene column `pixels`, `goal_<column>` for every other camera column."""
+    return ["goal" if view == "pixels" else f"goal_{view}" for view in goal_views]

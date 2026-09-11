@@ -192,6 +192,13 @@ class MoTFlow(nn.Module):
         self.n_clean_actions = self.num_states * self.fs
         self.num_views = int(cfg.get("num_views", 1))          # cameras; each adds H history and S state tokens
         self.n_state_tokens = self.num_states * self.num_views
+        # goal views: the cameras whose goal frames condition the policy, one goal token each (the scene
+        # camera, index 0, by default); the trainer stores their indices among the model's cameras
+        self.goal_view_index = [int(view) for view in cfg.get("goal_view_index", [0])]
+        assert all(0 <= view < self.num_views for view in self.goal_view_index) and \
+            len(set(self.goal_view_index)) == len(self.goal_view_index), self.goal_view_index
+        assert not (self.goal_cond == "head" and len(self.goal_view_index) > 1), \
+            "the goal-conditioned readout takes one goal latent; several goal views need goal_cond=token"
 
         self.encoder = VisionEncoder(size=cfg["encoder_size"], output_type="cls",
                                      output_dim=self.z_dim, img_size=cfg["img_size"],
@@ -264,7 +271,7 @@ class MoTFlow(nn.Module):
         idx["hist"] = list(range(offset, offset + n_hist)); offset += n_hist
         idx["policy_hist"] = list(range(offset, offset + n_hist)) if self.sep_policy_state else []; offset += len(idx["policy_hist"])
         idx["state_slots"] = list(range(offset, offset + n_state_slots)); offset += n_state_slots
-        idx["goal"] = list(range(offset, offset + 1)) if self.goal_token else []; offset += len(idx["goal"])
+        idx["goal"] = list(range(offset, offset + len(self.goal_view_index))) if self.goal_token else []; offset += len(idx["goal"])
         idx["clean_actions"] = list(range(offset, offset + n_clean_actions)); offset += n_clean_actions
         idx["action_slots"] = list(range(offset, offset + n_action_slots)); offset += n_action_slots
         self.n_tokens = offset
@@ -383,9 +390,19 @@ class MoTFlow(nn.Module):
         if self.goal_conditioning and z_goal is not None and self.sep_policy_state:
             z_goal = self.policy_proj(z_goal)          # the policy's view of the goal (both modes)
         if self.goal_token:
-            goal_embed = self.goal_in(z_goal)[:, None] if z_goal is not None else self.null_goal.expand(B, -1, -1)
+            # one token per goal view: z_goal is (B, z) for one goal view or (B, goal views, z); each token
+            # carries its camera's embedding when the model has several cameras
+            n_goal = len(self.goal_view_index)
+            null_goal = self.null_goal.expand(B, n_goal, -1)
+            if z_goal is None:
+                goal_embed = null_goal
+            else:
+                goal_embed = self.goal_in(z_goal[:, None] if z_goal.dim() == 2 else z_goal)
+                assert goal_embed.shape[1] == n_goal, (goal_embed.shape, n_goal)
+                if self.num_views > 1:
+                    goal_embed = goal_embed + self.view_pos[:, self.goal_view_index]
             if goal_keep is not None:
-                goal_embed = torch.where(goal_keep.view(B, 1, 1), goal_embed, self.null_goal.expand(B, -1, -1))
+                goal_embed = torch.where(goal_keep.view(B, 1, 1), goal_embed, null_goal)
             x[:, self.idx["goal"]] = goal_embed + state_type_embed[2]
         action_type_embed = self.action_type.weight
         x[:, self.idx["clean_actions"]] = self.action_in(clean_actions) + self.action_pos[:, :self.n_clean_actions] + action_type_embed[0]
@@ -399,6 +416,7 @@ class MoTFlow(nn.Module):
             x = block(x, mask, self.layout, cond_state, cond_action)
         action_slot_feats = x[:, self.idx["action_slots"]]
         if self.goal_conditioning and self.goal_cond == "head":
+            assert z_goal is None or z_goal.dim() == 2, "the goal-conditioned readout takes one goal latent"
             action_pred = self.action_out(action_slot_feats, z_goal, h_norm, goal_keep)     # goal + horizon enter here only
         else:
             action_pred = self.action_out(action_slot_feats)
