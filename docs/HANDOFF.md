@@ -1,15 +1,163 @@
-# LeWAM handoff inventory (2026-09-11)
+# LeWAM handoff: migration manifest and inventory (2026-09-11)
 
-For Minghao. The cluster may go down; this document lists what backs every number now reported, where each
-artifact is, what to copy first, and what is left. Every path below was listed on
-2026-09-11 with `ls -la`; sizes are bytes unless a unit is given. Anything not found on disk is marked NOT FOUND.
+For Minghao. The point of this document is the list of paths that must move with the project when the cluster or
+this machine goes away: checkpoints, datasets, caches, code tarballs, entry scripts, job YAMLs, documents and
+notes. Sections 1 and 2 are that list; section 3 is what is left to do; the appendices recap what each artifact
+backs (results, data, code), for context.
 
-Roots used below:
+Roots:
 - `HROOT` = `/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam` (HDFS, the only mount a pod can read)
-- `A2F` = `/mnt/hdfs/bi_algo_a2f/minghao.fu/lewam/data` (SSD mirror, devbox only)
-- `REPO` = `/home/tiger/lewam/.claude/worktrees/lewam-jointflow` (branch `lewam-jointflow`, HEAD `75f0fa7`)
-- `JOBS` = `/home/tiger/lewam_project/jobs` (Merlin YAMLs and copies of entry scripts)
+- `A2F` = `/mnt/hdfs/bi_algo_a2f/minghao.fu/lewam/data` (SSD mirror, devbox only; holds copies of a few datasets)
+- `REPO` = `/home/tiger/lewam/.claude/worktrees/lewam-jointflow` = `git@github.com:MinghaoFu/lewam.git`, branch
+  `lewam-jointflow` (HEAD `c461482` or later)
+- `JOBS` = `/home/tiger/lewam_project/jobs` (Merlin YAMLs, the submit guard, copies of entry scripts)
 
+---------------------------------------------------------------------------------------------------------------
+## 1. The manifest: what to copy
+
+`REPO/docs/handoff_manifest.txt` lists every path, one per line, tab-separated `tier  bytes  path  note`
+(1,557 lines; `#` lines are comments; directories are copied whole). It was generated on 2026-09-11 by
+`REPO/scripts/handoff_manifest.py`, which checks that every path exists and sums sizes; rerun it after any change
+(it prints what is missing). The repo itself moves with git, not with the manifest.
+
+| tier | what | size |
+|---|---|---|
+| 1-results | the 34 training run dirs behind every reported number (best, latest, full-state, snapshots, config, train log), all eval logs, the DP-T checkpoints, the published toolhang checkpoints and their eval logs, the LeWM release, the E3/E4 probe outputs | 26.9 GB |
+| 1-code | the 11 code tarballs pods ran, the 692 entry scripts, helper scripts, DP task yamls, the diffusion_policy repo and env, the robosuite/dexmimicgen sim source, the LeWM code, the cube baselines code | 1.5 GB |
+| 2-data | the 12 training h5 files in use, the drawer source file, the eval views, the multi-view link files, env metadata, the dataset README | 453.5 GB |
+| 3-caches | the 17 preload caches the reported rows and the multi-view runs read (rebuildable from tier 2 with `scripts/make_preload_cache.py`: minutes for toolhang, hours for cube and pusht) | 730 GB |
+| 4-devbox | `JOBS/`, the session memory directory, the coded job-name map | < 0.1 GB |
+
+Copy (any host that mounts HDFS; keeps the absolute tree under DEST):
+```
+grep -v '^#' docs/handoff_manifest.txt | cut -f3 > /tmp/handoff_paths.txt
+rsync -aR --files-from=/tmp/handoff_paths.txt / DEST
+```
+For HDFS-to-HDFS moves use `hdfs dfs -cp` on the same list. If space is short, the per-file minimum of tier 1 is
+`jointflow_best.pt` + `jointflow_config.json` + `train.log` per run dir (about 2.1 GB for the 33 finished runs)
+plus the eval logs (65 MB), the three DP-T checkpoints (1.2 GB), the published baselines (4.8 GB) and the LeWM
+release (72 MB): about 9.5 GB. Tier 3 can be skipped entirely and rebuilt.
+
+Not in the manifest on purpose: the caches no current row uses (about 2.0 TB under `preload_cache*/`), the DP-T
+training replay buffers, older code tarballs (`HROOT/code/archive/`), the failure-video directories, and every
+run trained before the AdaLN fix (`67e20e1`, 2026-09-06), whose numbers are invalid.
+
+---------------------------------------------------------------------------------------------------------------
+## 2. The paths, by category
+
+Checkpoints (`HROOT/ckpts/`; each run dir holds `jointflow_best.pt` = the row, `jointflow_latest.pt`,
+`jointflow_full.pt` = model + optimizer for resume, `snap_ep*.pt`, `jointflow_config.json`, `train.log`, `done`):
+- TC arms: `jointflow_tc/tc_toolhang_fx_{mnm192,msig192,mfl192,mflsig192,mvsig192}_s42`,
+  `jointflow_tc/tc_drawer_fx_{mnm192,msig192,mvsig192}_s42`, `jointflow_tc/tc_transport_fx_{mnm192,msig192,mvsig192}_s42`,
+  `jointflow_tc/tc_twodoor2_fx_{flowvsig192,msevsig192}_s42` (E3a), and the running `jointflow_tc/tc_drawer_fx_mvsig192_3v_s42`.
+- GR arms: `jointflow_gr_<cell>_<arm>/<arm>_s42` for pusht x {fx_nm192, fx_vsig192, fx_sig192, fx_fl192,
+  fx_flsig192}, tworoom / pointmaze_large / cube / toolhang / drawer / transport x {fx_nm192, fx_vsig192},
+  reacher_policy x {fx_nm192, fx_vsig192, fx_sig192}; their chained eval logs sit beside them (`*.log`).
+- DP-T baselines: `wf8_uni/toolhang_dp_noprop/snap_ep120.ckpt`, `wf8_dp/drawer/latest.ckpt`,
+  `wf8_dp/transport/epoch=0120-train_loss=0.0476.ckpt` (+ `wf8_dp/cube/latest.ckpt`, no row).
+- DP-C trained on our caches (in progress): `dp_tc/dp_<cell>_dpc_s42/` (`dp_best.pt`, `dp_latest.pt`, `dp_full.pt`,
+  `dp_config.json`, `train.log`).
+- Published toolhang checkpoints and their eval logs: `official_baselines/tool_hang/` (bc_rnn, dp_cnn_train_0, eval).
+- LeWM authors' release: `HROOT/code/lewm_main_eval/hf_release_native/{pusht,cube,reacher,tworooms}/`.
+- Probe outputs: `probes_e3/`, `probes_e4/`.
+
+Eval logs: `jf_grev/` (planner ladders, E7 grid, controls), `jointflow_tc/*.log` (`hb_`, `ev_`, `evtask_`,
+`evshard_`, `evexp_`), `jointflow_gr_*/*.log`, `lewm_grid/`, `wf8_dp/{toolhang,drawer,transport}_eval/`,
+`official_baselines/tool_hang/eval/` (with `base_frame/`).
+
+Data (`HROOT/wf8/`): `train/{pusht,tworoom,pointmaze_large,cube,reacher_policy,toolhang,toolhang_eih,drawer,
+drawer_3view,transport,transport_3view,twodoor2}.h5`, the external-link target of `drawer.h5` (listed in the
+manifest), `train/_views/` (multi-view link files), `eval/` (eval views), `env/` (model xml h5 files, robomimic env
+args), `README.md` (provenance and pod-side names). `A2F` holds copies of pusht, tworoom, cube and the old reacher.
+
+Caches (`HROOT/preload_cache/<stem>/` and `HROOT/preload_cache_u8/<stem>/`, three files per tag: `frames.npy`,
+`aux.npz`, `meta.json`): `pusht_expert_train_fs5_i224` (u8), `reacher_policy_fs5_i224` (u8), `tworoom_fs5_i224`,
+`pointmaze_large_fs5_i224`, `cube_single_expert_fs5_i224`, `tool_hang_fs5_i224{_raw,,_raw.pixels_r0eih}`,
+`drawer_cleanup_fixed_fs5_i224{_raw,,_raw.pixels_r0eih,_raw.pixels_r1eih}`,
+`transport_fs5_i224{_raw,,_raw.pixels_r0eih,_raw.pixels_r1eih}`, `twodoor2_fs5_i224_raw`.
+
+Code: the git repo (branch `lewam-jointflow`); `HROOT/code/lewam_jointflow_<sha>.tar.gz` for
+`67e20e1 5cca99f b05a7f8 42560ab 2a5acc5 f4fb884 2b5805f ed314d6 75f0fa7 85b5df9 c461482`; `HROOT/code/*.sh`
+(entry scripts) and `*.py`; `HROOT/code/dp_task_yamls/`, `lewam_scripts/`; external: `dp_repo.tar.gz`,
+`dp_env.tar.gz`, `wf8_sim_src.tar.gz`, `sim_src.tgz`, `lewm_official_code.tgz`, `lewm_official.tgz`,
+`lewm_main_eval/stable-worldmodel/`, `lewam_baselines_code.tgz`.
+
+Devbox: `JOBS/` (YAMLs incl. `fix_wave/`, `fix_wave_ev/`, `e7-*`, `b1-*`, `dr-*`, `tr-*`, `dpc-*`; `submit_guard.sh`),
+`/home/tiger/.claude/projects/-home-tiger-lewam/memory/` (rules and ops notes; `MEMORY.md` is the index),
+`/home/tiger/.job_name_map.tsv` (coded job names to real names and ids). The session scratch
+`/home/tiger/.claude/jobs/5f788414/tmp/` holds only working files; the board snapshot from it is now in the repo.
+
+Documents (in the repo, so they move with git): `docs/HANDOFF.md` (this), `docs/handoff_manifest.txt`,
+`docs/RECIPES.md` (the run log), `docs/PAPER_ROBUSTNESS_PLAN.md`, `CLAUDE.md`, `merlin/MERLIN.md`,
+`docs/results/` (board, e3, e4, e7, wave1, older dashboards), `docs/EXPERIMENTS.md` (pre-August log),
+`docs/WF8_CELLS.md`, `docs/SETTINGS.md`, `docs/MACHINE_TRANSFER.md`, `docs/MOT_SUMMARY.md`, `docs/proposal/`.
+On HDFS: `HROOT/wf8/README.md`, `HROOT/code/REACHER_HANDOFF.md`, `HROOT/WHITELIST_TODO.md`.
+
+---------------------------------------------------------------------------------------------------------------
+## 3. What is left
+
+TODO list of `REPO/docs/PAPER_ROBUSTNESS_PLAN.md` (lines 8-29, verbatim):
+
+- [ ] **B1** Official DP-C toolhang checkpoint through our eval with the observation/controller
+      adapter: 0/50 on all three seeds even with world-frame goals (2026-09-11); BC-RNN dropped
+      (owner). Open: the cause (domain gap to robosuite 1.2 or a 1.5 controller detail), the
+      audit table; DP-C retrained on our data replaces the published checkpoints (see the
+      port `scripts/train_dp.py`). (owner + Minghao)
+- [x] **B2** Dropped with BC-RNN (owner, 2026-09-11).
+- [ ] **E1** On hold, lowest priority (frozen-DINO patch baseline on the MoT).
+- [ ] **E2** Move the paired McNemar test from scratch into `scripts/sig_tests.py` with the
+      coverage inventory; add p-values to every results table. (Minghao helping)
+- [x] **E3a** Two-door fork toy done (figure approved: `docs/results/e3/v2/rollouts_box1px.png`,
+      caption in the section). Optional: a second training seed for the flow head's door lean.
+- [x] **E3b** PushT chunk likelihood under the flow head done, shown as preference shares and
+      ranks (`e3b_pusht_preference.png`, `e3b_pusht_ranks.png`). Optional: toolhang or cube
+      (one GPU job each, minutes).
+- [ ] **E4** Wave 1 done (pusht, toolhang). Optional: more seeds per arm; drawer, transport,
+      reacher once their training files are on the devbox.
+- [ ] **E5** Perturbation eval hook (pixel noise, brightness, occlusion, action noise, env
+      variations on swm cells); not started.
+- [ ] **E6** Gradient rescaling flag `--grad_balance d_to_p`, one cell, three seeds; not started.
+- [x] **E7** Done on PushT: the LeWAM grid, the LeWM row on the same episodes, and planning
+      time per plan in both regimes (`docs/results/e7/timing_report.md`). Open: other cells,
+      GC-IDM row, paired McNemar LeWM vs our arms.
+
+Open items from the latest RECIPES records (2026-09-08 to 2026-09-11):
+- B1 (RECIPES 2819-2826): both published toolhang policies score 0 in our stack. Unresolved: domain gap to the
+  robosuite 1.2 / mujoco-py renders and physics they were trained on, or a remaining difference in robosuite
+  1.5's absolute-pose handling (only the 1.4 orientation path was read). Owner's call: read the 1.5.1 controller
+  code, take 0 as the B1 row, or retrain the baselines on our data. Transport official DP-C not started (the
+  adapter can render shouldercamera0/1 + both wrists). The audit table is not written.
+- Multi-view (RECIPES 2827-2858): code committed (`09137de`, `4aafe8c`, `85b5df9`). Toolhang 2-view training is
+  STAGED, NOT SUBMITTED (`JOBS/th-mvsig192-2view.yaml`, entry `jf_tc_85b5df9.sh` with `--views
+  pixels,pixels_r0eih`, ARMTAG `_fx_mvsig192_2v`; eval `jf_tc_ev_85b5df9_task_views.sh`, `JOBS/th-mvsig192-2view-ev.yaml`).
+  The multi-view eval path was verified offline only; it has not run in a pod.
+- Drawer 3-view training (RECIPES 2859-2878): job `94e7bd3536128c2a` (caption mf-8759ca3c, `JOBS/dr-mvsig192-3view.yaml`,
+  algorithm aigcp H100, pod memory 200 GB) was `running` at 14:5x today. Run dir
+  `HROOT/ckpts/jointflow_tc/tc_drawer_fx_mvsig192_3v_s42/` holds `snap_ep15.pt`, `snap_ep30.pt`, `jointflow_best.pt`
+  (63,950,469, synced 14:43), `jointflow_full.pt`, `train.log`; no `done` marker yet. About 10 min per epoch, so it
+  finishes around 05:45 on 2026-09-12; `jointflow_full.pt` + `--resume` continues it after a kill. The eval afterwards
+  is `jf_tc_ev_85b5df9_task_views.sh drawer ... robot0_eye_in_hand,robot1_eye_in_hand` (never run).
+- Transport TC task-only (RECIPES 2148-2160, 2178-2180, 2232-2233): sharding verified (10 envs = 51 min per shard);
+  two shards scored 0/10. The full 2 arms x 3 seeds x 5 shards = 30 jobs run was held for the owner's scope call.
+  DP transport task-only also needs the shard entry (not built for DP).
+- Transport multi-view: the link file and the two wrist caches were built on 2026-09-11 (section 2). The 3-view
+  training is the drawer YAML with the transport stem and a larger pod (the three caches are 190 GB in RAM).
+- DP-C retrained on our data (owner 2026-09-11, replaces the published checkpoints of 1e): `scripts/train_dp.py`
+  + `lewam/models/dp_policy.py` train diffusion_policy's published image model (imported unchanged) on the same
+  caches, windows per epoch, validation rule and epoch count as the LeWAM arms; the design and the checks are in
+  RECIPES (2026-09-11). Smoke-tested on the devbox. Next: the training entry and the three TC runs (toolhang one
+  camera, drawer and transport three), then the task-only eval through `mode=dp_policy`, which already loads the
+  new checkpoint format.
+- E7 open (plan): other cells with their own ladders, GC-IDM as the goal-conditioned baseline, paired McNemar LeWM vs
+  ours (the per-episode success flags are in the `[timing-json]` lines of the logs). The E2 script
+  `scripts/sig_tests.py` does not exist yet; the paired tests used scratch scripts (`paired_ol25.py`, `paired_tags.py`
+  in `/home/tiger/.claude/jobs/5f788414/tmp/`).
+- Optional: second flow-head seed for the toy (E3a lean); E3b on toolhang or cube; pusht `fx_flsig192` SteerMPC and
+  `fx_fl192` SteerMPC seeds 0/1 (about 3 h per checkpoint, RECIPES 210).
+- Housekeeping: the `lance` 1.2.1 install on the devbox breaks `import lewam.models.motflow` unless `stable_worldmodel` is imported
+  first (RECIPES 2414-2416).
+
+---------------------------------------------------------------------------------------------------------------
 Two facts to read first.
 1. Everything on the board was retrained after the AdaLN fix (commit `67e20e1`, 2026-09-06). Only arms whose
    name starts with `fx_` count. Numbers from before that date are invalid (RECIPES.md line 8).
@@ -21,7 +169,9 @@ Two facts to read first.
    ladders finished after 05:51, the E7 grid and B1 are NOT in any board file; they live in RECIPES.md and the logs.
 
 ---------------------------------------------------------------------------------------------------------------
-## 1. Results currently reported
+
+---------------------------------------------------------------------------------------------------------------
+## Appendix A. Results currently reported and what backs each number
 
 Common facts for every LeWAM row.
 - Model code: tarball `HROOT/code/lewam_jointflow_67e20e1.tar.gz` (71,438,797 bytes, git archive of `67e20e1`).
@@ -220,7 +370,7 @@ is OUR repro, not the release; the first smoke job failed on it (RECIPES 2680-26
 - Where written: RECIPES.md 2403-2470 (E4), 2472-2635 (E3); plan sections E3, E4.
 
 ---------------------------------------------------------------------------------------------------------------
-## 2. Data
+## Appendix B. Data and caches in detail
 
 Datasets, all under `HROOT/wf8/` (layout and history: `HROOT/wf8/README.md`, 12,567 bytes; pod-side names differ
 from disk names, see its section 5). The a2f column says whether an identical copy exists under `A2F`.
@@ -282,9 +432,9 @@ Rebuild: `REPO/scripts/make_preload_cache.py` (default = fp16 strided; `--anchor
 min copy. The cube raw cache took a dedicated job (`cube_cache_build2_600c696.sh`).
 
 ---------------------------------------------------------------------------------------------------------------
-## 3. Code
+## Appendix C. Code in detail
 
-- Repo: `REPO` (git worktree of `/home/tiger/lewam`), branch `lewam-jointflow`, HEAD `75f0fa7`, pushed to
+- Repo: `REPO` (git worktree of `/home/tiger/lewam`), branch `lewam-jointflow`, HEAD `c461482`, pushed to
   `origin` = `git@github.com:MinghaoFu/lewam.git` (`origin/lewam-jointflow` contains HEAD). Second remote `gitlab`
   (code.byted.org) is not used for GitHub-facing work. The `live` mirror branch is stale (last snapshot 2026-07-21)
   and the watcher is not running.
@@ -318,113 +468,19 @@ min copy. The cube raw cache took a dedicated job (`cube_cache_build2_600c696.sh
   `dm_control==1.0.43 mujoco==3.10.0` (entries pin it); headless needs `MUJOCO_GL=egl`.
 
 ---------------------------------------------------------------------------------------------------------------
-## 4. Minimum set to save first
-
-Tier 1, checkpoints and logs behind every reported number (about 9.5 GB total).
-- TC `jointflow_best.pt` + `jointflow_config.json` + `train.log` for the 11 TC arms in 1a and the 2 twodoor2 heads:
-  835,860,265 bytes.
-- GR `jointflow_best.pt` + config + train.log for the 20 run dirs in 1b: 1,286,470,461 bytes.
-- Eval logs: `HROOT/ckpts/jf_grev/` (27 MB), the `hb_*`, `ev_*`, `evtask_*`, `evshard_*`, `evexp_*` files at the top
-  of `HROOT/ckpts/jointflow_tc/` (37 MB, skip the `videos_*` dirs unless wanted), `HROOT/ckpts/jointflow_gr_*/hb_*.log`
-  and `ev_*.log`, `HROOT/ckpts/lewm_grid/` (0.5 MB), `HROOT/ckpts/wf8_dp/{toolhang,drawer,transport}_eval/` (0.5 MB),
-  `HROOT/ckpts/official_baselines/tool_hang/eval/` including `base_frame/` (0.1 MB). About 65 MB.
-- DP-T checkpoints (1d): 3 files, 1,238,530,821 bytes (cube's `latest.ckpt` optional, 412,766,743).
-- Official baselines (1e): 4,768,178,757 bytes.
-- LeWM release pusht: 72,266,754 bytes (plus `lewm_official_code.tgz` 5.5 MB).
-- Probe outputs: `HROOT/ckpts/probes_e4/` (55 MB), `HROOT/ckpts/probes_e3/` (about 4 MB + the `e3b_pusht`,
-  `v2_eval_s42`, `v2_eval_s42_box1px` subdirs).
-- Code tarballs of the ten shas above (about 723 MB) + `dp_repo.tar.gz`, `wf8_sim_src.tar.gz`, `sim_src.tgz`,
-  `lewm_official*.tgz` (about 95 MB) + `dp_env.tar.gz` (315 MB, only if the DP env must be rebuilt).
-- The `jointflow_full.pt` files (about 191 MB each, 31 runs, about 6 GB) allow resuming; optional.
-
-Tier 2, datasets needed to re-run the evals and retrain (about 455 GB): `train/pusht.h5` 46.3 GB, `tworoom.h5`
-12.8, `pointmaze_large.h5` 22.5, `cube.h5` 101.9, `reacher_policy.h5` 75.6, `toolhang.h5` 5.0, `toolhang_eih.h5`
-4.6, `drawer.h5` + `_source/drawer_raw.h5` 18.5, `drawer_3view.h5` 42.6, `transport.h5` 32.4, `transport_3view.h5`
-88.9, `twodoor2.h5` 2.0, the three `eval/` views and `_views/` link files, `env/*_model_xml.h5` 0.25, and
-`wf8/README.md`. `transport_3view.h5` can wait if space is short (no result uses it yet).
-
-Tier 3, caches used by the current rows (about 565 GB, plus 104 GB for the three multi-view caches; all rebuildable
-from tier 2 with `make_preload_cache.py`, minutes for toolhang, hours for cube and pusht): the rows marked "used by"
-in section 2. Skip the "not used" caches (about 2.0 TB).
-
----------------------------------------------------------------------------------------------------------------
-## 5. What is left
-
-TODO list of `REPO/docs/PAPER_ROBUSTNESS_PLAN.md` (lines 8-29, verbatim):
-
-- [ ] **B1** Official DP-C toolhang checkpoint through our eval with the observation/controller
-      adapter: three seeds running on the world-frame fix (2026-09-11). BC-RNN dropped (owner).
-      Then transport; write the one-page audit table. (owner + Minghao)
-- [x] **B2** Dropped with BC-RNN (owner, 2026-09-11).
-- [ ] **E1** On hold, lowest priority (frozen-DINO patch baseline on the MoT).
-- [ ] **E2** Move the paired McNemar test from scratch into `scripts/sig_tests.py` with the
-      coverage inventory; add p-values to every results table. (Minghao helping)
-- [x] **E3a** Two-door fork toy done (figure approved: `docs/results/e3/v2/rollouts_box1px.png`,
-      caption in the section). Optional: a second training seed for the flow head's door lean.
-- [x] **E3b** PushT chunk likelihood under the flow head done, shown as preference shares and
-      ranks (`e3b_pusht_preference.png`, `e3b_pusht_ranks.png`). Optional: toolhang or cube
-      (one GPU job each, minutes).
-- [ ] **E4** Wave 1 done (pusht, toolhang). Optional: more seeds per arm; drawer, transport,
-      reacher once their training files are on the devbox.
-- [ ] **E5** Perturbation eval hook (pixel noise, brightness, occlusion, action noise, env
-      variations on swm cells); not started.
-- [ ] **E6** Gradient rescaling flag `--grad_balance d_to_p`, one cell, three seeds; not started.
-- [x] **E7** Done on PushT: the LeWAM grid, the LeWM row on the same episodes, and planning
-      time per plan in both regimes (`docs/results/e7/timing_report.md`). Open: other cells,
-      GC-IDM row, paired McNemar LeWM vs our arms.
-
-Note on B1: the three DP-C seeds named "running" in that list finished today at 09:49-10:02 with 0/50 each (1e).
-The plan text (uncommitted) already says so; the checkbox line is older than the result.
-
-Open items from the latest RECIPES records (2026-09-08 to 2026-09-11):
-- B1 (RECIPES 2819-2826): both published toolhang policies score 0 in our stack. Unresolved: domain gap to the
-  robosuite 1.2 / mujoco-py renders and physics they were trained on, or a remaining difference in robosuite
-  1.5's absolute-pose handling (only the 1.4 orientation path was read). Owner's call: read the 1.5.1 controller
-  code, take 0 as the B1 row, or retrain the baselines on our data. Transport official DP-C not started (the
-  adapter can render shouldercamera0/1 + both wrists). The audit table is not written.
-- Multi-view (RECIPES 2827-2858): code committed (`09137de`, `4aafe8c`, `85b5df9`). Toolhang 2-view training is
-  STAGED, NOT SUBMITTED (`JOBS/th-mvsig192-2view.yaml`, entry `jf_tc_85b5df9.sh` with `--views
-  pixels,pixels_r0eih`, ARMTAG `_fx_mvsig192_2v`; eval `jf_tc_ev_85b5df9_task_views.sh`, `JOBS/th-mvsig192-2view-ev.yaml`).
-  The multi-view eval path was verified offline only; it has not run in a pod.
-- Drawer 3-view training (RECIPES 2859-2878): job `94e7bd3536128c2a` (caption mf-8759ca3c, `JOBS/dr-mvsig192-3view.yaml`,
-  algorithm aigcp H100, pod memory 200 GB) was `running` at 14:5x today. Run dir
-  `HROOT/ckpts/jointflow_tc/tc_drawer_fx_mvsig192_3v_s42/` holds `snap_ep15.pt`, `snap_ep30.pt`, `jointflow_best.pt`
-  (63,950,469, synced 14:43), `jointflow_full.pt`, `train.log`; no `done` marker yet. About 10 min per epoch, so it
-  finishes around 05:45 on 2026-09-12; `jointflow_full.pt` + `--resume` continues it after a kill. The eval afterwards
-  is `jf_tc_ev_85b5df9_task_views.sh drawer ... robot0_eye_in_hand,robot1_eye_in_hand` (never run).
-- Transport TC task-only (RECIPES 2148-2160, 2178-2180, 2232-2233): sharding verified (10 envs = 51 min per shard);
-  two shards scored 0/10. The full 2 arms x 3 seeds x 5 shards = 30 jobs run was held for the owner's scope call.
-  DP transport task-only also needs the shard entry (not built for DP).
-- Transport multi-view: the link file and the two wrist caches were built on 2026-09-11 (section 2). The 3-view
-  training is the drawer YAML with the transport stem and a larger pod (the three caches are 190 GB in RAM).
-- DP-C retrained on our data (owner 2026-09-11, replaces the published checkpoints of 1e): `scripts/train_dp.py`
-  + `lewam/models/dp_policy.py` train diffusion_policy's published image model (imported unchanged) on the same
-  caches, windows per epoch, validation rule and epoch count as the LeWAM arms; the design and the checks are in
-  RECIPES (2026-09-11). Smoke-tested on the devbox. Next: the training entry and the three TC runs (toolhang one
-  camera, drawer and transport three), then the task-only eval through `mode=dp_policy`, which already loads the
-  new checkpoint format.
-- E7 open (plan): other cells with their own ladders, GC-IDM as the goal-conditioned baseline, paired McNemar LeWM vs
-  ours (the per-episode success flags are in the `[timing-json]` lines of the logs). The E2 script
-  `scripts/sig_tests.py` does not exist yet; the paired tests used scratch scripts (`paired_ol25.py`, `paired_tags.py`
-  in `/home/tiger/.claude/jobs/5f788414/tmp/`).
-- Optional: second flow-head seed for the toy (E3a lean); E3b on toolhang or cube; pusht `fx_flsig192` SteerMPC and
-  `fx_fl192` SteerMPC seeds 0/1 (about 3 h per checkpoint, RECIPES 210).
-- Housekeeping: the `lance` 1.2.1 install on the devbox breaks `import lewam.models.motflow` unless `stable_worldmodel` is imported
-  first (RECIPES 2414-2416).
-
----------------------------------------------------------------------------------------------------------------
-## 6. Documents to keep
+## Appendix D. Documents
 
 Repo (`REPO/`):
-- `docs/RECIPES.md` (279,215 bytes, 2,878 lines; the run log, uncommitted edits included)
-- `docs/PAPER_ROBUSTNESS_PLAN.md` (30,836; experiments E1-E7 and B1, uncommitted edits included)
-- `CLAUDE.md` (project rules, GPU how-to, data paths; uncommitted edit) and `docs/CLAUDE.md` (10,122; historical, L40S era)
-- `merlin/MERLIN.md` (8,585; Merlin job how-to incl. the kill procedure; uncommitted edit), `merlin/example_job.yaml`, `merlin/example_entry.sh`
+- `docs/RECIPES.md` (the run log; about 2,900 lines)
+- `docs/PAPER_ROBUSTNESS_PLAN.md` (experiments E1-E7 and B1)
+- `CLAUDE.md` (project rules, GPU how-to, data paths) and `docs/CLAUDE.md` (10,122; historical, L40S era)
+- `merlin/MERLIN.md` (Merlin job how-to incl. the kill procedure), `merlin/example_job.yaml`, `merlin/example_entry.sh`
 - `docs/results/`: `board/` (the latest board snapshot, 2026-09-08 05:51), `e3/` (e3b_pusht.json, two pngs,
   `v2/` four files), `e4/` (23 json + 3 png), `e7/` (timing_report.md, timing_report.json), `wave1/` (4 board files), `dashboard/` (5 html, old campaign),
   `fdp/` (5 png, old), `master_results.html`, `lewam_equations.html`, `sr_comparison.png` (old)
 - `docs/EXPERIMENTS.md` (658,316; the pre-August experiment log), `docs/WF8_CELLS.md`, `docs/SETTINGS.md`,
   `docs/MACHINE_TRANSFER.md`, `docs/MOT_SUMMARY.md`, `docs/pointmaze_sizes.md`, `docs/proposal/`
+- `docs/HANDOFF.md` (this document)
 - `scripts/collect_board.py` docstring (board semantics)
 
 HDFS: `HROOT/wf8/README.md` (dataset provenance and the pod-side name table), `HROOT/code/REACHER_HANDOFF.md` (6,294),
