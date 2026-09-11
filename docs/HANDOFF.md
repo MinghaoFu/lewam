@@ -26,12 +26,12 @@ Roots:
   small logs, the coded-job-name map and the Merlin docs. Three external repos under `workspace/scratch`
   (`dp_repo/diffusion_policy` = github.com/real-stanford/diffusion_policy at `5ba07ac`, `dreamzero`, `uwm`) are
   stored as bare pointers, not content.
-- **Hugging Face:** unreachable from the devbox. TCP to huggingface.co connects, the TLS handshake is dropped
-  after 10 s (no proxy is configured; PyPI is blocked the same way and replaced by an internal mirror);
-  hf-mirror.com and hf.co redirect API calls back to huggingface.co; the CLI (`hf auth whoami`) fails identically.
-  The S3 hosts that receive large-file uploads do answer. Routes not yet tried at the time of writing: a reverse
-  SOCKS tunnel from a laptop, a Merlin pod (`JOBS/net-probe.yaml` probes it), GitHub Releases
-  (`workspace/scratch/gh_release_upload.sh`, 1.9 GB tar chunks, needs a token in `~/.gh_token`).
+- **Hugging Face:** private dataset repos under the account `mh-hf`: `mh-hf/lewam-checkpoints-2026-09-12`
+  (the results tier as `ckpts/...`, plus `ckpts/dp_tc` and the 3-view runs) and `mh-hf/lewam-data-2026-09-12`
+  (the data tier as `wf8/...`, files over 49 GB as `.part-NN`; the six 3-view strided caches under
+  `preload_cache/`). The devbox's IPv6 egress is broken and huggingface.co's AAAA records come first, so the stock
+  client hangs in the TLS handshake; the uploader (`workspace/scratch/hf_up.py`) forces IPv4. An earlier copy
+  that went to the account `MinghaoFu` by mistake was deleted.
 - **Jobs running at the cutoff** sync their checkpoint files to HDFS after every epoch (`durable_sync` in both
   trainers); the last synced state is what the backup holds. Sweeps of their checkpoint directories into the
   backup at 15:30 and 16:30 PST; anything synced later is treated as lost. Job list and last epochs: section 3.

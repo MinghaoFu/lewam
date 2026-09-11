@@ -19,12 +19,19 @@ Three copies exist. Check them in this order.
 |---|---|---|
 | code | GitHub `git@github.com:MinghaoFu/lewam.git`, branch `lewam-jointflow` | the repo; every commit that ever ran on the cluster is on this branch (the pod tarballs `lewam_jointflow_<sha>.tar.gz` were `git archive` of these commits) |
 | outside-the-repo working state | GitHub, branch `workspace-2026-09-12`, folder `workspace/` | `jobs/` (Merlin YAMLs + the submit guard), `hdfs_code/` (every pod entry script, ~700), `memory/` (the session memory: rules, ops, results notes), `global_CLAUDE.md`, `scratch/` (helper scripts and small logs, e.g. `make_view_links.py`, `hf_up.py`, monitors), `job_name_map.tsv` (coded job name -> real name -> job id), `merlin-docs/` |
-| checkpoints | Hugging Face, private dataset repo `MinghaoFu/lewam-checkpoints-2026-09-12` | `ckpts/<same subpaths as HROOT/ckpts>` for the manifest's results tier plus `ckpts/dp_tc/` (DP-C ports) and the 3-view runs; `code/lewm_main_eval/hf_release_native` (the LeWM release checkpoint) |
-| datasets | Hugging Face, private dataset repo `MinghaoFu/lewam-data-2026-09-12` | `wf8/train/*.h5`, `wf8/_source/drawer_raw.h5`, `wf8/env/`, `wf8/eval/`, `wf8/train/_views/`, `wf8/README.md`; files over 49 GB are split: `cat <name>.part-* > <name>`; `preload_cache/{drawer_cleanup_fixed,transport}/` holds the six 3-view strided caches |
+| checkpoints | Hugging Face, private dataset repo `mh-hf/lewam-checkpoints-2026-09-12` | `ckpts/<same subpaths as HROOT/ckpts>` for the manifest's results tier plus `ckpts/dp_tc/` (DP-C ports) and the 3-view runs; `code/lewm_main_eval/hf_release_native` (the LeWM release checkpoint) |
+| datasets | Hugging Face, private dataset repo `mh-hf/lewam-data-2026-09-12` | `wf8/train/*.h5`, `wf8/_source/drawer_raw.h5`, `wf8/env/`, `wf8/eval/`, `wf8/train/_views/`, `wf8/README.md`; files over 49 GB are split: `cat <name>.part-* > <name>`; `preload_cache/{drawer_cleanup_fixed,transport}/` holds the six 3-view strided caches |
+| code + ops archive | Hugging Face, private dataset repo `mh-hf/lewam-code-ops-2026-09-12`, and the backup directory | `lewam_code_ops_2026-09-12.tar.gz` (~1.3 GB): a git bundle of every branch, the working tree at the cutoff, the workspace snapshot, and the manifest's code tier from HDFS (sim sources, LeWM eval stack, DP env); README inside |
 | Minghao's backup | the tree `lewam_backup_2026-09-12/` he copied off the cluster | full original absolute paths underneath: `<backup>/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/{ckpts,code,wf8}` and `<backup>/home/tiger/{lewam_project/jobs,.claude/projects/-home-tiger-lewam/memory,.job_name_map.tsv}`; the same content as the manifest tiers 1-results, 1-code, 2-data, 4-devbox (caches were not staged) |
 
 `HROOT` below means the old root `/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam`. Choose a new root and
 recreate the subtree `wf8/`, `preload_cache/`, `preload_cache_u8/`, `ckpts/` under it.
+
+Upload state at 15:30 PDT on the cutoff day: the checkpoints repo holds the whole results tier plus `ckpts/dp_tc`
+and the 3-view runs; the data repo holds all 13 training files and `drawer_raw.h5` byte-exact against the manifest
+(parts summed), `env/`, the three real `eval/` link files, `_views/`, the README, and the six 3-view strided caches
+(`preload_cache/drawer_cleanup_fixed/*`, `preload_cache/transport/*`, scene + both wrists); the code archive is
+1.7 GB. The running jobs' last epochs were re-uploaded by the 15:30 and 16:30 PDT sweeps.
 
 Integrity checks: `docs/handoff_manifest.txt` lists every migrated path with its byte size (`tier bytes path
 note`); compare sizes after download. Each checkpoint directory carries its own `train.log` and
@@ -100,7 +107,7 @@ the new machine's Claude memory directory (`~/.claude/projects/<cwd with / repla
 rules (naming, eval invariants, horizon units, confirm-before-launch) carry over.
 
 ### 5.2 Datasets
-Download `MinghaoFu/lewam-data-2026-09-12` into `<root>/`; reassemble split files (`cat cube.h5.part-* > cube.h5`,
+Download `mh-hf/lewam-data-2026-09-12` into `<root>/`; reassemble split files (`cat cube.h5.part-* > cube.h5`,
 same for `transport_3view.h5` and `reacher_policy.h5`); delete the parts. Expected sizes: `docs/handoff_manifest.txt`
 tier 2-data. Pod-side dataset names the configs expect (link `<root>/wf8/train/<file>` to
 `$STABLEWM_HOME/datasets/<name>`): pusht.h5 -> `pusht_expert_train.h5`, tworoom.h5 -> `tworoom.h5`,
@@ -108,8 +115,10 @@ pointmaze_large.h5 -> `pointmaze_large.h5`, reacher_policy.h5 -> `reacher.h5`, t
 transport.h5 -> `transport.h5`, drawer.h5 -> `drawer_cleanup_fixed.h5`, cube.h5 -> `ogbench/cube_single_expert.h5`;
 eval variants from `wf8/eval/<cell>.h5` -> `<name>_ev.h5` where they exist.
 
-Two kinds of h5 files are external-link files and store the absolute paths of their targets, so they must be
-regenerated on the new root: `wf8/train/drawer.h5` (links into `wf8/_source/drawer_raw.h5`) and everything under
+`wf8/eval/` on the old root also held plain symlinks `<cell>.h5 -> ../train/<cell>.h5` for cube, pointmaze,
+pointmaze_large, pusht, reacher and tworoom; they were not uploaded (they would have duplicated the training
+files), recreate them with `ln -s`. Two kinds of h5 files are external-link files and store the absolute paths of
+their targets, so they must be regenerated on the new root: `wf8/train/drawer.h5` (links into `wf8/_source/drawer_raw.h5`) and everything under
 `wf8/train/_views/` and `wf8/eval/`. The builder is `workspace/scratch/make_view_links.py <out.h5> <primary.h5>
 [<column>=<file.h5> ...]` (e.g. `pixels_r0eih=<root>/wf8/train/drawer_3view.h5`); `h5dump -H` or `h5py` shows the
 old targets, replace the root. `wf8/README.md` documents the provenance and the column names.
@@ -125,7 +134,7 @@ wall time with 6 builders. The six 3-view strided caches are on HF; everything e
 locate the cache root from `--frames_cache <dir>` or the env `LEWAM_CACHE_DIR`.
 
 ### 5.4 Checkpoints
-Download `MinghaoFu/lewam-checkpoints-2026-09-12` into `<root>/` (it recreates `ckpts/...`). A run directory holds
+Download `mh-hf/lewam-checkpoints-2026-09-12` into `<root>/` (it recreates `ckpts/...`). A run directory holds
 `jointflow_best.pt` (best val), `jointflow_latest.pt`, `jointflow_full.pt` (full training state: model, optimizer,
 scheduler, epoch), `jointflow_config.json`, `train.log`, `grad_probe.jsonl`, `snap_ep<N>.pt`; DP-C runs hold
 `dp_best.pt`, `dp_latest.pt`, `dp_full.pt`, `dp_config.json`. Eval stages `jointflow_best.pt` + `jointflow_config.json`

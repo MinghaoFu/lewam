@@ -2984,11 +2984,22 @@ noise 1.0 -44.7, in-episode shuffle -48.0, uniform -76.1 nats).
   single-view epoch times x3.3.
 - Cutoff handling: `docs/HANDOFF.md` section 0. Backup directory on HDFS (manifest tiers, full paths); GitHub
   `workspace-2026-09-12` branch (outside-the-repo state); Hugging Face private dataset repos
-  `MinghaoFu/lewam-checkpoints-2026-09-12` (manifest results tier + dp_tc + the 3-view runs) and
-  `MinghaoFu/lewam-data-2026-09-12` (the data tier; files over 49 GB as `.part-NN`). The devbox's IPv6 egress is
+  `mh-hf/lewam-checkpoints-2026-09-12` (manifest results tier + dp_tc + the 3-view runs) and
+  `mh-hf/lewam-data-2026-09-12` (the data tier; files over 49 GB as `.part-NN`). The devbox's IPv6 egress is
   broken: huggingface.co's AAAA records come first, the stock client and CLI hang in the TLS handshake; forcing
   IPv4 in the resolver (scratch `hf_up.py`) fixes it; measured 49 MB/s end to end.
 - Wave at 03:30 CST: drawer 3-view TC at epoch 105+/120 (finishes ~03:35), DP-C drawer epoch 80 (finishes
   ~08:35, past the cutoff), DP-C transport epoch 45, LeWAM transport 3-view epoch 45. All sync their checkpoint
   files to HDFS every epoch; sweeps into the backup dir and HF at 06:30 and 07:30 CST (15:30 / 16:30 PST); the
   owner's rule: nothing synced after 16:30 PST counts.
+- Cutoff uploads, final state (15:30 PDT): account `mh-hf` (the first token given was `MinghaoFu`, the wrong account;
+  its two repos hold a first copy of the checkpoints and must be deleted from the web UI). `mh-hf/lewam-checkpoints-2026-09-12`
+  = the results tier + `ckpts/dp_tc` + the 3-view runs (~60 GB); `mh-hf/lewam-data-2026-09-12` = the data tier
+  (453 GB, every h5 byte-exact against the manifest; files over 49 GB as `.part-NN`) + the six 3-view strided caches
+  (130 GB); `mh-hf/lewam-code-ops-2026-09-12` = `lewam_code_ops_2026-09-12.tar.gz` (1.7 GB: git bundle of every
+  branch, working tree, workspace snapshot, HDFS code tier; sha256 125dd307...9134b). The backup directory on HDFS
+  holds the results, code, devbox and data tiers plus the archive. Upload facts: 160-310 MB/s from the NVMe staging
+  (the fuse read at ~90 MB/s was the limit), the account API quota (2,500 requests / 5 min) needs retry-with-wait
+  per file, `upload_folder` follows symlinks (the `wf8/eval` links to the training files would have doubled the
+  data), the whoami endpoint is rate-limited (cache it). Drawer 3-view TC evals (seeds 42/0/1) were still running
+  3 h after launch at 15:30 PDT.
