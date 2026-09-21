@@ -571,6 +571,7 @@ def build_policy(cfg, model, adim, process, transform, goal_offsets=None, policy
             grad_clip=float(ge.get("grad_clip", 10.0)),
             grad_tr=float(ge.get("grad_tr", 0.0)),
             grad_action_clip=float(ge.get("grad_action_clip", 3.0)),
+            grad_allk=bool(ge.get("grad_allk", False)),
             pm_K=int(ge.get("pm_K", 0)),
             pm_chunk=int(ge.get("pm_chunk", 8)),
             plan_goal_time=bool(ge.get("plan_goal_time", True)),
@@ -1584,6 +1585,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         self.grad_clip = float(kwargs.pop("grad_clip", 10.0))
         self.grad_tr = float(kwargs.pop("grad_tr", 0.0))                # penalty weight on ||U - U_warm||^2 (0 = off)
         self.grad_action_clip = float(kwargs.pop("grad_action_clip", 3.0))   # |z-scored action| bound (0 = off)
+        self.grad_allk = bool(kwargs.pop("grad_allk", False))   # optimize ALL plan_k candidates jointly, take best
         self.pm_K = int(kwargs.pop("pm_K", 0))                    # SteerMPC on MoT: noise draws per env (0 = plan_k)
         self.pm_chunk = int(kwargs.pop("pm_chunk", 8))            # SteerMPC on MoT: envs per optimization batch (memory)
         # subgoal planning (owner 2026-08-30): cost target = the demo's frame subgoal_every raw
@@ -2147,34 +2149,45 @@ class JointFlowPlanPolicy(JointFlowPolicy):
         return self._goal_cost(z, tgt)
 
     def _gradient_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
-        """Gradient planning: start from the best of plan_k policy proposals (best-of-K), then refine
-        the whole plan with grad_steps Adam steps on the planning cost, with an optional trust region
-        around the start (grad_tr). Returns the lowest-cost plan seen, the start included."""
+        """Gradient planning: warm-start from the best of plan_k policy proposals, then refine with
+        grad_steps Adam steps on the planning cost (optional trust region grad_tr). Returns the
+        lowest-cost plan seen. grad_allk=True: instead of refining only the best-of-K pick, optimize
+        ALL plan_k candidates jointly (batch R*K) and take the best-refined per env -- the rollout is
+        overhead-bound so it batches ~for free, exploring K times more of the action space."""
         R, K, fs, H = history.shape[0], self.plan_k, self.action_block, self.plan_rollout
         device = history.device
         steps_t = steps          # None = goal_terminal ckpts (h_norm 0, cost at the last block)
+        rows = torch.arange(R, device=device)
         with torch.no_grad():
             h = history.repeat_interleave(K, 0); p = history_pad.repeat_interleave(K, 0)
             goal_rep = z_goal.repeat_interleave(K, 0)
-            blocks, z_final = self._imagine_rollout(
-                h, p, goal_rep, steps_t.repeat_interleave(K, 0) if steps_t is not None else None)
+            steps_rep = steps_t.repeat_interleave(K, 0) if steps_t is not None else None
+            blocks, z_final = self._imagine_rollout(h, p, goal_rep, steps_rep)
             cg_rep = cost_goal.repeat_interleave(K, 0) if cost_goal is not None else goal_rep
             cost0 = self._goal_cost(z_final, cg_rep).view(R, K)
             pick = cost0.argmin(1)
-            rows = torch.arange(R, device=device)
-            U0 = blocks.view(R, K, blocks.shape[1], fs, -1)[rows, pick].detach()   # (R, n, fs, adim)
+            U0 = blocks.view(R, K, blocks.shape[1], fs, -1)[rows, pick].detach()   # (R, n, fs, adim) best-of-K
             c_warm = cost0[rows, pick].detach()
         if self.grad_steps <= 0:
             return U0.reshape(R, U0.shape[1] * fs, -1)
         gen = self._flow_generator(device)
-        noise_s = [self._state_noise(R, device, gen) for _ in range(H)]   # flow state head: fixed per replan
-        best_U, best_c = U0.clone(), c_warm.clone()
-        U = U0.clone().requires_grad_(True)
+        allk = self.grad_allk
+        if allk:
+            Ustart = blocks.view(R * K, blocks.shape[1], fs, -1).detach()   # all K candidates
+            c0 = cost0.view(R * K)
+            hh, pp, gg, ss, B = h, p, goal_rep, steps_rep, R * K
+            cg_pass = cg_rep if cost_goal is not None else None
+        else:
+            Ustart, c0 = U0, c_warm
+            hh, pp, gg, ss, B = history, history_pad, z_goal, steps_t, R
+            cg_pass = cost_goal
+        noise_s = [self._state_noise(B, device, gen) for _ in range(H)]   # flow state head: fixed per replan
+        best_U, best_c = Ustart.clone(), c0.clone()
+        U = Ustart.clone().requires_grad_(True)
         opt = torch.optim.Adam([U], lr=self.grad_lr)
         with torch.enable_grad():
             for it in range(self.grad_steps + 1):
-                c = self._rollout_cost_differentiable(history, history_pad, z_goal, steps_t, U, noise_s,
-                                            cost_goal=cost_goal)
+                c = self._rollout_cost_differentiable(hh, pp, gg, ss, U, noise_s, cost_goal=cg_pass)
                 with torch.no_grad():
                     better = c < best_c
                     best_c = torch.where(better, c.detach(), best_c)
@@ -2183,7 +2196,7 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                     break
                 loss = c.sum()
                 if self.grad_tr > 0:
-                    loss = loss + self.grad_tr * ((U - U0) ** 2).sum()
+                    loss = loss + self.grad_tr * ((U - Ustart) ** 2).sum()
                 opt.zero_grad()
                 loss.backward()
                 if self.grad_clip > 0:
@@ -2192,15 +2205,18 @@ class JointFlowPlanPolicy(JointFlowPolicy):
                 if self.grad_action_clip > 0:
                     with torch.no_grad():
                         U.clamp_(-self.grad_action_clip, self.grad_action_clip)
-        # diagnostics: how often and by how much the refinement beats the policy's best rollout
+        if allk:
+            bc = best_c.view(R, K); pk = bc.argmin(1)
+            best_U = best_U.view(R, K, best_U.shape[1], fs, -1)[rows, pk]
+            best_c = bc[rows, pk]
         st = self.__dict__.setdefault("_grad_stats", dict(n=0, improved=0, c_warm=0.0, c_best=0.0, du=0.0))
         st["n"] += R; st["improved"] += int((best_c < c_warm).sum())
         st["c_warm"] += float(c_warm.sum()); st["c_best"] += float(best_c.sum())
-        st["du"] += float((best_U - U0).flatten(1).norm(dim=1).sum())
+        st["du"] += float((best_U.reshape(R, -1) - U0.reshape(R, -1)).norm(dim=1).sum())
         if st["n"] % 50 < R:
             print(f"[grad] {st['improved']}/{st['n']} replans improved on the warm start; mean cost "
                   f"{st['c_warm'] / st['n']:.4f} -> {st['c_best'] / st['n']:.4f}; mean ||U-U0|| "
-                  f"{st['du'] / st['n']:.3f} (steps {self.grad_steps}, lr {self.grad_lr}, tr {self.grad_tr})", flush=True)
+                  f"{st['du'] / st['n']:.3f} (steps {self.grad_steps}, lr {self.grad_lr}, tr {self.grad_tr}, allk {allk})", flush=True)
         return best_U.detach().reshape(R, best_U.shape[1] * fs, -1)
 
     def _cem_plan(self, history, history_pad, z_goal, steps, cost_goal=None):
