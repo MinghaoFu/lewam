@@ -33,6 +33,9 @@ def parse_args():
     ap.add_argument("--exp_tag", default="")
     ap.add_argument("--run_dir", default="")
     ap.add_argument("--ckpt_sync_dir", default="")
+    ap.add_argument("--save_every", type=int, default=0,
+                    help="also save an epoch-tagged jointflow_ep<N>.pt every N epochs (0 = off), so a long "
+                         "run can be evaluated at an early epoch (LeWM's best checkpoint was ~epoch 10)")
     ap.add_argument("--frames_cache", default="auto")
     ap.add_argument("--cache_mmap", action="store_true")
     ap.add_argument("--frameskip", type=int, default=5)
@@ -831,6 +834,10 @@ def main():
             best_val = val_act
             torch.save(model.state_dict(), run_dir / "jointflow_best.pt")
             files.append(run_dir / "jointflow_best.pt")
+        if args.save_every and (epoch + 1) % args.save_every == 0:
+            ep_ckpt = run_dir / f"jointflow_ep{epoch + 1}.pt"
+            torch.save(model.state_dict(), ep_ckpt)
+            files.append(ep_ckpt)
         if args.ckpt_sync_dir:
             durable_sync(files, args.ckpt_sync_dir)
 
