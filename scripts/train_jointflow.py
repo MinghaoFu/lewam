@@ -145,6 +145,10 @@ def parse_args():
                     help="IDM aux weight (idm05 mechanism): MLP recovers the first action "
                          "block from the online (z_t, z_{t+fs}); shapes the encoder toward "
                          "action-aware latents. 0 = off.")
+    ap.add_argument("--w_act", type=float, default=1.0,
+                    help="policy (action-flow) loss weight")
+    ap.add_argument("--w_dyn", type=float, default=1.0,
+                    help="dynamics (state-flow) loss weight; 0 = policy-only ablation")
     ap.add_argument("--state_ema_target", action="store_true",
                     help="state flow targets from a momentum copy of the encoder, layernormed and "
                          "stop-gradded")
@@ -684,7 +688,7 @@ def main():
         loss_action, loss_state = model.loss(z_history, history_pad, action_target, action_valid,
                                              state_target, state_valid,
                                              z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep)
-        loss = loss_action + loss_state
+        loss = args.w_act * loss_action + args.w_dyn * loss_state
         parts = {"P": loss_action, "D": loss_state}      # per-task losses for --pcgrad
         loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
         if idm_head is not None:                   # camera 0's newest frame and first predicted state
