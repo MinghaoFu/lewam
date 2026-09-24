@@ -102,6 +102,10 @@ def parse_args():
                     help="raw-consecutive obs frames the model uses as history")
     ap.add_argument("--steps_per_epoch", type=int, default=0,
                     help="cap train/val batches per epoch (0 = one pass over the decision points)")
+    ap.add_argument("--sample_replacement", action="store_true",
+                    help="sample training windows WITH replacement (num_samples = dataset size). Default "
+                         "False = shuffle, each window once per epoch (the LeWM protocol / fixed behavior). "
+                         "Set only to reproduce a pre-fix baseline's sampler in a controlled ablation.")
     ap.add_argument("--actions_attend_states", type=int, default=1,
                     help="1: action tokens can attend to jointly predicted state tokens; "
                          "0: mask action tokens from attending the (noisy) state tokens")
@@ -450,9 +454,10 @@ def main():
         n = max(args.batch_size, int(idx.numel()))
         if args.steps_per_epoch:
             n = min(n, args.steps_per_epoch * args.batch_size)
-        # Shuffle window indices -- each start once per epoch (replacement=False), matching the LeWM
-        # protocol and the DP baseline (train_dp.py). replacement=True here was a bug (~63% coverage/epoch).
-        return DataLoader(ds, sampler=RandomSampler(ds, num_samples=n), **loader_args)
+        # Default: shuffle window indices, each once per epoch (replacement=False) -- the LeWM protocol
+        # and the DP baseline (train_dp.py). --sample_replacement opts back into the old with-replacement
+        # sampler (~63% coverage/epoch) only to reproduce a pre-fix baseline in a controlled ablation.
+        return DataLoader(ds, sampler=RandomSampler(ds, replacement=args.sample_replacement, num_samples=n), **loader_args)
     train_loader, val_loader = make_loader(train_idx), make_loader(val_idx)
 
     cfg = dict(fs=args.frameskip, action_raw_dim=raw_adim, img_size=args.img_size,
