@@ -450,7 +450,13 @@ def main():
         n = max(args.batch_size, int(idx.numel()))
         if args.steps_per_epoch:
             n = min(n, args.steps_per_epoch * args.batch_size)
-        return DataLoader(ds, sampler=RandomSampler(ds, replacement=True, num_samples=n), **loader_args)
+        # GR follows the LeWM protocol: shuffle window indices (each start once per epoch,
+        # replacement=False) -- the same sampler the DP baseline uses (train_dp.py). TC/plain keep the
+        # with-replacement sampler so the dynamics ablation stays matched to its existing baselines.
+        gr = args.goal_conditioning and not args.goal_terminal
+        sampler = (RandomSampler(ds, num_samples=n) if gr
+                   else RandomSampler(ds, replacement=True, num_samples=n))
+        return DataLoader(ds, sampler=sampler, **loader_args)
     train_loader, val_loader = make_loader(train_idx), make_loader(val_idx)
 
     cfg = dict(fs=args.frameskip, action_raw_dim=raw_adim, img_size=args.img_size,
