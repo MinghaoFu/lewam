@@ -112,8 +112,9 @@ def parse_args():
                          "summed: one blended cond for all tokens")
     # goal reaching
     ap.add_argument("--goal_conditioning", action="store_true",
-                    help="goal + horizon condition the action readout (GCHeadMSE); requires "
-                         "--fs_strided")
+                    help="goal + horizon condition the action readout (GCHeadMSE). With "
+                         "--goal_conditioning alone this is GR: the raw cache sampled at stride-1 "
+                         "starts (LeWM protocol); add --goal_terminal for the TC terminal-goal mode")
     ap.add_argument("--H_max", type=int, default=50,
                     help="horizon cap in obs-steps; h_norm = min(h, H_max)/H_max")
     ap.add_argument("--goal_cond", choices=["token", "head"], default="token",
@@ -121,10 +122,10 @@ def parse_args():
                          "trunk, horizon AdaLN on the noisy action tokens) or 'head' (jointflow's "
                          "GCHeadMSE readout: the trunk never sees goal or horizon)")
     ap.add_argument("--goal_terminal", action="store_true",
-                    help="marks the raw-path TC goal convention (goal = terminal/success frame, "
-                         "h fixed at 0 -- the raw dataset always supplies both; this flag gates "
-                         "the goal_conditioning-without-fs_strided combination and is recorded "
-                         "in the config for the eval adapter). Requires --goal_conditioning.")
+                    help="TC goal convention: goal = terminal/success frame, h fixed at 0 (the raw "
+                         "dataset supplies both). Selects JointFlowDataset over the GR sampled-goal "
+                         "dataset, and is recorded in the config for the eval adapter. Requires "
+                         "--goal_conditioning.")
     ap.add_argument("--p_drop_goal", type=float, default=0.0,
                     help="per-row goal dropout to the learned null goal (0 = every sample "
                          "keeps its goal)")
@@ -133,8 +134,6 @@ def parse_args():
                          "encoded and conditions the policy/dynamics, but the encoder cannot "
                          "be shaped by the goal pathway (tests whether the goal 'hacks' the "
                          "representation into shortcuts). Requires --goal_conditioning.")
-    ap.add_argument("--fs_strided", action="store_true",
-                    help="load the fs-strided (old GR) cache and sample goals at anchor offsets")
     # anti-collapse
     ap.add_argument("--zstd_floor", type=float, default=0.0,
                     help="collapse guard: after epoch 5, abort (write run_dir/collapse_killed) when the val "
@@ -241,96 +240,87 @@ def load_cache_views(args):
             torch.from_numpy(aux["frames_to_terminal"]), (aux["act_mean"].tolist(), aux["act_std"].tolist()))
 
 
-def load_cache_obs(args):
-    """fs-strided (old GR) cache: one frame + one z-scored fs-block of actions per anchor,
-    anchor-space indexing (t_gidx into frames, maxh = anchors to terminal). Several cameras (args.views)
-    sit behind one index like the raw caches: the first camera's tag carries the aux arrays, every other
-    camera at the tag suffix .<column>."""
+def read_cache_pixel_norm(args):
+    """The stored pixel scale of this run's cache (make_preload_cache's meta). Returns
+    (pixel_norm, mean, std); (None, None, None) if the meta predates the field (caller falls
+    back to a per-frame range check)."""
     cdir = args.frames_cache if args.frames_cache != "auto" else os.environ.get(
         "LEWAM_CACHE_DIR", "/mnt/hdfs/byte_ad_audit/bi_algorithm/minghao.fu/lewam/preload_cache")
     stem = os.path.basename(args.dataset_name).replace(".h5", "")
-    views = [v for v in args.views.split(",") if v]
-    tags = [f"{stem}_fs{args.frameskip}_i{args.img_size}" + ("" if v == "pixels" else f".{v}") for v in views]
-    arrays = [torch.from_numpy(np.load(f"{cdir}/{stem}/{tag}.frames.npy",
-                                       mmap_mode="r" if args.cache_mmap else None)) for tag in tags]
-    frames = arrays[0] if len(arrays) == 1 else MultiViewFrames(arrays)
-    aux = np.load(f"{cdir}/{stem}/{tags[0]}.aux.npz")
-    a_block = torch.from_numpy(aux["A_flat"])
-    t_gidx = torch.from_numpy(aux["t_gidx"])
-    maxh = torch.from_numpy(aux["maxh"])
-    ep_base = torch.from_numpy(aux["ep_base"])
-    action_stats = (aux["act_mean"].tolist(), aux["act_std"].tolist())
-    return frames, a_block, t_gidx, maxh, ep_base, action_stats
+    tag = f"{stem}_fs{args.frameskip}_i{args.img_size}_raw"
+    try:
+        m = json.load(open(f"{cdir}/{stem}/{tag}.meta.json"))
+    except Exception:
+        return None, None, None
+    return m.get("pixel_norm"), m.get("pixel_norm_mean"), m.get("pixel_norm_std")
 
 
 class JointFlowGRDataset(torch.utils.data.Dataset):
-    """Goal-reaching sampling on the fs-strided cache: anchors are the decision points.
-    History = the last `history_len` anchor frames (left-padded at the episode start);
-    actions = the next ceil(num_actions/fs) anchor blocks unstacked to raw steps; state
-    targets at +q anchors; goal at +h anchors with h ~ U[1, H_max] clamped to the tail,
-    h_norm = min(h, H_max)/H_max."""
+    """Goal-reaching on the RAW cache with LeWM start sampling: every raw timestep is a decision
+    point, so starts advance by 1 raw step (the fs-strided cache advanced them by one fs-anchor =
+    `frameskip` raw steps -- the bug this fixes). From a raw start p the window keeps the fs-spaced
+    GR architecture unchanged: history = frames at p, p-fs, ... (left-padded with the oldest real
+    frame at the episode start); actions = the next `num_actions` raw actions; state targets at
+    p+q*fs; goal at p+h*fs with h ~ U[1, H_max] fs-steps clamped to the tail, h_norm =
+    min(h, H_max)/H_max. (The removed fs-strided cache advanced starts by a whole fs-anchor =
+    frameskip raw steps; this samples every raw start -- the fix.)"""
 
-    def __init__(self, frames, a_block, t_gidx, maxh, ep_base, indices, history_len,
-                 num_actions, num_states, frameskip, h_max):
+    def __init__(self, frames, a_frame, t_gidx, ep_base, frames_to_terminal, indices,
+                 history_len, num_actions, num_states, frameskip, h_max):
         self.frames = frames
-        self.a_block = a_block
+        self.a_frame = a_frame
         self.t_gidx = t_gidx
-        self.maxh = maxh
         self.ep_base = ep_base
+        self.frames_to_terminal = frames_to_terminal
         self.indices = indices
         self.history_len = history_len
         self.num_actions = num_actions
         self.num_states = num_states
         self.frameskip = frameskip
         self.h_max = h_max
-        self.raw_adim = a_block.shape[1] // frameskip
-        assert num_actions % frameskip == 0, "num_actions must be whole anchor blocks on the fs-strided cache"
 
     def __len__(self):
         return self.indices.numel()
 
     def __getitem__(self, i):
         idx = int(self.indices[i])
-        ti = int(self.t_gidx[idx])
-        mh = int(self.maxh[idx])
-        e0 = int(self.ep_base[idx])
+        p = int(self.t_gidx[idx])
+        ep0 = int(self.ep_base[idx])
+        ttl = int(self.frames_to_terminal[idx])
         hl, fs = self.history_len, self.frameskip
-        n_blocks = self.num_actions // fs
 
-        lo = max(e0, ti - hl + 1)
-        # frames keep the CACHE dtype (uint8 raw / fp16 pre-normalized): run_batch's
-        # was_uint8 branch does the /255-mean-std on GPU. Floating here would both defeat
-        # that normalization (the ep-48 pixel-scale bug) and 4x the loader traffic.
-        recent = self.frames[lo:ti + 1]
-        k = recent.shape[0]
+        # history: fs-spaced frames ending at p (p, p-fs, ...), oldest real frame padding the start
+        offs = [p - k * fs for k in range(hl - 1, -1, -1)]   # oldest..newest; newest = p
+        k = sum(o >= ep0 for o in offs)                      # how many land inside this episode (>=1)
+        recent = torch.stack([self.frames[o] for o in offs[hl - k:]])
         history = torch.empty((hl, *recent.shape[1:]), dtype=recent.dtype)
         history[hl - k:] = recent
         if k < hl:
-            # pad with the OLDEST REAL frame, not zeros: pad positions are masked from
-            # attention, but every frame still passes the encoder, whose projector has a
-            # BatchNorm -- zero frames would corrupt the batch statistics for the real
-            # frames (train_lewam_unified's collate_pad documents this exact failure)
             history[:hl - k] = recent[0]
         history_pad = torch.ones(hl, dtype=torch.bool)
         history_pad[hl - k:] = False
 
-        target = torch.zeros((self.num_actions, self.raw_adim), dtype=torch.float32)
+        # actions: the next num_actions raw actions (frame-aligned, already z-scored in the cache)
+        avail = min(self.num_actions, ttl)
+        target = torch.zeros((self.num_actions, self.a_frame.shape[1]), dtype=torch.float32)
+        target[:avail] = self.a_frame[p:p + avail].float()
         target_valid = torch.zeros(self.num_actions, dtype=torch.float32)
-        for b in range(min(n_blocks, mh)):
-            target[b * fs:(b + 1) * fs] = self.a_block[idx + b].float().view(fs, self.raw_adim)
-            target_valid[b * fs:(b + 1) * fs] = 1.0
+        target_valid[:avail] = 1.0
 
+        # state targets: fs-spaced boundaries p + q*fs, clamped to the terminal frame
         if self.num_states:
-            state_frames = torch.stack([self.frames[ti + min(q, mh)]
+            state_frames = torch.stack([self.frames[p + min(q * fs, ttl)]
                                         for q in range(1, self.num_states + 1)])
-            state_valid = torch.tensor([1.0 if q <= mh else 0.0
+            state_valid = torch.tensor([1.0 if q * fs <= ttl else 0.0
                                         for q in range(1, self.num_states + 1)])
         else:
             state_frames = torch.zeros((0, *self.frames.shape[1:]), dtype=self.frames.dtype)
             state_valid = torch.zeros(0)
 
+        # goal: h fs-steps ahead, h ~ U[1, H_max] clamped to the fs-steps remaining (>=1 by the filter)
+        mh = max(1, ttl // fs)
         h = min(int(torch.randint(1, self.h_max + 1, (1,)).item()), mh)
-        goal_frame = self.frames[ti + h]
+        goal_frame = self.frames[p + min(h * fs, ttl)]
         h_norm = torch.tensor(min(h, self.h_max) / self.h_max, dtype=torch.float32)
         return history, history_pad, target, target_valid, state_frames, state_valid, \
             goal_frame, h_norm
@@ -415,35 +405,28 @@ def main():
     assert not (args.detach_goal_grad and not args.goal_conditioning), \
         "--detach_goal_grad requires --goal_conditioning"
     if args.goal_terminal:
-        assert args.goal_conditioning and not args.fs_strided, \
-            "--goal_terminal is the raw-path TC goal mode: needs --goal_conditioning, excludes --fs_strided"
-    else:
-        assert not (args.goal_conditioning and not args.fs_strided), \
-            "--goal_conditioning needs --fs_strided (or --goal_terminal for the TC goal mode)"
+        assert args.goal_conditioning, "--goal_terminal is the TC goal mode: needs --goal_conditioning"
+    # GR (--goal_conditioning without --goal_terminal) reads the raw cache and samples starts at raw
+    # stride 1 (LeWM protocol, JointFlowGRDataset); TC uses the terminal goal (JointFlowDataset).
     views = [v for v in args.views.split(",") if v]
     # goal views: which cameras' goal frames condition the policy (one goal token each); default the first
     goal_views = (views if args.goal_views == "all"
                   else [v for v in args.goal_views.split(",") if v] or views[:1])
     assert all(v in views for v in goal_views), f"--goal_views {goal_views} must be among --views {views}"
     goal_view_index = [views.index(v) for v in goal_views]
-    if args.fs_strided:
-        frames, a_block, t_gidx, maxh, ep_base, action_stats = load_cache_obs(args)
-        raw_adim = a_block.shape[1] // args.frameskip
-        n_starts = t_gidx.shape[0]
-        tail = maxh
-    else:
-        frames, a_frame, t_gidx, ep_base, frames_to_terminal, action_stats = load_cache_views(args)
-        raw_adim = a_frame.shape[1]
-        n_starts = t_gidx.shape[0]
-        tail = frames_to_terminal
+    frames, a_frame, t_gidx, ep_base, frames_to_terminal, action_stats = load_cache_views(args)
+    raw_adim = a_frame.shape[1]
+    n_starts = t_gidx.shape[0]
+    _cache_norm, _cache_nmean, _cache_nstd = read_cache_pixel_norm(args)
+    print(f"[jointflow] cache pixel_norm={_cache_norm} -> target ImageNet", flush=True)
     print(f"[jointflow] frames={tuple(frames.shape)} starts={n_starts} raw_dim={raw_adim} "
           f"layout=(a{args.num_actions_pred},s{args.num_states_pred},fs{args.frameskip}) "
           f"actions_attend_states={bool(args.actions_attend_states)} split_tau={args.split_tau} "
-          f"fs_strided={args.fs_strided} goal_cond={args.goal_conditioning}", flush=True)
+          f"goal_cond={args.goal_conditioning} goal_terminal={args.goal_terminal}", flush=True)
 
     gen = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(n_starts, generator=gen)
-    perm = perm[tail[perm] >= (1 if args.fs_strided else args.frameskip)]
+    perm = perm[frames_to_terminal[perm] >= args.frameskip]
     n_val = int(round((1 - args.train_split) * perm.numel()))
     val_idx, train_idx = perm[:n_val], perm[n_val:]
 
@@ -452,11 +435,11 @@ def main():
         loader_args.update(prefetch_factor=args.prefetch_factor, persistent_workers=True)
 
     def make_loader(idx):
-        if args.fs_strided:
-            ds = JointFlowGRDataset(frames, a_block, t_gidx, maxh, ep_base, idx,
+        if args.goal_conditioning and not args.goal_terminal:   # GR: raw cache, stride-1 starts (LeWM)
+            ds = JointFlowGRDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
                                     args.policy_history_len, args.num_actions_pred,
                                     args.num_states_pred, args.frameskip, args.H_max)
-        else:
+        else:                                                    # TC (terminal goal) / plain
             ds = JointFlowDataset(frames, a_frame, t_gidx, ep_base, frames_to_terminal, idx,
                                   args.policy_history_len, args.num_actions_pred, args.frameskip,
                                   args.num_states_pred)
@@ -496,7 +479,9 @@ def main():
     builder = {"jointflow": build_model, "twinflow": build_twinflow, "motflow": build_motflow}[args.model]
     model = builder(cfg).to(device)
     action_mean, action_std = action_stats
-    dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std}
+    dumped = {**cfg, **vars(args), "action_mean": action_mean, "action_std": action_std,
+              "input_norm": "imagenet", "input_norm_mean": _IMG_MEAN.view(-1).tolist(),
+              "input_norm_std": _IMG_STD.view(-1).tolist()}
     # vars(args) carries the RAW -1 sentinel; the loader must see the resolved width or it
     # rebuilds without the projection module and the state-dict assert fires
     dumped["sigreg_proj_dim"] = cfg["sigreg_proj_dim"]
@@ -573,7 +558,9 @@ def main():
             idm_head.load_state_dict(state["idm_head"])
         print(f"[jointflow] resumed at epoch {start_epoch} best_val={best_val:.5f}", flush=True)
 
-    mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)
+    mean = _IMG_MEAN.to(device); std = _IMG_STD.to(device)   # this trainer's target input norm (ImageNet)
+    _cache_mean = torch.tensor(_cache_nmean).view(1, 3, 1, 1).to(device).float() if _cache_nmean else None
+    _cache_std = torch.tensor(_cache_nstd).view(1, 3, 1, 1).to(device).float() if _cache_nstd else None
     sigreg = SIGReg().to(device)
 
     def sigreg_loss(z_history, state_target, z_goal):
@@ -610,7 +597,7 @@ def main():
 
     def run_batch(batch, train=True, return_probe=False):
         # both datasets return the same 8-tuple; the goal/h are consumed only under
-        # --goal_conditioning (fs_strided: offset goal + countdown h; raw: terminal goal + h=0)
+        # --goal_conditioning (GR: sampled offset goal + countdown h; TC: terminal goal + h=0)
         (history_frames, history_pad, action_target, action_valid, state_frames,
          state_valid, goal_frames, h_norm) = batch
         if args.goal_conditioning:
@@ -625,8 +612,19 @@ def main():
         state_frames = state_frames.to(device, non_blocking=True)
         state_valid = state_valid.to(device, non_blocking=True)
         B, n_history = history_frames.shape[0], history_frames.shape[1]
-        was_uint8 = history_frames.dtype == torch.uint8
-        norm = lambda x: (x / 255.0 - mean) / std if was_uint8 else x
+        # Recover cache pixels to [0,1] per their recorded pixel_norm (from meta), then apply this
+        # trainer's target scale (mean/std). Explicit + metadata-driven -- no dtype/range guessing.
+        def norm(x):
+            if _cache_norm == "none":
+                unit = x / 255.0
+            elif _cache_norm == "unit":
+                unit = x
+            elif _cache_mean is not None:                     # imagenet / custom: undo the cache's own mean/std
+                unit = x * _cache_std + _cache_mean
+            else:                                             # meta predates pixel_norm: safe per-frame range fallback
+                raw = x.flatten(1).amax(1).view(-1, 1, 1, 1) > 4.0
+                unit = torch.where(raw, x / 255.0, x * std + mean)
+            return (unit - mean) / std
         # multi-view samples carry a camera axis after the frame axis: (B, frames, views, 3, H, W); every
         # frame of every camera goes through the encoder once, and the latents are laid out view-major
         # (camera 0's frames, then camera 1's, ...) as the model expects
