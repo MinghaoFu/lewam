@@ -1,0 +1,26 @@
+defaults:
+  - base
+  - _self_
+
+world:
+  env_name: swm/PointMaze-v0
+  task: large               # OGBench maze: medium | large | giant | teleport
+  resolution: 224
+
+dataset:
+  keys_to_cache: [action, proprio, state]
+
+eval:
+  goal_offset_steps: 50
+  eval_budget: 100
+  dataset_name: pointmaze_large
+  callables:
+    - method: set_state
+      args:
+        state: {value: state}
+    - method: _set_goal_state
+      args:
+        goal_state: {value: goal_state}
+    - method: _set_goal_proprio
+      args:
+        goal_proprio: {value: goal_proprio}

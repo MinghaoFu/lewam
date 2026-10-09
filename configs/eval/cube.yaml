@@ -1,0 +1,32 @@
+defaults:
+  - base
+  - _self_
+
+world:
+  env_name: swm/OGBCube-v0
+  env_type: single
+  ob_type: states
+  multiview: false
+  width: 224
+  height: 224
+  visualize_info: false
+  terminate_at_goal: true
+  eef_threshold: 0.04       # success also needs the end effector within this distance of the goal's
+
+eval:
+  goal_offset_steps: 25
+  eval_budget: 50
+  dataset_name: cube
+  callables:
+    - method: set_state
+      args:
+        qpos: {value: qpos}
+        qvel: {value: qvel}
+    - method: set_target_pos
+      args:
+        cube_id: {value: 0, in_dataset: false}
+        target_pos: {value: goal_privileged_block_0_pos}
+        target_quat: {value: goal_privileged_block_0_quat}
+    - method: set_goal_effector
+      args:
+        goal_effector: {value: goal_proprio_effector_pos}

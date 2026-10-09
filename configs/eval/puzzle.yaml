@@ -1,0 +1,33 @@
+defaults:
+  - base
+  - _self_
+
+world:
+  env_name: swm/OGBPuzzle-v0
+  env_type: 3x3
+  ob_type: pixels           # render as the training frames were: front camera, opaque arm
+  pixel_transparent_arm: false
+  width: 224
+  height: 224
+  visualize_info: false
+  terminate_at_goal: true
+  eef_threshold: 0.04       # success also needs the end effector within this distance of the goal's
+
+eval:
+  goal_offset_steps: 25
+  eval_budget: 50
+  dataset_name: puzzle_expert
+  callables:
+    # the button states live outside qpos/qvel
+    - method: set_state
+      args:
+        qpos: {value: qpos}
+        qvel: {value: qvel}
+        button_states: {value: button_states}
+    # success needs every button to match, so the goal frame's whole configuration is the target
+    - method: set_target_button_states
+      args:
+        target_button_states: {value: goal_button_states}
+    - method: set_goal_effector
+      args:
+        goal_effector: {value: goal_proprio_effector_pos}

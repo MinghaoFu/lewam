@@ -1,0 +1,41 @@
+# ── data / checkpoints (live on HF + rsync, NEVER git) ──
+*.pt
+*.ckpt
+*.pth
+*.h5
+*.hdf5
+*.lance
+*.npz
+*.npy
+# ── training outputs / logs ──
+wandb/
+logs/
+lightning_logs/
+outputs/
+multirun/
+*.log
+events.out.tfevents.*
+results.jsonl
+# ── backups / caches ──
+*.bak
+*.bak_*
+*.prebak
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+.vscode
+# ── media (re-downloadable / regenerable) ──
+*.mp4
+docs/proposal/papers/
+
+# Overleaf paper clone (its own git repo; managed via git.overleaf.com, not this repo)
+/overleaf/
+
+# ── AI-scratch / work-in-progress docs (kept local, off GitHub) ──
+# handoff + design working notes live under docs/wip/ and are ignored as a subdir;
+# EXPERIMENTS.md, docs/proposal/ (except papers/ above), and the infra/README docs stay tracked.
+docs/wip/
+third_party/
+*.egg-info/

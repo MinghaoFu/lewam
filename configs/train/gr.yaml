@@ -1,0 +1,14 @@
+# Goal reaching: goals sampled up to H_max chunks ahead, frameskip-spaced history
+defaults:
+  - base
+  - _self_
+
+model:
+  history_stride: 5
+  goal_type: sampled
+
+train:
+  epochs: 50
+  warmup_epochs: 5
+  batch_size: 128
+  lr: 1.5e-4

@@ -1,0 +1,55 @@
+# Shared by every task config. Override any key on the command line, e.g.
+#   python scripts/eval_lewam.py --config-name pusht policy=<run_name> eval.mode=lewam_plan eval.plan_mode=grad
+
+seed: 42
+policy: ???                 # run name under $STABLEWM_HOME/checkpoints
+seq_which: best             # best | latest checkpoint of the run
+cache_dir: null             # dataset root; null = $STABLEWM_HOME
+
+world:
+  num_envs: ${eval.num_eval}
+  max_episode_steps: ???    # set by the script (usually 2x eval.eval_budget)
+
+dataset:
+  keys_to_cache: [action]
+
+eval:
+  num_eval: 50              # number of episodes to evaluate
+  goal_offset_steps: ???    # how far the goal is from the sampled start (in raw env steps)
+  eval_budget: ???          # how many actions the policy/planner can execute per episode
+  img_size: 224
+  dataset_name: ???
+  callables: []
+
+  full_traj: false          # true: each episode from its start to its end
+  task_only: false          # true: no goal in the env: success is completion of the task
+  random_start: true        # false: start at frame 0 of the drawn episodes
+  min_episode_len: 0        # draw only from episodes at least this long; 0 = no filter
+
+  mode: lewam_policy        # lewam_policy | lewam_plan
+  h0: null                  # goal horizon at the start, in frameskip units; null = from the goal offset
+  exec_actions: 0           # actions executed per replan; 0 = frameskip
+
+  plan_mode: grad           # best_of_k | grad | steer | cem
+  num_proposals: 32         # number of candidate plans to score per replan
+  rollout_steps: 1          # dynamics steps imagined per plan
+  plan_random_candidates: false
+  plan_goal_time: true      # score each plan at its goal step and stop imagining there
+  # gradient planning
+  grad_steps: 50
+  grad_lr: 0.05
+  grad_clip: 10.0
+  grad_tr: 0.0              # trust region penalty weight
+  grad_action_clip: 3.0     # value to clip actions to 
+  grad_all_k: true          # whether to optimize all candidates before taking the best
+  # steerMPC
+  steer_steps: 20
+  steer_lr: 0.02
+  steer_max_bias: 0.3
+  steer_k: 0
+  steer_env_batch: 8
+  # CEM
+  cem_iters: 3
+  cem_elites: 6
+  cem_std: 0.5
+  cem_init: policy

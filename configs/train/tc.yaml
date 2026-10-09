@@ -1,0 +1,14 @@
+# Task completion: goal-blind, every-frame history
+defaults:
+  - base
+  - _self_
+
+model:
+  history_stride: 1
+  goal_type: none
+
+train:
+  epochs: 120
+  warmup_epochs: 10
+  batch_size: 64
+  lr: 1.0e-4

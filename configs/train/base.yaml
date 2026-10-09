@@ -1,0 +1,65 @@
+# Shared by every LeWAM training config; gr.yaml / tc.yaml set the protocol. Override any key as key=value, e.g.
+#   python scripts/train_lewam.py --config-name gr dataset_path=<train h5> run_name=<run>
+
+seed: 42
+dataset_path: ???
+run_name: ???
+run_dir: ${oc.env:STABLEWM_HOME}/checkpoints/${run_name}   # where eval_lewam.py loads the run from
+ckpt_sync_dir: null         # also copy the checkpoints here after every epoch
+save_every: 0               # also keep lewam_ep<N>.pt every N epochs; 0 = off
+resume: true                # continue from run_dir/lewam_full.pt if it exists
+
+data:
+  source: decomp            # decomp | h5; see docs/DATA.md
+  decomp_dir: ${oc.env:STABLEWM_HOME}/decomp          # source=decomp: the --decomp_dir given to decompress_h5.py
+  load_in_ram: true         # decomp: preload uint8 frames; false uses mmap
+  terminal_state: last      # last | success: where each episode ends for goals and targets
+  frameskip: 5              # number of env steps between model observations (NOTE: "1 frameskip unit" means "frameskip" total env steps) 
+  img_size: 224
+  views: [pixels]           # h5 image columns (cameras) the model trains on
+  goal_views: []            # goal-conditioned: the views whose goal frames condition the policy; [] = the first view
+  train_split: 0.9
+  num_workers: 8
+  prefetch_factor: 4
+
+model:
+  encoder_backbone: resnet18dp
+  encoder_size: tiny
+  z_dim: 192
+  proj_hidden: 384
+  d_model: 192
+  n_heads: 4
+  depth: 4
+  dropout: 0.1
+  n_flow_steps: 8
+  num_actions_pred: 10
+  num_states_pred: 1
+  action_head: flow         # flow | mse
+  state_head: mse           # flow | mse
+  history_len: 2
+  history_stride: ???       # frames between history frames, 1..frameskip
+  goal_type: ???            # none | terminal | sampled
+  H_max: 10                 # goal_type=sampled: the largest goal horizon, in frameskip units
+  flow_alpha_act: 1.0       # flow time tau ~ Beta(alpha, 1); 1 = uniform
+  flow_alpha_state: ${model.flow_alpha_act}
+  sigreg_grouped: true      # SIGReg per latent group (history frames, state targets, goal), averaged
+  sigreg_proj_dim: 0        # >0: SIGReg sees a learned z_dim -> sigreg_proj_dim projection; 0 = none
+
+train:
+  epochs: ???
+  warmup_epochs: ???
+  batch_size: ???
+  lr: ???
+  encoder_lr: null          # per parameter group; null = lr
+  policy_lr: null
+  dynamics_lr: null
+  weight_decay: 1.0e-4
+  steps_per_epoch: 0        # cap train/val batches per epoch; 0 = one pass
+  precision: fp32           # fp32 | bf16 (autocast of the forward)
+  encoder_checkpoint_chunks: 0   # >1: encode in this many chunks with activation checkpointing (memory)
+  p_drop_goal: 0.0          # per-sample goal dropout (the goal is masked out)
+  w_act: 1.0                # action (policy) loss weight
+  w_dyn: 1.0                # state (dynamics) loss weight
+  w_reg: 0.04               # SIGReg weight
+  w_idm: 0.0                # inverse-dynamics auxiliary weight
+  zstd_floor: 0.005         # stop when the val state-latent std drops below this after epoch 5; 0 = off
