@@ -1,7 +1,19 @@
-# LeWAM
-### End-to-end World and Action Modeling with JEPAs
+<h1 align="center">LeWAM</h1>
+<h3 align="center">End-to-end World and Action Modeling with JEPAs</h3>
 
-[Minghao Fu*](https://minghaofu.com/), [Tavis Siebert*](https://tavis-siebert.github.io/), [Eryk Halicki](https://eryk.ca/) and [Randall Balestriero](https://randallbalestriero.github.io/)
+<p align="center">
+  <a href="https://minghaofu.com/">Minghao Fu*</a>,
+  <a href="https://tavis-siebert.github.io/">Tavis Siebert*</a>,
+  <a href="https://eryk.ca/">Eryk Halicki</a> and
+  <a href="https://randallbalestriero.github.io/">Randall Balestriero</a>
+</p>
+
+<p align="center">
+  <a href="https://le-wam.github.io/">Website</a> &middot;
+  <a href="https://minghaofu.github.io/files/lewam.pdf">Paper</a> &middot;
+  <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-checkpoint">Checkpoints</a> &middot;
+  <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-data">Datasets</a>
+</p>
 
 ## Using the code
 
