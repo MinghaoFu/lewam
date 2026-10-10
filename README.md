@@ -19,25 +19,6 @@
   <img src="assets/lewam_teaser.gif" alt="LeWAM animated teaser" width="100%">
 </p>
 
-## Main results
-
-Goal-reaching visual planning: mean success rate across three seeds.
-
-| Task | SR (%) | Checkpoint | Dataset |
-|---|---:|---|---|
-| Two-Room | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-tworoom) | [Data](https://huggingface.co/datasets/LeWAM/lewam-tworoom) |
-| Reacher | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-reacher) | [Data](https://huggingface.co/datasets/LeWAM/lewam-reacher) |
-| Push-T | 98.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-pusht) | [Data](https://huggingface.co/datasets/LeWAM/lewam-pusht) |
-| Cube | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-cube) | [Data](https://huggingface.co/datasets/LeWAM/lewam-cube) |
-| PointMaze | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-pointmaze-large) | [Data](https://huggingface.co/datasets/LeWAM/lewam-pointmaze-large) |
-| Scene | 97.3 | [Checkpoint](https://huggingface.co/LeWAM/lewam-scene) | [Data](https://huggingface.co/datasets/LeWAM/lewam-scene) |
-| Puzzle | 80.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-puzzle) | [Data](https://huggingface.co/datasets/LeWAM/lewam-puzzle) |
-| ToolHang | 94.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-toolhang) | [Data](https://huggingface.co/datasets/LeWAM/lewam-toolhang) |
-| Transport | 83.3 | [Checkpoint](https://huggingface.co/LeWAM/lewam-transport) | [Data](https://huggingface.co/datasets/LeWAM/lewam-transport) |
-| DrawerCleanup | 80.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-drawer) | [Data](https://huggingface.co/datasets/LeWAM/lewam-drawer) |
-
-Reacher uses the original LeWM dataset. See [docs/REPRODUCE.md](docs/REPRODUCE.md) for download and evaluation commands.
-
 ## Using the code
 
 **Installation:**
@@ -107,6 +88,25 @@ python scripts/eval_lewam.py --config-name toolhang \
 
 Replace `pusht` or `toolhang` with the corresponding task config. Results are saved under `$STABLEWM_HOME/eval/`.
 See [docs/REPRODUCE.md](docs/REPRODUCE.md) for our checkpoints and the paper's evaluation settings.
+
+## Main results
+
+Goal-reaching visual planning: mean success rate across three seeds.
+
+| Task | SR (%) | Checkpoint | Dataset |
+|---|---:|---|---|
+| Two-Room | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-tworoom) | [Data](https://huggingface.co/datasets/LeWAM/lewam-tworoom) |
+| Reacher | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-reacher) | [Data](https://huggingface.co/datasets/LeWAM/lewam-reacher) |
+| Push-T | 98.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-pusht) | [Data](https://huggingface.co/datasets/LeWAM/lewam-pusht) |
+| Cube | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-cube) | [Data](https://huggingface.co/datasets/LeWAM/lewam-cube) |
+| PointMaze | 100.0 | [Checkpoint](https://huggingface.co/LeWAM/lewam-pointmaze-large) | [Data](https://huggingface.co/datasets/LeWAM/lewam-pointmaze-large) |
+| Scene | 97.3 | [Checkpoint](https://huggingface.co/LeWAM/lewam-scene) | [Data](https://huggingface.co/datasets/LeWAM/lewam-scene) |
+| Puzzle | 80.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-puzzle) | [Data](https://huggingface.co/datasets/LeWAM/lewam-puzzle) |
+| ToolHang | 94.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-toolhang) | [Data](https://huggingface.co/datasets/LeWAM/lewam-toolhang) |
+| Transport | 83.3 | [Checkpoint](https://huggingface.co/LeWAM/lewam-transport) | [Data](https://huggingface.co/datasets/LeWAM/lewam-transport) |
+| DrawerCleanup | 80.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-drawer) | [Data](https://huggingface.co/datasets/LeWAM/lewam-drawer) |
+
+Reacher uses the original LeWM dataset. See [docs/REPRODUCE.md](docs/REPRODUCE.md) for download and evaluation commands.
 
 ## Acknowledgments
 
