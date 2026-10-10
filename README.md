@@ -15,6 +15,10 @@
   <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-data">Datasets</a>
 </p>
 
+<p align="center">
+  <img src="assets/lewam_teaser.gif" alt="LeWAM animated teaser" width="100%">
+</p>
+
 ## Using the code
 
 **Installation:**
