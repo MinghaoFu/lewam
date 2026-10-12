@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://le-wam.github.io/">Website</a> &middot;
-  <a href="https://minghaofu.github.io/files/lewam.pdf">Paper</a> &middot;
+  <a href="https://arxiv.org/abs/2610.12818">Paper</a> &middot;
   <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-checkpoint">Checkpoints</a> &middot;
   <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-data">Datasets</a>
 </p>
