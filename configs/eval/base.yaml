@@ -36,7 +36,7 @@ eval:
   plan_random_candidates: false
   plan_goal_time: true      # score each plan at its goal step and stop imagining there
   # gradient planning
-  grad_steps: 50
+  grad_steps: 5
   grad_lr: 0.05
   grad_clip: 10.0
   grad_tr: 0.0              # trust region penalty weight
