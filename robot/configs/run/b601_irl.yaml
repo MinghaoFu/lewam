@@ -1,0 +1,23 @@
+# @package _global_
+# A real-arm rollout of a finished run; names no model or dataset, both come from `load=`:
+#
+#   python main.py run=b601_irl load=<run_id|ckpt.pt>
+#
+# no dataset/algorithm section exists until then, so overriding one takes `+`:
+#   python main.py run=b601_irl load=<run_id> +algorithm.attn_backend=sdpa
+
+defaults:
+  - override /eval: b601_zed_and_wrist
+
+name: null
+
+experiment:
+  tasks: [validation]
+
+posthoc_prefix: irl
+
+eval:
+  max_episode_steps: 1800       # 60 s at 30 fps
+  image_size: ${dataset.image_size}
+  columns: ${dataset.columns}
+  slices: ${dataset.slices}

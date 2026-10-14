@@ -1,0 +1,41 @@
+defaults:
+  - _self_                 # first, so a run's own keys win over these
+  - experiment: base
+  - dataset: null          # Hydra only overrides a group its defaults list already names
+  - algorithm: null
+  - eval: null
+  - run: null
+
+name: ${hydra:runtime.choices.run}
+
+debug: false
+
+# seeds torch/numpy/python once per run; `null` leaves them unseeded. Distinct from
+# `eval.seed`, which fixes the holdout subset alone
+seed: 14
+
+# set entity and project to your own wandb account, or pass wandb.mode=disabled
+wandb:
+  entity: halicki          # required when mode=online
+  project: lewam-testing
+  mode: online
+
+resume: null               # wandb run id
+load: null                 # wandb run id, `<run id>:best`, or a local .pt path
+
+#   -m run=a,b 'resume_map={a: 1abc23de}' 'load_map={a: /tmp/ck_1abc23de.pt}'
+# keyed by the `run=` arm or by `name`, so relabelling a run with `name=` keeps the map valid
+resume_map: null
+load_map: null
+
+# named exactly as the eval backend reports it: loss, loss/action, psnr/scene, success_rate
+best_metric: loss
+best_mode: min
+
+posthoc_prefix: posthoc
+
+#   subsample_streams: {"observation.images.*": {every: 6}}
+subsample_streams: null
+
+#   cache_encodings: {augmentation_draws: 2, store_on: memory|disk|auto, disk_path: null}
+cache_encodings: null

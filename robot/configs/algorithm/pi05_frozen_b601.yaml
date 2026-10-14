@@ -1,0 +1,10 @@
+defaults:
+  - pi05_b601
+  - _self_
+
+# the pi05 arm with the whole VLM stack frozen (SigLIP vision tower + PaliGemma language
+# model): only the Gemma-300M action expert and the state/action/time projections train.
+# lerobot's flag; the wrapper hands the optimizer every parameter, and frozen ones simply
+# never receive a gradient
+policy:
+  train_expert_only: true

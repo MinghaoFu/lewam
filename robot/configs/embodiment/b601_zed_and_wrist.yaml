@@ -1,0 +1,17 @@
+# camera keys are the dataset columns a policy reads back, so they must match the record
+# side's rig (scripts/b601/configs/cameras/zed_c270.yaml)
+
+defaults:
+  - b601_zed_only
+  - _self_
+
+cameras:
+  wrist_cam:
+    type: opencv
+    width: 640
+    height: 360
+    fps: 30                # the C270's own rate: connect() hard-fails on an unsupported one
+    fourcc: MJPG           # cv2's default mode cannot reach 30 fps here
+    color_mode: rgb
+    warmup_s: 3            # the C270 takes ~1.8 s to return its first frame after a mode change
+    backend: V4L2          # cv2's ANY can pick FFMPEG, which ignores fourcc, size and fps

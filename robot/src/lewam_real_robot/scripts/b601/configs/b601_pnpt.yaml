@@ -1,0 +1,16 @@
+# The prehensile counterpart of b601_pusht: the same T block and taped-down target
+# outline, but the block is grasped, lifted and set down on the outline instead of
+# being pushed there. Only the block's starting pose varies across the dataset.
+
+defaults:
+  - record_schema
+  - cameras: zed_c270
+  - _self_
+
+repo_id: ehalicki/b601_pusht_pick_and_place
+
+task: "Pick up the T block and place it on the target outline."
+repeat_task: true
+
+# How many episodes the dataset should end up with, across as many sessions as it takes.
+num_episodes: 200

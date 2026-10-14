@@ -1,0 +1,4 @@
+defaults:
+  - b601
+  - /embodiment@robot: b601_zed_and_wrist
+  - _self_

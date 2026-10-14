@@ -1,0 +1,98 @@
+defaults:
+  - vision: pooled
+  - _self_
+
+name: generic_vit_predictor
+
+scene_field: ???
+wrist_field: ???
+state_fields: ???        # one field name, or a list to stitch into one vector
+state_dim: ???
+action_dim: 7
+state_steps: ???
+state_raw_index: ???
+context_raw_index: ???
+future_raw_index: ???
+action_index: ???
+chunk_len: ???
+action_fps: ???
+video_fps: ???           # tubelet rate, not the raw frame rate
+
+model:
+  model_dim: 512
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+num_flow_steps: 4
+# restrict predict()-time integration to these predict streams (null = all). Only legal
+# when the arm's `attends:` lists make the omitted streams invisible to the kept ones
+# (the trunk refuses otherwise); the omitted clean streams then need no batch rows.
+inference_streams: null
+execute_len: ${algorithm.chunk_len}
+
+encoders:
+  state_enc:
+    type: chunk_mlp
+    in_dim: ${algorithm.state_dim}
+    in_steps: ${algorithm.state_steps}
+    out_dim: 512
+    out_steps: 1
+    hidden_dim: 1024
+    depth: 2
+    norm: layer
+
+conditioning:
+  scene_context:
+    from: ${algorithm.scene_field}
+    encoder: proj_scene
+    dim: 512
+    index: "-1..0"
+    raw_index: ${algorithm.context_raw_index}
+    fps: ${algorithm.video_fps}
+    block_size: 1
+  wrist_context:
+    from: ${algorithm.wrist_field}
+    encoder: proj_wrist
+    dim: 512
+    index: "-1..0"
+    raw_index: ${algorithm.context_raw_index}
+    fps: ${algorithm.video_fps}
+    block_size: 1
+  state_context:
+    from: ${algorithm.state_fields}
+    encoder: state_enc
+    dim: 512
+    index: "0"
+    raw_index: ${algorithm.state_raw_index}
+    fps: ${algorithm.action_fps}
+    grid: [1, 1]
+    block_size: 1
+  action_context:
+    from: action
+    role: action
+    via: null
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_history_index}
+    fps: ${algorithm.action_fps}
+
+predict:
+  action:
+    from: action
+    type: flow
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}
+    block_size: ${algorithm.chunk_len}
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out:
+      type: mlp
+      mlp_dim: 64
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

@@ -1,0 +1,34 @@
+# @package _global_
+defaults:
+  - override /dataset: b601_pnpt
+  - override /algorithm: diffusion_b601
+  - override /eval: holdout
+
+# `loss` IS the action loss here: a lerobot policy reports one unnamed term, and a
+# `best_metric` that does not exist silently disables best-checkpointing
+best_metric: loss
+best_mode: min
+
+experiment:
+  eval_every: 200
+  max_steps: 20000
+  batch_size: 256
+  # must live here: the trainer builds one optimizer from `experiment.optimizer`, so the
+  # policy's own `optimizer_lr` never reaches it
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-6
+    betas: [0.95, 0.999]
+    eps: 1.0e-8
+  ema_decay: 0.999
+
+subsample_streams:
+  "observation.images.*": {every: 3}
+
+# the policy crops internally at `crop_ratio`, so the dataset-level crop is off here.
+# `p: 0.0` rather than a deletion: this merges into the dataset's stream block
+dataset:
+  augment:
+    streams:
+      "observation.images.*":
+        random_crop: {p: 0.0}

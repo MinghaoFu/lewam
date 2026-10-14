@@ -1,0 +1,20 @@
+# An overlay, not a standalone arm: compose it after a selfwam arm, e.g.
+# defaults: [selfwam_b601, mot_common, _self_].
+#
+# True Mixture-of-Transformers trunk (Liang et al. 2024): every token stream names its expert, and each expert owns its own
+# QKV / output projection / QK-norm / MLP / adaRMS modulation in every block, while ONE
+# self-attention over the union of tokens -- under the arm's `attends:` mask -- is the
+# only place the experts meet. The state expert carries the observed latents and the
+# imagined futures (the world model); the action expert carries the clean executed
+# chunk and the policy's noisy chunk. An expert's weights then see another expert's loss
+# only through the keys/values its tokens contribute where the mask lets that expert
+# read them: the selfwam mask gives the world model the clean actions, and the policy
+# the contexts, and nothing else.
+#
+# Every token stream must be listed exactly once (the build refuses otherwise), so this
+# file spells out the selfwam stream set; an arm with a different set writes its own.
+model:
+  experts:
+    state: [scene_context, wrist_context, state_context,
+            state_future, scene_future, wrist_future]
+    action: [action_clean, action]

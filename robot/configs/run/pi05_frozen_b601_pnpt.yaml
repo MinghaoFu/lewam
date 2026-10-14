@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - override /dataset: b601_pnpt
+  - override /algorithm: pi05_frozen_b601
+  - override /eval: holdout
+
+# `loss` IS the action loss here: a lerobot policy reports one unnamed term, and a
+# `best_metric` that does not exist silently disables best-checkpointing
+best_metric: loss
+best_mode: min
+
+experiment:
+  eval_every: 200
+  max_steps: 20000
+  batch_size: auto
+  # must live here: the trainer builds one optimizer from `experiment.optimizer`, so the
+  # policy's own `optimizer_lr` never reaches it
+  optimizer:
+    lr: 2.5e-5
+    weight_decay: 1.0e-4
+
+subsample_streams:
+  "observation.images.*": {every: 3}

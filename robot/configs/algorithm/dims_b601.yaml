@@ -1,0 +1,30 @@
+scene_field: observation.images.zed_left
+wrist_field: observation.images.wrist_cam
+state_fields: observation.state
+
+state_dim: 7            # what the dataset's `slices:` leaves of it: torque only.
+                        # An arm overriding the slice to pos+torq must set this to 14
+
+action_fps: 30
+video_fps: 2.5          # latent-step rate: one raw frame per index step, 0.4s apart
+context_raw_index: "-12, 0"
+future_raw_index: "12, 24, 36"
+
+state_steps: 1
+state_raw_index: "0"
+
+# these three are one number, 36, written three ways: they must move together
+action_index: "0..35"
+action_history_index: "-36..-1"
+chunk_len: 36
+
+# chunk_len * action_dim, spelled out (interpolation cannot multiply); the `reshape`
+# encoders check the product at build time
+action_flat_dim: 252
+
+# must be a multiple of 8: the U-Net halves the time axis once per `down_dims` stage
+diffusion_horizon: 40
+# must match lerobot's own `action_delta_indices`, which measures the horizon from the
+# FIRST observation rather than from now: supplying 0..39 at n_obs_steps 2 instead of
+# -1..38 commands every action one tick early
+diffusion_action_index: "-1..38"

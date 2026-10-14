@@ -1,0 +1,6 @@
+type: rebot_b601_follower
+# must match the id the data was recorded under; unset resolves to None.json and the arm
+# recalibrates to a zero pose the training actions do not refer to
+id: b601_follower
+port: auto
+cameras: {}

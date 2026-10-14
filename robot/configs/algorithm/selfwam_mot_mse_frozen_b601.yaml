@@ -1,0 +1,11 @@
+defaults:
+  - selfwam_mse_b601
+  - mot_common
+  - _self_
+
+# the MoT MSE arm with the V-JEPA encoder frozen: identical streams, experts, losses and
+# dims; only the encoder stops training (and its encodings can then be cached, see the
+# run config's `cache_encodings`)
+encoders:
+  vjepa:
+    frozen: true

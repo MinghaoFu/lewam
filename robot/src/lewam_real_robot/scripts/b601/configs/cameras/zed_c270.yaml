@@ -1,0 +1,8 @@
+# Rig: the ZED-Mini plus the C270 wrist camera. Nothing of its own -- it is only
+# the list of cameras the rig has, each described in its own file, so a change to
+# either reaches every rig that includes it.
+
+defaults:
+  - zed
+  - c270
+  - _self_

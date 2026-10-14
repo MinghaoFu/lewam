@@ -1,0 +1,4 @@
+defaults:
+  - selfwam_mse_b601
+  - mot_common
+  - _self_

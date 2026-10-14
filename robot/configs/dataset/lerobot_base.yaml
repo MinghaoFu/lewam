@@ -1,0 +1,17 @@
+backend: lerobot
+repo_id: ???
+root: null
+revision: null
+episodes: null
+validation_split: 0.1
+# training and validation must draw with the same seed or their splits overlap
+validation_split_seed: 0
+columns: {}
+slices: {}
+image_size: null      # [H, W]
+return_uint8: true
+drop_boundary: true
+augment: null
+
+conditioning: ${algorithm.conditioning}
+predict: ${algorithm.predict}

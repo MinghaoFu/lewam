@@ -1,0 +1,27 @@
+defaults:
+  - lerobot_policy_common
+  - dims_b601
+  - _self_
+
+policy:
+  type: pi05
+  chunk_size: ${algorithm.chunk_len}
+  n_action_steps: ${algorithm.chunk_len}
+  n_obs_steps: 1
+  # the state reaches the model only through the prompt, discretized from the
+  # NORMALIZED values -- `normalize:` must stay on (see lerobot_policy_common)
+  # every key here is splatted into lerobot's PI05Config, so an unset field must be
+  # ABSENT, not null -- `dtype: null` would override the dataclass default with None.
+  # Undeclared means the CLI needs `+algorithm.policy.pretrained_path=...` under struct mode
+  # to finetune a released checkpoint: +pretrained_path: <hub id or local dir>
+
+conditioning:
+  observation.images.zed_left:
+    index: "0"
+    fps: ${algorithm.action_fps}
+  observation.images.wrist_cam:
+    index: "0"
+    fps: ${algorithm.action_fps}
+  observation.state:
+    index: "0"
+    fps: ${algorithm.action_fps}

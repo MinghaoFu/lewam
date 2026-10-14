@@ -1,0 +1,30 @@
+defaults:
+  - lerobot_policy_common
+  - dims_b601
+  - _self_
+
+policy:
+  type: diffusion
+  horizon: ${algorithm.diffusion_horizon}
+  n_action_steps: ${algorithm.chunk_len}
+  n_obs_steps: 2
+  resize_shape: [256, 256]
+  crop_ratio: 0.95
+  # widened from the lerobot default so this baseline sits in the same ~130M-param
+  # range as the LeWAM arms, rather than being undersized relative to them
+  down_dims: [336, 672, 1344]
+
+conditioning:
+  observation.images.zed_left:
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+  observation.images.wrist_cam:
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+  observation.state:
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+
+predict:
+  action:
+    index: ${algorithm.diffusion_action_index}

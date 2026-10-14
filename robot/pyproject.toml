@@ -1,0 +1,46 @@
+[project]
+name = "lewam-real-robot"
+version = "0.1.0"
+description = "LeWAM: latent world-action model for robot learning"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "accelerate",
+    "hydra-core",
+    "omegaconf",
+    "numpy",
+    "scipy",
+    "rotary-embedding-torch>=0.9.1",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb", "pandas", "moviepy"]
+# the B601 fork of lerobot, pinned to the commit the paper used
+lerobot = ["lerobot[dataset] @ git+https://github.com/ErykHalicki/lerobot@ea9eaf107ac9103d7528d972654f230253853d21"]
+# Diffusion pulls in `diffusers`, which a base lerobot install does not carry
+baselines = ["lewam-real-robot[lerobot]", "lerobot[diffusion] @ git+https://github.com/ErykHalicki/lerobot@ea9eaf107ac9103d7528d972654f230253853d21", "lerobot[pi] @ git+https://github.com/ErykHalicki/lerobot@ea9eaf107ac9103d7528d972654f230253853d21"]
+b601 = ["lewam-real-robot[lerobot]", "lerobot[rebot,hardware,zed] @ git+https://github.com/ErykHalicki/lerobot@ea9eaf107ac9103d7528d972654f230253853d21"]
+# the vendored external/vjepa2 code is read off sys.path rather than installed, so its
+# requirements never reach a resolver. Capped below 1.1 like lerobot's own pin:
+# the vendored code imports the deprecated `timm.models.layers`.
+vjepa = ["timm>=1.0,<1.1"]
+serve = ["lewam-real-robot[wandb]", "opencv-python-headless"]
+all = ["lewam-real-robot[lerobot,wandb,b601,serve,vjepa,baselines]"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lewam_real_robot"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+exclude = [
+    "**/__pycache__",
+    "external",
+]

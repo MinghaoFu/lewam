@@ -1,0 +1,24 @@
+defaults:
+  - selfwam_b601
+  - _self_
+
+# world-model path by regression: learned query tokens in, absolute encoded target out
+# (type: mse), flow kept on the action only. Targets are live (no detach), so SIGReg is
+# what keeps the unfrozen encoder's space from collapsing.
+predict:
+  state_future: {type: mse}
+  scene_future: {type: mse}
+  wrist_future: {type: mse}
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: prediction, stream: state_future, weight: 1.0}
+  - {type: prediction, stream: scene_future, weight: 1.0}
+  - {type: prediction, stream: wrist_future, weight: 1.0}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [scene_context, scene_future]}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [wrist_context, wrist_future]}
+  # observed / eval only (weight 0.0)
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

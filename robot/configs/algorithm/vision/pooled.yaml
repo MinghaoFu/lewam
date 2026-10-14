@@ -1,0 +1,57 @@
+# @package _global_.algorithm
+
+# Selecting this group REQUIRES `cache_encodings: null` in the run config: the cache
+# stores a frozen root encoder's output, and this backbone moves.
+
+encoders:
+  # The backbone belongs to this group, not flow_common: an arm swapping it must be able to
+  # not declare it, and a config cannot delete an inherited key.
+  vjepa:
+    type: vjepa2
+    arch: vit_base
+    checkpoint: pretrained
+    crop_size: 256
+    # one raw frame per index step, encoded on its own in the batch dimension: encoder
+    # attention never crosses time, so `raw_index` strings name single frames
+    frames_per_step: 1
+    per_frame: true
+    frozen: false
+  pool_scene:
+    type: attentive_pool
+    input: vjepa
+    in_dim: 768
+    out_dim: 512
+    tokens_per_step: 256   # the vjepa grid area, (crop_size / 16)^2
+    num_queries: 1         # summary tokens OUT per step; every video stream's grid must match
+  pool_wrist:
+    type: attentive_pool
+    input: vjepa
+    in_dim: 768
+    out_dim: 512
+    tokens_per_step: 256
+    num_queries: 1
+  proj_scene:
+    type: mlp
+    input: pool_scene
+    in_dim: 512
+    hidden_dim: 2048
+    out_dim: 512
+    norm: batch
+  proj_wrist:
+    type: mlp
+    input: pool_wrist
+    in_dim: 512
+    hidden_dim: 2048
+    out_dim: 512
+    norm: batch
+
+conditioning:
+  scene_context: {grid: [1, 1]}
+  wrist_context: {grid: [1, 1]}
+
+model:
+  # no `width` axis: with one query per step nothing would populate it, and `period: auto`
+  # cannot fit an empty axis
+  rope:
+    time:  {share: 0.6, period: auto}
+    seq:   {share: 0.2, period: auto}

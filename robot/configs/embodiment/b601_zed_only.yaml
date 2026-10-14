@@ -1,0 +1,9 @@
+defaults:
+  - b601
+  - _self_
+
+# camera keys are the dataset columns a policy reads back, so they must match the record
+# side's rig. Per-eye resolution must be one the ZED supports; one capture feeds both eyes
+cameras:
+  zed_left:  {type: zed, side: left,  width: 672, height: 376, fps: 30}
+  zed_right: {type: zed, side: right, width: 672, height: 376, fps: 30}

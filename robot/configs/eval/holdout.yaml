@@ -1,0 +1,7 @@
+backend: offline
+dataset: ${dataset}
+
+batch_size: 32
+max_batches: 50
+num_workers: 4
+seed: 0              # fixes the subset and the loss terms' noise draw across checkpoints

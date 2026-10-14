@@ -1,0 +1,68 @@
+# names no embodiment: select a config that does (eval=b601_zed_only, b601_zed_and_wrist),
+# and it must be the rig the policy's dataset was recorded on
+backend: lerobot
+episodes: 30
+fps: 30                # must match the fps the policy was trained at
+max_episode_steps: 5400
+execute_len: 18
+num_flow_steps: 10
+cfg_scale: null
+image_size: null       # [H, W]; MUST match the dataset config
+columns: {}
+slices: {}
+# the instruction a language-conditioned policy (pi0, pi05) reads; match the string the
+# policy's dataset was recorded with. Ignored by policies that take no language
+task: null
+record_dataset: true
+record_root: null
+record_task: null
+# a rollout dir to continue after an interruption: its scored episodes count toward
+# `episodes`, new ones append to its dataset, its wandb run is reopened. Overrides record_root
+resume: null
+
+# lerobot's libsvtav1/AV1 default is far more CPU-expensive on the Pi; streaming h264
+# keeps save_episode near-instant
+record_vcodec: h264
+record_streaming_encoding: true
+record_encoder_threads: null
+record_image_format: jpg          # unused while streaming encoding is on
+record_jpeg_quality: 90
+record_image_writer_threads: null
+record_image_writer_processes: 0
+
+# runs in ChunkDriver alone: `loss/int_action` scores the RAW chunk while the robot
+# executes a smoothed one -- a distortion the metric cannot price. Enable only behind a
+# paired A/B; prefer replanning more often (`execute_len`) to smoothing.
+action_filter:
+  enabled: false
+  window: 21           # clamped to an odd size within [5, 2*chunk]
+  poly_order: 3        # clamped below the effective window
+
+home_between_episodes: true
+quiet: false
+
+# A robot that drops out mid-episode (a CAN bridge that stops answering past the arm's
+# own can_error_grace_s) is reconnected this many times, the partial episode discarded
+# and redone. 0 ends the session on the first drop
+robot_recovery_attempts: 3
+robot_recovery_delay_s: 2.0
+profile_log: null
+
+stream_cameras: true
+stream_port: 8090
+stream_fps: 15
+stream_height: 360
+stream_quality: 85
+
+stream_metrics: true
+stream_metrics_fps: 10
+stream_metrics_window: 300
+
+stream_latency: true
+
+server: null           # e.g. <gpu-host>:8080
+run: null              # <entity>/<project>/<run_id> to serve; defaults to load=
+server_timeout: 120
+# training frames are h264 CRF 18: a lower quality puts JPEG artifacts on the robot's
+# observations that the training distribution never contained
+jpeg_quality: 95

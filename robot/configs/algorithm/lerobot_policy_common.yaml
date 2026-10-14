@@ -1,0 +1,23 @@
+# the dataset must keep `normalize:` on: the policy carries no Normalize layers
+name: lerobot_policy
+
+chunk_len: ???
+execute_len: ${algorithm.chunk_len}
+action_fps: ???
+
+dataset:
+  repo_id: ${dataset.repo_id}
+  root: ${dataset.root}
+  revision: ${dataset.revision}
+  image_size: ${dataset.image_size}
+  # the policy sizes its input layers from the dataset metadata, so it must be told
+  # anything the wrapper does to a column's width on the way through
+  slices: ${dataset.slices}
+
+predict:
+  action:
+    from: action
+    role: action
+    dim: 7
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}

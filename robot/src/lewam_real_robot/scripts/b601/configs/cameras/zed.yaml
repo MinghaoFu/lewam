@@ -1,0 +1,31 @@
+# The ZED-Mini, left and right eyes as two dataset cameras. One physical capture
+# is shared between them (see ZedCameraConfig), so this costs one USB camera's
+# bandwidth, not two.
+#
+# Files here describe one camera each; a rig with several combines them in its
+# own defaults list (see zed_c270.yaml). A dataset config names the rig it was
+# recorded on (`- cameras: zed`), so the rig is described once no matter how
+# many datasets use it.
+#
+# `serial_number: auto` resolves through the ZED SDK at startup, and both eyes
+# get the same camera. Pin it if a second ZED is ever attached.
+#
+# Per-eye resolution must be one of 2208x1242, 1920x1080, 1280x720, 672x376, and
+# fps one of 15/30/60/100. 672x376 keeps the decode/encode load within the Pi's
+# CPU budget at 30fps.
+
+zed_left:
+  type: zed
+  side: left
+  serial_number: auto
+  width: 672
+  height: 376
+  fps: 30
+
+zed_right:
+  type: zed
+  side: right
+  serial_number: auto
+  width: 672
+  height: 376
+  fps: 30

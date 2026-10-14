@@ -1,0 +1,33 @@
+defaults:
+  - lerobot_base
+  - _self_
+
+# the real non-prehensile PushT. Distinct from b601_pnpt.yaml's pick-and-place
+repo_id: ehalicki/b601_pusht
+
+# one square size for every camera: lerobot's Diffusion refuses mismatched image shapes
+image_size: [256, 256]
+
+# torque only, never joint positions: with positions in the state, a served policy
+# follows proprioception over vision. An arm that wants the 14-d pos+torq vector
+# overrides this in its run config.
+# Must be one flat column, not a `.pos`/`.torq` group: a lerobot policy sizes its input
+# layers from the dataset metadata and cannot see a group. Drops `.vel`, 21 dims in, 7 out
+slices:
+  observation.state: "*.torq"
+
+normalize:
+  keys: [action, observation.state]
+  method: percentile
+  percentiles: [1, 99]
+
+augment:
+  seed: null
+  streams:
+    "observation.images.*":
+      random_crop:    {scale: [0.875, 1.0]}
+      rotation:       {degrees: 7.5, p: 0.5}
+      color_jitter:   {brightness: 0.2, contrast: 0.2, gamma: 0.2, hue: 0.02}
+      gaussian_noise: {std: 0.005}
+    # normalized units: augmentation runs outside NormalizedSource
+    observation.state: {gaussian_noise: {std: 0.005}}

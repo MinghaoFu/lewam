@@ -1,0 +1,15 @@
+# Logitech C270 on the wrist mount, recorded as `observation.images.wrist_cam`.
+# `index_or_path: auto` picks the lowest free USB capture node that isn't the ZED's; pin
+# a /dev/v4l/by-id/... path if another webcam is attached. MJPG and the V4L2 backend are
+# needed for the requested fps to apply, and warmup_s covers the C270's blank first frames.
+
+wrist_cam:
+  type: opencv
+  index_or_path: auto
+  width: 640
+  height: 360
+  fps: 30
+  fourcc: MJPG
+  backend: V4L2
+  color_mode: rgb
+  warmup_s: 3

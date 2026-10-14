@@ -1,0 +1,27 @@
+tasks: [training, validation]
+batch_size: auto                # an int, or `auto` to search VRAM headroom (utils/auto_batch.py)
+vram_target_fraction: 0.85
+effective_batch: 256            # null: one optimizer step per micro-batch
+gradient_checkpointing: false
+max_steps: 15000
+num_workers: 8
+pin_memory: true
+# where `dataset.augment` runs: `device` applies it per sample to each micro-batch on the
+# accelerator (~ms; the b601 image ops cost ~200 ms per sample on a CPU worker thread and
+# stall the loader for tens of seconds under contention), `workers` in the DataLoader
+augment_on: device
+log_every: 1
+mixed_precision: bf16           # "no" | fp16 | bf16
+recompute_norm_stats: false
+
+lr_warmup_steps: 500
+ema_decay: null
+
+save_every: 200            # 0 saves only at the end
+save_intermittent: false
+eval_every: 200            # 0 disables
+
+optimizer:
+  name: adamw
+  lr: 5.0e-5
+  weight_decay: 1.0e-3

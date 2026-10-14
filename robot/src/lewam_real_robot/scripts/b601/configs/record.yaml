@@ -1,0 +1,14 @@
+# Default config: just RecordConfig's own defaults, nothing dataset-specific.
+# Used when no --config-name is given, e.g. for one-off ad hoc CLI overrides.
+# For a real dataset, prefer a dedicated config file (e.g. b601_pnpt.yaml)
+# so the recording settings stay fixed across sessions instead of being
+# re-typed as overrides every time.
+#
+# No cameras by default. Declare them in a dataset config, or pass them inline
+# (quoted, `++` since these keys aren't in the default config):
+#   ./src/lewam_real_robot/scripts/b601/record.sh repo_id=<id> \
+#       '++cameras={front: {type: opencv, index_or_path: auto, fps: 30}}'
+
+defaults:
+  - record_schema
+  - _self_

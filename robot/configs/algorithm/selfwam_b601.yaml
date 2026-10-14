@@ -1,0 +1,4 @@
+defaults:
+  - flow_wam_b601
+  - selfwam_common
+  - _self_

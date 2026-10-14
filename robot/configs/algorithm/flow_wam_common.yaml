@@ -1,0 +1,73 @@
+defaults:
+  - flow_common
+  - _self_
+
+# future-latent token_out is 1024: token_out mlp_dim bounds the rank of the prediction,
+# so a narrower head confines the 512-d futures to a low-rank subspace
+predict:
+  state_future:
+    from: ${algorithm.state_fields}
+    type: flow
+    dim: ${algorithm.state_dim}
+    # dense: one future state per raw action step (action rate), unlike the video
+    # futures at the tubelet rate
+    index: "1..36"
+    fps: ${algorithm.action_fps}
+    block_size: 1
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out:
+      type: mlp
+      mlp_dim: 64
+  scene_future:
+    from: ${algorithm.scene_field}
+    encoder: proj_scene
+    type: flow
+    dim: 512
+    index: "1..3"
+    raw_index: ${algorithm.future_raw_index}
+    fps: ${algorithm.video_fps}
+    # grid must match the pool's `num_queries`: a predicted frame spans that many tokens
+    grid: [1, 1]
+    block_size: 1
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out:
+      type: mlp
+      mlp_dim: 1024
+  wrist_future:
+    from: ${algorithm.wrist_field}
+    encoder: proj_wrist
+    type: flow
+    dim: 512
+    index: "1..3"
+    raw_index: ${algorithm.future_raw_index}
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+    block_size: 1
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out:
+      type: mlp
+      mlp_dim: 1024
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: flow, stream: state_future, weight: 1.0}
+  - {type: flow, stream: scene_future, weight: 1.0}
+  - {type: flow, stream: wrist_future, weight: 1.0}
+  # sigreg on the pooled output both context and future read -- the space the flow lives in
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [scene_context, scene_future]}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [wrist_context, wrist_future]}
+  # observed / eval only (weight 0.0)
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: state_future, weight: 0.0, norm: mse}
+  - {type: integration, stream: scene_future, weight: 0.0, norm: mse}
+  - {type: integration, stream: wrist_future, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}
+  - {type: integration, stream: state_future, weight: 0.0, norm: mse, units: raw}

@@ -1,0 +1,41 @@
+# An overlay, not a standalone arm: compose it after the flow_wam arm whose futures it
+# action-conditions, e.g. defaults: [flow_wam_b601, selfwam_common, _self_].
+#
+# SelfWAM-style asymmetric attention (arXiv 2608.00725): a clean, never-noised copy of
+# the executed action chunk that ONLY the future streams may read. Futures become an
+# action-conditioned world model (queryable with candidate actions for planning); the
+# action stream's computation graph is identical to action-only inference. The context
+# streams must not read action_clean or any future stream, or the policy would reach the
+# demonstrated chunk transitively -- attention.no_path makes the build fail on any such
+# path.
+
+conditioning:
+  action_clean:
+    from: action
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}
+    attends: [scene_context, wrist_context, state_context]
+  scene_context:
+    attends: [scene_context, wrist_context, state_context]
+  wrist_context:
+    attends: [scene_context, wrist_context, state_context]
+  state_context:
+    attends: [scene_context, wrist_context, state_context]
+
+predict:
+  action:
+    attends: [scene_context, wrist_context, state_context]
+  state_future:
+    attends: [scene_context, wrist_context, state_context,
+              state_future, scene_future, wrist_future, action_clean]
+  scene_future:
+    attends: [scene_context, wrist_context, state_context,
+              state_future, scene_future, wrist_future, action_clean]
+  wrist_future:
+    attends: [scene_context, wrist_context, state_context,
+              state_future, scene_future, wrist_future, action_clean]
+
+model:
+  attention:
+    no_path: [[action_clean, action]]

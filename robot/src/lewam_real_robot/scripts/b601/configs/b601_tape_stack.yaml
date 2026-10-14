@@ -1,0 +1,16 @@
+# Non-prehensile: the gripper stays closed and pushes with the closed fingers. The
+# target outline is taped down and stays put across the dataset; the block's starting
+# pose is what varies.
+
+defaults:
+  - record_schema
+  - cameras: zed_c270
+  - _self_
+
+repo_id: ehalicki/b601_tape_stack
+
+task: "Stack the green tape roll on the white tape roll"
+repeat_task: true
+
+# How many episodes the dataset should end up with, across as many sessions as it takes.
+num_episodes: 100
