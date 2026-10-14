@@ -9,10 +9,10 @@
 </p>
 
 <p align="center">
-  <a href="https://le-wam.github.io/">Website</a> &middot;
-  <a href="https://arxiv.org/abs/2610.12818">Paper</a> &middot;
-  <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-checkpoint">Checkpoints</a> &middot;
-  <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-data">Datasets</a>
+  <a href="https://arxiv.org/abs/2610.12818"><img src="https://img.shields.io/badge/arXiv-2610.12818-B31B1B?logo=arxiv&amp;logoColor=white" alt="arXiv: 2610.12818"></a>
+  <a href="https://le-wam.github.io/"><img src="https://img.shields.io/badge/Website-le--wam.github.io-2878B5" alt="Website: le-wam.github.io"></a>
+  <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-data"><img src="https://img.shields.io/badge/Dataset-LeWAM-FFD21E?logo=huggingface&amp;logoColor=FFD21E" alt="Dataset: LeWAM"></a>
+  <a href="https://huggingface.co/collections/LeWAM/lewam-simulation-checkpoint"><img src="https://img.shields.io/badge/Models-LeWAM-FFD21E?logo=huggingface&amp;logoColor=FFD21E" alt="Models: LeWAM"></a>
 </p>
 
 <p align="center">
