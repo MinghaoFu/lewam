@@ -23,7 +23,7 @@ class LeWAMPlanner(LeWAMPolicy):
     """
 
     def __init__(
-        self, model: LeWAM, cfg: dict, *args, plan_mode: str = "best_of_k", num_proposals: int = 32,
+        self, model: LeWAM, cfg: dict, *args, plan_mode: str = "grad", num_proposals: int = 32,
         rollout_steps: int = 1, exec_actions_per_plan: int = 0, plan_random_candidates: bool = False,
         plan_goal_time: bool = True, grad_steps: int = 5, grad_lr: float = 0.05, grad_clip: float = 10.0,
         grad_tr: float = 0.0, grad_action_clip: float = 3.0, grad_all_k: bool = False, steer_steps: int = 20,

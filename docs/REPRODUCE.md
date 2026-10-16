@@ -65,6 +65,10 @@ python scripts/eval_lewam.py --config-name <task> policy=<run_name> [key=value .
 `transport`, `toolhang`. Every option is declared in `configs/eval/base.yaml`.
 <!-- TODO: when we add more configs, be sure to update this -->
 
+Gradient planning is the default: `eval.mode=lewam_plan eval.plan_mode=grad`, with five Adam updates
+per replan. Set `eval.mode=lewam_policy` for direct policy execution. `eval.exec_actions=5` controls
+the number of environment actions executed before replanning.
+
 Results and videos are written to `$STABLEWM_HOME/eval/<mode>/<run_name>/`. The paper reports 50 episodes for
 each of the seeds 42, 0 and 1 (`seed=...`).
 <!-- TODO: we might report more in the arxiv version or after rebuttal, so this might change-->
@@ -75,7 +79,7 @@ each of the seeds 42, 0 and 1 (`seed=...`).
 |---|---|
 | reactive policy | `eval.mode=lewam_policy` |
 | best-of-K | `eval.mode=lewam_plan eval.plan_mode=best_of_k` |
-| gradient planner | `eval.mode=lewam_plan eval.plan_mode=grad eval.grad_all_k=true eval.grad_tr=0.01` |
+| gradient planner | `eval.mode=lewam_plan eval.plan_mode=grad eval.grad_all_k=true eval.grad_tr=0.01 eval.grad_steps=5 eval.exec_actions=5` |
 
 Planners score 32 proposals (`eval.num_proposals`) over a horizon of the goal offset divided by the frameskip,
 and execute one chunk (frameskip actions, `eval.exec_actions`) before replanning.
@@ -102,7 +106,8 @@ For example, the gradient planner with our Push-T checkpoint:
 
 ```bash
 python scripts/eval_lewam.py --config-name pusht policy=lewam-pusht seed=42 \
-    eval.mode=lewam_plan eval.plan_mode=grad eval.grad_all_k=true eval.grad_tr=0.01
+    eval.mode=lewam_plan eval.plan_mode=grad eval.grad_all_k=true eval.grad_tr=0.01 \
+    eval.grad_steps=5 eval.exec_actions=5
 ```
 
 ## Results of the released checkpoints

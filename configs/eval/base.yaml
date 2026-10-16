@@ -26,7 +26,7 @@ eval:
   random_start: true        # false: start at frame 0 of the drawn episodes
   min_episode_len: 0        # draw only from episodes at least this long; 0 = no filter
 
-  mode: lewam_policy        # lewam_policy | lewam_plan
+  mode: lewam_plan          # lewam_plan | lewam_policy
   h0: null                  # goal horizon at the start, in frameskip units; null = from the goal offset
   exec_actions: 0           # actions executed per replan; 0 = frameskip
 

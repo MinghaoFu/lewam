@@ -3,11 +3,11 @@ Goal-reaching and task-completion of a LeWAM checkpoint.
 
 Runs are configured under configs/eval/base.yaml and the respective task config, but can be overridden on the command line
   python scripts/eval_lewam.py --config-name pusht policy=<run_name>
-  python scripts/eval_lewam.py --config-name pusht policy=<run_name> eval.mode=lewam_plan eval.plan_mode=grad \
-      eval.grad_all_k=true eval.grad_tr=0.01
+  python scripts/eval_lewam.py --config-name pusht policy=<run_name> eval.mode=lewam_policy
 
-eval.mode=lewam_policy runs LeWAM reactively
-eval.mode=lewam_plan plans through its dynamics with eval.plan_mode
+Gradient planning is the default, with 5 Adam updates per replan.
+eval.mode=lewam_policy explicitly selects direct policy execution.
+eval.mode=lewam_plan plans through the dynamics with eval.plan_mode.
 
 Check the README for more details on eval protocols and modes
 """

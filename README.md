@@ -70,13 +70,16 @@ Override options with `key=value`, such as `seed=0` or `train.w_reg=0`. Checkpoi
 
 Evaluation configs live under `configs/eval/`. Set `policy` to the training run name.
 
-**Visual Planning:**
+**Gradient-based visual planning (default):**
 
 ```bash
 python scripts/eval_lewam.py --config-name pusht \
     policy=gr_pusht eval.mode=lewam_plan \
-    eval.plan_mode=grad eval.grad_all_k=true eval.grad_tr=0.01
+    eval.plan_mode=grad eval.grad_all_k=true eval.grad_tr=0.01 \
+    eval.grad_steps=5 eval.exec_actions=5
 ```
+
+Gradient planning runs by default with five Adam updates per replan. Set `eval.mode=lewam_policy` for direct policy execution.
 
 **Behavior Cloning:**
 
@@ -91,7 +94,7 @@ See [docs/REPRODUCE.md](docs/REPRODUCE.md) for our checkpoints and the paper's e
 
 ## Main results
 
-Goal-reaching visual planning: mean success rate across three seeds.
+Goal-reaching success with gradient-based planning, averaged over three seeds.
 
 | Task | SR (%) | Checkpoint | Dataset |
 |---|---:|---|---|
