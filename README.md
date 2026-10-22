@@ -109,8 +109,6 @@ Goal-reaching success with gradient-based planning, averaged over three seeds.
 | Transport | 83.3 | [Checkpoint](https://huggingface.co/LeWAM/lewam-transport) | [Data](https://huggingface.co/datasets/LeWAM/lewam-transport) |
 | DrawerCleanup | 80.7 | [Checkpoint](https://huggingface.co/LeWAM/lewam-drawer) | [Data](https://huggingface.co/datasets/LeWAM/lewam-drawer) |
 
-Reacher uses the original LeWM dataset. See [docs/REPRODUCE.md](docs/REPRODUCE.md) for download and evaluation commands.
-
 ## Acknowledgments
 
 We thank [LeWorldModel](https://github.com/lucas-maes/le-wm) and [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) for their open-source contributions.
