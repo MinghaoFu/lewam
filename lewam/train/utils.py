@@ -2,12 +2,11 @@
 
 import os
 import shutil
+import torch
 from pathlib import Path
 
-import torch
-
-_IMG_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-_IMG_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 def durable_sync(files, dst_dir):

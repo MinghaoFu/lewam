@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from lewam.models.lewam import LeWAM, build_model
 from lewam.models.module import SIGReg
 from lewam.train.datasets import TrajectoryDataset, get_start_indices, load_frames, read_actions
-from lewam.train.utils import _IMG_MEAN, _IMG_STD, durable_sync
+from lewam.train.utils import IMAGENET_MEAN, IMAGENET_STD, durable_sync
 
 torch.backends.cudnn.benchmark = True
 
@@ -177,7 +177,7 @@ def run_batch(
         goal_views = goal_frames[:, model.goal_view_indices] if goal_frames.dim() == 5 else goal_frames[:, None]
         pixels.append(goal_views.reshape(B * n_goal_views, *image_shape))
 
-    pixels = (torch.cat(pixels).float() / 255.0 - _IMG_MEAN.to(device)) / _IMG_STD.to(device)
+    pixels = (torch.cat(pixels).float() / 255.0 - IMAGENET_MEAN.to(device)) / IMAGENET_STD.to(device)
     if train and train_cfg.encoder_checkpoint_chunks > 1:
         z = torch.cat([checkpoint(model.encode, chunk, use_reentrant=False)
                        for chunk in pixels.chunk(train_cfg.encoder_checkpoint_chunks)])
