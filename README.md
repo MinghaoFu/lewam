@@ -112,3 +112,16 @@ Goal-reaching success with gradient-based planning, averaged over three seeds.
 ## Acknowledgments
 
 We thank [LeWorldModel](https://github.com/lucas-maes/le-wm) and [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) for their open-source contributions.
+
+## Citation
+
+```bibtex
+@article{fu2026lewam,
+  title={LeWAM: End-to-End World and Action Modeling with JEPAs},
+  author={Fu, Minghao and Siebert, Tavis and Halicki, Eryk and Balestriero, Randall},
+  journal={arXiv preprint arXiv:2610.12818},
+  year={2026}
+}
+```
+
+Please cite arXiv:2610.12818 for this work. It is a different paper from a concurrent work with a similar name, "LeWAM: A JEPA World Action Model with Diffusion-Steering-Based MPC" (arXiv:2610.12407).
