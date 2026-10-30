@@ -23,6 +23,8 @@
 
 **Installation:**
 ```bash
+git clone https://github.com/MinghaoFu/lewam.git
+cd lewam
 bash install.sh lewam cu128
 conda activate lewam
 export STABLEWM_HOME=/path/to/storage
